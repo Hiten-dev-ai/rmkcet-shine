@@ -1,0 +1,2119 @@
+{% extends "base.html" %}
+{% block title %}Admin Panel - {{ app_name }}{% endblock %}
+{% block page_title %}
+{% set header_tab = request.args.get('tab', default_tab or 'reports') %}
+{% set role_name = (current_role or '')|lower %}
+{% if role_name == 'admin' %}
+{% set panel_label = 'Admin Panel' %}
+{% elif role_name == 'principal' %}
+{% set panel_label = 'Principal Panel' %}
+{% elif role_name in ['hod', 'chief_admin'] %}
+{% set panel_label = 'HOD Panel' %}
+{% elif role_name == 'deo' %}
+{% set panel_label = 'DEO Panel' %}
+{% else %}
+{% set panel_label = 'Admin Panel' %}
+{% endif %}
+
+{% if is_system_admin or is_principal %}
+  {% if header_tab == 'reports' %}
+    {% if report_year_level and report_department %}
+<a href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department) }}" class="btn btn-outline btn-sm" style="margin-right:8px;"><i class="fas fa-arrow-left"></i></a>
+    {% elif report_department and not report_year_level %}
+<a href="{{ url_for(panel_endpoint, tab='reports') }}" class="btn btn-outline btn-sm" style="margin-right:8px;"><i class="fas fa-arrow-left"></i></a>
+    {% endif %}
+  {% elif header_tab == 'activity' %}
+    {% if activity_selection_ready %}
+<a href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=act_year_level) }}" class="btn btn-outline btn-sm" style="margin-right:8px;"><i class="fas fa-arrow-left"></i></a>
+    {% elif activity_show_semester and act_department and act_year_level %}
+<a href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department) }}" class="btn btn-outline btn-sm" style="margin-right:8px;"><i class="fas fa-arrow-left"></i></a>
+    {% elif activity_show_year and act_department %}
+<a href="{{ url_for(panel_endpoint, tab='activity') }}" class="btn btn-outline btn-sm" style="margin-right:8px;"><i class="fas fa-arrow-left"></i></a>
+    {% endif %}
+  {% endif %}
+{% endif %}
+
+{{ panel_label }}
+{% endblock %}
+
+{% block content %}
+{% set panel_endpoint = panel_endpoint or role_panel_endpoint or 'admin' %}
+{% set current_tab = request.args.get('tab', default_tab or 'reports') %}
+<div id="adminScriptData"
+  data-current-tab="{{ request.args.get('tab', default_tab or 'reports') }}"
+  data-reset-users='{{ users|tojson|forceescape }}'
+  style="display:none;"></div>
+
+<!-- ==================== USERS TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'users' %}active{% endif %}" id="tab-users">
+  {% if current_tab == 'users' %}
+  <!-- ============ METRICS (Users Tab Only) ============ -->
+  <div class="metrics-grid mb-3">
+    <div class="metric-card">
+      <div class="metric-label">Total Users</div>
+      <div class="metric-value">{{ users|length }}</div>
+      <div class="metric-icon"><i class="fas fa-users"></i></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Counselors</div>
+      <div class="metric-value">{{ counselor_count }}</div>
+      <div class="metric-icon"><i class="fas fa-chalkboard-teacher"></i></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Active Sessions</div>
+      <div class="metric-value">{{ session_count }}</div>
+      <div class="metric-icon"><i class="fas fa-signal"></i></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Messages Sent</div>
+      <div class="metric-value">{{ msg_stats.total }}</div>
+      <div class="metric-icon"><i class="fas fa-paper-plane"></i></div>
+    </div>
+  </div>
+  <!-- Create User -->
+  <div class="card mb-3" id="registerUserCard" style="margin-top:18px;">
+    <div class="card-title"><i class="fas fa-user-plus"></i> Register New User</div>
+    <form method="POST" action="{{ url_for('api_create_user') }}" enctype="multipart/form-data">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Full Name</label>
+          <input type="text" class="form-control" name="name" required placeholder="Dr. John Doe">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" class="form-control" name="email" required placeholder="john@rmkcet.ac.in">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="createUserPassword" name="password" required placeholder="Minimum 6 characters">
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('createUserPassword', 'iconCreateUserPassword')" aria-label="Show or hide password">
+              <i id="iconCreateUserPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="createUserConfirmPassword" name="confirm_password" required placeholder="Re-enter password">
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('createUserConfirmPassword', 'iconCreateUserConfirmPassword')" aria-label="Show or hide confirm password">
+              <i id="iconCreateUserConfirmPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select class="form-control" name="role" id="createUserRole" onchange="toggleCreateUserFields()">
+            <option value="counselor">Counselor</option>
+            <option value="hod">HOD</option>
+            <option value="deo">DEO</option>
+            {% if is_system_admin %}
+            <option value="principal">Principal</option>
+            {% endif %}
+            {% if is_system_admin %}
+            <option value="admin">System Admin</option>
+            {% endif %}
+          </select>
+        </div>
+      </div>
+      <div class="form-group" id="createUserChiefScopeWrap" style="display:none;"></div>
+      <div class="form-row" id="createUserCounselorRow">
+        <div class="form-group">
+          <label class="form-label">Department (Counselor/HOD/DEO)</label>
+          <select class="form-control" name="department" id="createUserDepartment">
+            <option value="">-- Select --</option>
+            {% for d in departments %}
+            {% if d.is_active %}
+            <option value="{{ d.code }}">{{ d.code }} - {{ d.name }}</option>
+            {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Year (Counselor/HOD/DEO)</label>
+          <select class="form-control" name="year_level" id="createUserYearLevel">
+            <option value="1" selected>1st Year</option>
+            <option value="2">2nd Year</option>
+            <option value="3">3rd Year</option>
+            <option value="4">4th Year</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row" id="createUserCounselorCapacityRow">
+        <div class="form-group">
+          <label class="form-label">Max Students</label>
+          <input type="number" class="form-control" name="max_students" id="createUserMaxStudents" value="30" min="1" max="200">
+        </div>
+      </div>
+      <div class="form-check" id="createUserUploadPermissionWrap">
+        <input type="checkbox" name="can_upload_students" id="canUpload" checked>
+        <label for="canUpload">Allow counselor to upload their own student list</label>
+      </div>
+      <div class="form-group" id="createUserStudentUploadWrap">
+        <label class="form-label">Upload Student List (Optional — assign students now)</label>
+        <div class="file-input-wrapper">
+          <i class="fas fa-cloud-upload-alt"></i>
+          <div class="file-text">Drop Excel file here or click to browse</div>
+          <div class="file-name" id="createFileLabel"></div>
+          <input type="file" name="student_file" id="createUserStudentFile" accept=".xlsx,.xls"
+                 onchange="showFileName(this, 'createFileLabel')">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-user-plus"></i> Create User</button>
+    </form>
+  </div>
+
+  <!-- User list -->
+  <h3 class="section-title"><i class="fas fa-list"></i> All Users ({{ users|length }})</h3>
+  
+  <!-- Global Action Bar -->
+  <div class="card mb-3">
+    <div class="global-action-bar">
+      <div class="form-group" style="flex:1;min-width:260px;">
+        <label class="form-label">Search by Name</label>
+        <div style="position:relative;">
+          <input id="userSearchBox" class="form-control" type="text" placeholder="Type name to search..." oninput="filterUserTable()">
+          <ul id="userSearchSuggestions" class="search-suggestions" style="display:none;"></ul>
+        </div>
+      </div>
+      <div class="form-group" style="min-width:180px;">
+        <label class="form-label">Sort By</label>
+        <select class="form-control" id="userSortBy" onchange="sortUserTable()">
+          <option value="name_asc">Name A-Z</option>
+          <option value="date_added">Date Added</option>
+        </select>
+      </div>
+      <div class="form-group" style="min-width:120px;align-self:end;">
+        <button type="button" class="btn btn-outline btn-sm" id="userFilterToggle" onclick="toggleUserFilterTray()">
+          <i class="fas fa-filter"></i> Filters
+        </button>
+      </div>
+    </div>
+
+    <div id="userFilterTray" class="filter-tray" style="display:none;">
+      <select class="form-control" id="filterDepartment" onchange="filterUserTable()" style="max-width:180px;">
+        <option value="">All Departments</option>
+        {% for d in departments %}
+        <option value="{{ d.code }}">{{ d.code }}</option>
+        {% endfor %}
+      </select>
+      <select class="form-control" id="filterRole" onchange="filterUserTable()" style="max-width:160px;">
+        <option value="">All Account Types</option>
+        <option value="admin">System Admin</option>
+        <option value="hod">HOD</option>
+        <option value="deo">DEO</option>
+        <option value="principal">Principal</option>
+        <option value="counselor">Counselor</option>
+      </select>
+      <select class="form-control" id="filterStatus" onchange="filterUserTable()" style="max-width:140px;">
+        <option value="">All States</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- User Table -->
+  <div class="table-wrapper">
+    <table id="userTable">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Role</th>
+          <th>Department</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        {% set scope_key = (u.department or '')|upper ~ '::' ~ (u.year_level or 1) %}
+        {% set chief_assignments = chief_scopes_by_email.get(u.email, []) %}
+        {% set chief_departments = [] %}
+        {% if u.role in ['chief_admin', 'hod'] and chief_assignments %}
+          {% for assignment in chief_assignments %}
+            {% set dep_code = (assignment.split('::')[0] if '::' in assignment else assignment)|upper %}
+            {% if dep_code and dep_code not in chief_departments %}
+              {% set _ = chief_departments.append(dep_code) %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {# Check if chief admin has scope overlap with current user #}
+        {% set chief_admin_has_overlap = false %}
+        {% if is_chief_admin and u.role in ['chief_admin', 'hod'] %}
+          {% for assignment in chief_assignments %}
+            {% if assignment in chief_scope_keys %}
+              {% set chief_admin_has_overlap = true %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% set can_edit_user = (u.role != 'principal') and (is_system_admin or (is_chief_admin and ((u.role in ['counselor', 'deo'] and scope_key in chief_scope_keys) or (u.role in ['chief_admin', 'hod'] and chief_admin_has_overlap)))) %}
+        {% set can_manage_user = (is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or (is_chief_admin and can_edit_user) %}
+        <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{% if u.is_active and not u.is_locked %}active{% else %}inactive{% endif %}" data-user-created="{{ u.created_at or '' }}">
+          <td>
+            <strong>{{ u.name }}</strong>
+          </td>
+          <td>
+            <span class="badge {% if u.role == 'admin' %}badge-role-admin{% elif u.role in ['chief_admin','hod'] %}badge-role-chief{% elif u.role == 'principal' %}badge-role-admin{% else %}badge-role-counselor{% endif %}">
+              {% if u.role == 'admin' %}System Admin{% elif u.role in ['chief_admin','hod'] %}HOD{% elif u.role == 'principal' %}Principal{% elif u.role == 'deo' %}DEO{% else %}Counselor{% endif %}
+            </span>
+          </td>
+          <td>
+            {% if u.role in ['chief_admin', 'hod'] %}
+              {% if chief_departments|length == 0 %}
+                —
+              {% elif chief_departments|length <= 2 %}
+                {{ chief_departments|join(', ') }}
+              {% else %}
+                Multiple
+              {% endif %}
+            {% else %}
+              {{ u.department or '—' }}
+            {% endif %}
+          </td>
+          <td>
+            {% if u.is_active and not u.is_locked %}<span class="badge badge-success">Active</span>
+            {% else %}<span class="badge badge-danger">Inactive</span>{% endif %}
+          </td>
+          <td style="text-align:right;">
+            <div class="btn-group" style="justify-content:flex-end;">
+              {% if can_edit_user %}
+              <button class="btn btn-outline btn-sm" onclick="openModal('edit-{{ loop.index }}')" title="Edit Registration Fields">
+                <i class="fas fa-edit"></i> Edit
+              </button>
+              {% else %}
+              <button class="btn btn-outline btn-sm" title="Edit disabled by role scope" disabled>
+                <i class="fas fa-edit"></i> Edit
+              </button>
+              {% endif %}
+              {% if can_manage_user %}
+              {% if u.is_locked %}
+              <form method="POST" action="{{ url_for('api_unlock_user', email=u.email) }}" style="display:inline">
+                <button class="btn btn-success btn-sm" title="Unlock User"><i class="fas fa-unlock"></i></button>
+              </form>
+              {% else %}
+              <form method="POST" action="{{ url_for('api_lock_user', email=u.email) }}" style="display:inline">
+                <button class="btn btn-warning btn-sm" title="Lock User"><i class="fas fa-lock"></i></button>
+              </form>
+              {% endif %}
+              <form method="POST" action="{{ url_for('api_delete_user', email=u.email) }}" style="display:inline" onsubmit="return confirm('Delete {{ u.name }}? This cannot be undone.')">
+                <button class="btn btn-danger btn-sm" title="Delete User"><i class="fas fa-trash"></i></button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+
+        <tr aria-hidden="true" style="height:0;line-height:0;">
+          <td colspan="5" style="padding:0;border:none;height:0;line-height:0;font-size:0;overflow:hidden;">
+    <!-- Edit Modal -->
+    <div class="modal-overlay" id="modal-edit-{{ loop.index }}">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-edit"></i> Edit {{ u.name }}</h3>
+          <button class="modal-close" onclick="closeModal('edit-{{ loop.index }}')">&times;</button>
+        </div>
+        <form method="POST" action="{{ url_for('api_update_user', email=u.email) }}">
+          {% if is_system_admin %}
+          <div class="card mb-2" style="padding:10px 12px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);">
+            <div style="font-size:.82rem;color:var(--text);">
+              <strong>Edit User Account Details</strong>: Update name, role, department/year, max students, upload permission, password, and chief scope access here.
+              Student records are not edited in this form. Use <strong>Manage Students</strong> to add, edit, or delete student details.
+            </div>
+          </div>
+          {% endif %}
+          {% if is_chief_admin %}
+          <div class="card mb-2" style="padding:10px 12px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);">
+            <div style="font-size:.82rem;color:var(--text);">
+              <strong>Edit User Account Details</strong>: You can edit counselors, DEOs, and HOD users in your assigned department/year scope.
+              Student records are managed separately using <strong>Manage Students</strong>.
+            </div>
+          </div>
+          {% endif %}
+          <div class="form-group">
+            <label class="form-label">Name</label>
+            <input type="text" class="form-control" name="name" value="{{ u.name }}">
+          </div>
+          {% if is_system_admin %}
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Email</label>
+              <input type="email" class="form-control" value="{{ u.email }}" readonly>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Role</label>
+              <select class="form-control" name="role" id="editRole-{{ loop.index }}" data-edit-role="{{ loop.index }}" onchange="toggleEditUserFields('{{ loop.index }}')">
+                <option value="counselor" {% if (u.role or 'counselor') == 'counselor' %}selected{% endif %}>Counselor</option>
+                <option value="hod" {% if u.role in ['chief_admin','hod'] %}selected{% endif %}>HOD</option>
+                <option value="deo" {% if u.role == 'deo' %}selected{% endif %}>DEO</option>
+                <option value="principal" {% if u.role == 'principal' %}selected{% endif %}>Principal</option>
+                <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>System Admin</option>
+              </select>
+            </div>
+          </div>
+          {% endif %}
+          <div class="form-row" id="editCounselorRow-{{ loop.index }}">
+            <div class="form-group">
+              <label class="form-label">Department</label>
+              <select class="form-control" name="department" id="editDepartment-{{ loop.index }}">
+                <option value="">-- None --</option>
+                {% for d in departments %}
+                <option value="{{ d.code }}" {% if d.code == u.department %}selected{% endif %}>{{ d.code }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Year</label>
+              <select class="form-control" name="year_level" id="editYearLevel-{{ loop.index }}">
+                <option value="1" {% if (u.year_level or 1) == 1 %}selected{% endif %}>1st Year</option>
+                <option value="2" {% if (u.year_level or 1) == 2 %}selected{% endif %}>2nd Year</option>
+                <option value="3" {% if (u.year_level or 1) == 3 %}selected{% endif %}>3rd Year</option>
+                <option value="4" {% if (u.year_level or 1) == 4 %}selected{% endif %}>4th Year</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" id="editCapacityRow-{{ loop.index }}">
+            <div class="form-group">
+              <label class="form-label">Max Students</label>
+              <input type="number" class="form-control" name="max_students" id="editMaxStudents-{{ loop.index }}" value="{{ u.max_students }}" min="1" max="500">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">New Password (leave blank to keep current)</label>
+            <input type="password" class="form-control" name="password" placeholder="New password">
+          </div>
+          <div class="form-check" id="editUploadWrap-{{ loop.index }}">
+            <input type="checkbox" name="can_upload_students" id="canUp-{{ loop.index }}"
+                   {% if u.can_upload_students %}checked{% endif %}>
+            <label for="canUp-{{ loop.index }}">Allow student upload</label>
+          </div>
+
+          <div class="form-group" id="editChiefScopeWrap-{{ loop.index }}" style="display:none;"></div>
+
+          <!-- Student Management Section for Counselors -->
+          {% if u.role == 'counselor' %}
+          <div class="card mt-3 mb-2" style="padding:14px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.30);">
+            <div class="d-flex justify-between align-center mb-3">
+              <label class="form-label"><i class="fas fa-users"></i> Student Management</label>
+              <span class="badge badge-success">{{ students_map.get(u.email, [])|length }} students</span>
+            </div>
+            
+            <!-- Quick Actions -->
+            <div class="d-flex" style="gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+              <button type="button" class="btn btn-outline btn-sm" onclick="openModal('manage-students-{{ loop.index }}')">
+                <i class="fas fa-pen"></i> Edit/View All
+              </button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="openModal('upload-{{ loop.index }}')">
+                <i class="fas fa-upload"></i> Upload Excel
+              </button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="toggleStudentQuickAdd('{{ loop.index }}')" title="Add single student quickly">
+                <i class="fas fa-plus"></i> Add Student
+              </button>
+              <form method="POST" action="{{ url_for('api_admin_delete_all_students') }}" onsubmit="return confirm('Delete all students for {{ u.name }}? This cannot be undone.')" style="display:inline;">
+                <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                <button type="submit" class="btn btn-danger btn-sm">
+                  <i class="fas fa-trash"></i> Delete All
+                </button>
+              </form>
+            </div>
+
+            <!-- Quick Add Student Form (Hidden by default) -->
+            <div id="quickAddStudent-{{ loop.index }}" style="display:none;padding:12px;background:var(--bg-input);border-radius:var(--radius-sm);border:1px solid var(--border);margin-bottom:12px;">
+              <form method="POST" action="{{ url_for('api_admin_save_student') }}" style="margin-bottom:10px;">
+                <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                <div class="form-row">
+                  <div class="form-group" style="margin:0;">
+                    <input type="text" class="form-control" name="reg_no" placeholder="Roll No" required style="min-width:100px;">
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <input type="text" class="form-control" name="student_name" placeholder="Student Name" required style="min-width:120px;">
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <input type="text" class="form-control" name="parent_phone" placeholder="WhatsApp No" style="min-width:140px;">
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <button type="submit" class="btn btn-success btn-sm" style="width:100%;">Add</button>
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            <!-- Student List Preview (First 5 students) -->
+            {% set counselor_students = students_map.get(u.email, []) %}
+            {% if counselor_students %}
+            <div style="max-height:200px;overflow-y:auto;">
+              <table style="font-size:.85rem;">
+                <thead>
+                  <tr style="background:rgba(0,0,0,.05);">
+                    <th style="padding:6px;">Reg No</th>
+                    <th style="padding:6px;">Name</th>
+                    <th style="padding:6px;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for st in counselor_students[:5] %}
+                  <tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:6px;">{{ st.reg_no }}</td>
+                    <td style="padding:6px;">{{ st.student_name }}</td>
+                    <td style="padding:6px;">
+                      <form method="POST" action="{{ url_for('api_admin_delete_student') }}" onsubmit="return confirm('Delete {{ st.reg_no }}?')" style="display:inline;">
+                        <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                        <input type="hidden" name="reg_no" value="{{ st.reg_no }}">
+                        <button type="submit" class="btn btn-danger btn-xs" style="padding:2px 6px;font-size:.75rem;" title="Delete">
+                          <i class="fas fa-trash"></i>
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% if counselor_students|length > 5 %}
+              <div style="padding:8px;text-align:center;font-size:.82rem;color:var(--text-dim);border-top:1px solid var(--border);margin-top:8px;">
+                ... and {{ counselor_students|length - 5 }} more.
+              </div>
+              {% endif %}
+            </div>
+            {% else %}
+            <div style="padding:12px;text-align:center;color:var(--text-dim);font-size:.82rem;background:rgba(100,100,100,.05);border-radius:var(--radius-sm);border:1px solid var(--border);">
+              <i class="fas fa-info-circle"></i> No students assigned yet.
+            </div>
+            {% endif %}
+          </div>
+          {% endif %}
+
+          <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Changes</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Upload Students Modal -->
+    {% if u.role == 'counselor' %}
+    <div class="modal-overlay" id="modal-upload-{{ loop.index }}">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-upload"></i> Upload Students for {{ u.name }}</h3>
+          <button class="modal-close" onclick="closeModal('upload-{{ loop.index }}')">&times;</button>
+        </div>
+        <form method="POST" action="{{ url_for('api_upload_students_for_counselor', email=u.email) }}"
+              enctype="multipart/form-data">
+          <div class="form-group">
+            <div class="file-input-wrapper">
+              <i class="fas fa-file-excel"></i>
+              <div class="file-text">Upload Excel file with student list</div>
+              <div class="file-name" id="uploadLabel-{{ loop.index }}"></div>
+              <input type="file" name="student_file" accept=".xlsx,.xls" required
+                     onchange="showFileName(this, 'uploadLabel-{{ loop.index }}')">
+            </div>
+          </div>
+          <p style="font-size:.8rem;color:var(--text-dim);margin-bottom:12px;">
+            Excel should contain columns: RNO (Roll No), NAME, WNO (WhatsApp No)
+          </p>
+          <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Upload Students</button>
+        </form>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if u.role == 'counselor' %}
+    <div class="modal-overlay" id="modal-manage-students-{{ loop.index }}" data-counselor-email="{{ u.email }}">
+      <div class="modal" style="max-width:980px;max-height:90vh;overflow:auto;">
+        <div class="modal-header">
+          <h3><i class="fas fa-user-pen"></i> Manage Students - {{ u.name }}</h3>
+          <button class="modal-close" onclick="closeModal('manage-students-{{ loop.index }}')">&times;</button>
+        </div>
+
+        <div class="d-flex justify-between align-center mb-2" style="gap:10px;">
+          <p style="font-size:.82rem;color:var(--text-dim);margin:0;">Manage individual students or remove the full list at once.</p>
+          <form method="POST" action="{{ url_for('api_admin_delete_all_students') }}" onsubmit="return confirm('Delete all students for {{ u.name }}? This cannot be undone.')" style="display:inline;">
+            <input type="hidden" name="counselor_email" value="{{ u.email }}">
+            <button class="btn btn-danger btn-sm"><i class="fas fa-trash"></i> Delete Entire Student List</button>
+          </form>
+        </div>
+
+        <div class="card mb-2" style="padding:14px;">
+          <div class="card-title" style="font-size:.9rem;"><i class="fas fa-user-plus"></i> Add Student Manually</div>
+          <form method="POST" action="{{ url_for('api_admin_save_student') }}">
+            <input type="hidden" name="counselor_email" value="{{ u.email }}">
+            <div class="form-row">
+              <div class="form-group"><label class="form-label">Reg No</label><input class="form-control" name="reg_no" required></div>
+              <div class="form-group"><label class="form-label">Student Name</label><input class="form-control" name="student_name" required></div>
+              <div class="form-group"><label class="form-label">WhatsApp No</label><input class="form-control" name="parent_phone"></div>
+            </div>
+            <button class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> Add Student</button>
+          </form>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr><th>Reg No</th><th>Name</th><th>WhatsApp No</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {% for st in students_map.get(u.email, []) %}
+              <tr>
+                <form method="POST" action="{{ url_for('api_admin_save_student') }}">
+                  <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                  <input type="hidden" name="original_reg_no" value="{{ st.reg_no }}">
+                  <td><input class="form-control" name="reg_no" value="{{ st.reg_no }}" required style="min-width:120px;"></td>
+                  <td><input class="form-control" name="student_name" value="{{ st.student_name }}" required style="min-width:180px;"></td>
+                  <td><input class="form-control" name="parent_phone" value="{{ st.parent_phone or '' }}" style="min-width:130px;"></td>
+                  <td>
+                    <div class="btn-group">
+                      <button class="btn btn-primary btn-sm" title="Save"><i class="fas fa-save"></i></button>
+                </form>
+                      <form method="POST" action="{{ url_for('api_admin_delete_student') }}" onsubmit="return confirm('Delete {{ st.reg_no }}?')" style="display:inline;">
+                        <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                        <input type="hidden" name="reg_no" value="{{ st.reg_no }}">
+                        <button class="btn btn-danger btn-sm" title="Delete"><i class="fas fa-trash"></i></button>
+                      </form>
+                    </div>
+                  </td>
+              </tr>
+              {% endfor %}
+              {% if not students_map.get(u.email, []) %}
+              <tr><td colspan="4" class="text-center text-muted" style="padding:16px;">No students assigned yet.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+          </td>
+        </tr>
+    {% endfor %}
+    {% if not users %}
+  <tr><td colspan="5" class="text-center text-muted" style="padding:24px;">No users found.</td></tr>
+    {% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ==================== DEPARTMENTS TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'departments' %}active{% endif %}" id="tab-departments">
+  {% if is_system_admin %}
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-plus"></i> Add Department</div>
+    <form method="POST" action="{{ url_for('api_create_department') }}">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Code</label>
+          <input type="text" class="form-control" name="code" required placeholder="CSE" style="text-transform:uppercase">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Full Name</label>
+          <input type="text" class="form-control" name="name" required placeholder="Computer Science Engineering">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-plus"></i> Add Department</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr><th>Code</th><th>Name</th><th>Status</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for d in departments %}
+        <tr>
+          <td><strong>{{ d.code }}</strong></td>
+          <td>{{ d.name }}</td>
+          <td>
+            {% if d.is_active %}<span class="badge badge-success">Active</span>
+            {% else %}<span class="badge badge-muted">Disabled</span>{% endif %}
+          </td>
+          <td>
+            <div class="btn-group">
+              {% if is_system_admin %}
+              <form method="POST" action="{{ url_for('api_toggle_department', dept_id=d.id) }}" style="display:inline">
+                <input type="hidden" name="is_active" value="{{ d.is_active }}">
+                <button class="btn btn-outline btn-sm">
+                  <i class="fas fa-{{ 'eye-slash' if d.is_active else 'eye' }}"></i>
+                  {{ 'Disable' if d.is_active else 'Enable' }}
+                </button>
+              </form>
+              <form method="POST" action="{{ url_for('api_delete_department', dept_id=d.id) }}" style="display:inline"
+                    onsubmit="return confirm('Delete department {{ d.code }}?')">
+                <button class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+              </form>
+              {% else %}
+              <span class="badge badge-info">View Only</span>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== REPORTS TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'reports' %}active{% endif %}" id="tab-reports">
+  {% if not report_department %}
+  <h3 class="section-title"><i class="fas fa-building"></i> Select Department</h3>
+  <div class="metrics-grid mb-3" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));">
+    {% for d in departments if d.is_active %}
+    <a href="{{ url_for(panel_endpoint, tab='reports', report_dept=d.code) }}" class="metric-card" style="text-decoration:none;min-height:130px;display:flex;flex-direction:column;justify-content:center;">
+      <div class="metric-value" style="font-size:1.6rem;">{{ d.code }}</div>
+      <div style="font-size:.9rem;color:var(--text-dim);margin-top:4px;">{{ d.name }}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% elif not report_year_level %}
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-building"></i> Department: {{ report_department }}</div>
+    <div style="display:grid;grid-template-columns:1fr;gap:10px;max-width:520px;">
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=1) }}"><strong>1.</strong>&nbsp; Year 1</a>
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=2) }}"><strong>2.</strong>&nbsp; Year 2</a>
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=3) }}"><strong>3.</strong>&nbsp; Year 3</a>
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=4) }}"><strong>4.</strong>&nbsp; Year 4</a>
+    </div>
+  </div>
+  {% else %}
+  {% if is_system_admin or is_deo %}
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-file-upload"></i> Upload Marksheet</div>
+    <form method="POST" action="{{ url_for('api_admin_upload_marksheet') }}" enctype="multipart/form-data">
+      <input type="hidden" name="tab" value="reports">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <input class="form-control" name="department" value="{{ report_department }}" readonly>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <input class="form-control" name="year_level" value="{{ report_year_level }}" readonly>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Test Name</label>
+          <select class="form-control" name="test_name" required>
+            <option value="">-- Select Test --</option>
+            <option value="IAT 1">IAT 1</option>
+            <option value="IAT 2">IAT 2</option>
+            <option value="MODEL EXAM">MODEL EXAM</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <select class="form-control" name="semester" required>
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </div>
+      </div>
+      <input type="hidden" name="batch_name" value="{{ now.year }}-{{ (now.year + 1) % 100 }}">
+      <input type="hidden" name="section" value="">
+      <div class="form-group" style="max-width:380px;">
+        <label class="form-label">Upload Mode</label>
+        <select class="form-control" name="upload_mode">
+          <option value="new">Keep as New Test</option>
+          <option value="replace">Replace Existing Matching Test</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Marksheet File</label>
+        <div class="file-input-wrapper">
+          <i class="fas fa-file-excel"></i>
+          <div class="file-text">Upload Excel marksheet (.xlsx, .xls)</div>
+          <div class="file-name" id="marksheetUploadLabel"></div>
+          <input type="file" name="marks_file" accept=".xlsx,.xls" required onchange="showFileName(this, 'marksheetUploadLabel')">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Upload Marksheet</button>
+    </form>
+  </div>
+  {% endif %}
+
+  {% set sem1_tests = report_tests | selectattr('semester', 'equalto', '1') | list %}
+  {% set sem2_tests = report_tests | selectattr('semester', 'equalto', '2') | list %}
+
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-database"></i> {{ report_department }} - Year {{ report_year_level }} - Semester 1</div>
+    <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Test Name</th>
+          <th>Batch</th>
+          <th>Semester</th>
+          <th>Uploaded By</th>
+          <th>Students</th>
+          <th>Uploaded At</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in sem1_tests %}
+        <tr>
+          <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+          <td>{{ t.batch_name or '—' }}</td>
+          <td>{{ t.semester or '—' }}</td>
+          <td><span style="font-size:.85rem">{{ t.uploaded_by_name or t.uploaded_by or '—' }}</span></td>
+          <td><span class="badge badge-info">{{ t.student_count or 0 }}</span></td>
+          <td style="font-size:.82rem">{{ (t.uploaded_at or '')[:16] }}</td>
+          <td>
+            <div class="btn-group">
+              <button class="btn btn-outline btn-sm" data-test-id="{{ t.id }}" onclick="openTestViewModalFromButton(this)" title="View Details">
+                <i class="fas fa-eye"></i>
+              </button>
+              {% if not is_principal %}
+              <a class="btn btn-outline btn-sm" href="{{ url_for('admin_test_edit_page', test_id=t.id) }}" title="Edit">
+                <i class="fas fa-pen"></i>
+              </a>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not sem1_tests %}
+        <tr><td colspan="7" class="text-center text-muted" style="padding:24px">No semester 1 tests uploaded yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-database"></i> {{ report_department }} - Year {{ report_year_level }} - Semester 2</div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Test Name</th>
+            <th>Batch</th>
+            <th>Semester</th>
+            <th>Uploaded By</th>
+            <th>Students</th>
+            <th>Uploaded At</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in sem2_tests %}
+          <tr>
+            <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+            <td>{{ t.batch_name or '—' }}</td>
+            <td>{{ t.semester or '—' }}</td>
+            <td><span style="font-size:.85rem">{{ t.uploaded_by_name or t.uploaded_by or '—' }}</span></td>
+            <td><span class="badge badge-info">{{ t.student_count or 0 }}</span></td>
+            <td style="font-size:.82rem">{{ (t.uploaded_at or '')[:16] }}</td>
+            <td>
+              <div class="btn-group">
+                <button class="btn btn-outline btn-sm" data-test-id="{{ t.id }}" onclick="openTestViewModalFromButton(this)" title="View Details">
+                  <i class="fas fa-eye"></i>
+                </button>
+                {% if not is_principal %}
+                <a class="btn btn-outline btn-sm" href="{{ url_for('admin_test_edit_page', test_id=t.id) }}" title="Edit">
+                  <i class="fas fa-pen"></i>
+                </a>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not sem2_tests %}
+          <tr><td colspan="7" class="text-center text-muted" style="padding:24px">No semester 2 tests uploaded yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+
+<!-- Test View Modals -->
+{% for t in report_tests %}
+<div class="modal-overlay" id="modal-test-view-{{ t.id }}">
+  <div class="modal" style="max-width:700px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-clipboard-check"></i> {{ t.test_name or 'Test #' ~ t.id }}</h3>
+      <button class="modal-close" onclick="closeModal('test-view-{{ t.id }}')">&times;</button>
+    </div>
+    <div class="test-details">
+      <p><strong>Batch:</strong> {{ t.batch_name or 'N/A' }}</p>
+      <p><strong>Semester:</strong> {{ t.semester or 'N/A' }}</p>
+      <p><strong>Year:</strong> {{ t.year_level or report_year_level }}</p>
+      <p><strong>Department:</strong> {{ t.department or 'N/A' }}</p>
+      <p><strong>Uploaded By:</strong> {{ t.uploaded_by_name or t.uploaded_by or 'Unknown' }}</p>
+      <p><strong>Uploaded At:</strong> {{ (t.uploaded_at or 'N/A')[:19] }}</p>
+      <p><strong>Students:</strong> {{ t.student_count or 0 }}</p>
+      {% if t.subjects %}
+      <p><strong>Subjects:</strong></p>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+        {% for subj in t.subjects %}
+        <span class="badge badge-primary">{{ subj }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <hr class="divider">
+      <p><strong>Student Data:</strong></p>
+      <div id="test-view-marks-{{ t.id }}" class="table-wrapper" style="max-height:280px;overflow:auto;">
+        <div style="padding:12px;color:var(--text-dim);font-size:.82rem;">Loading...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-test-edit-{{ t.id }}">
+  <div class="modal" style="max-width:640px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-pen"></i> Edit Test</h3>
+      <button class="modal-close" onclick="closeModal('test-edit-{{ t.id }}')">&times;</button>
+    </div>
+    <form method="POST" action="{{ url_for('api_update_test', test_id=t.id) }}">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Test Name</label>
+          <input class="form-control" name="test_name" value="{{ t.test_name or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <input class="form-control" name="semester" value="{{ t.semester or '' }}">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <input class="form-control" value="{{ t.year_level or report_year_level }}" readonly>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Batch</label>
+          <input class="form-control" name="batch_name" value="{{ t.batch_name or '' }}">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Section</label>
+          <input class="form-control" name="section" value="{{ t.section or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <input class="form-control" name="department" value="{{ t.department or '' }}" readonly>
+        </div>
+      </div>
+      <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+
+<!-- ==================== DASHBOARD TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'dashboard' %}active{% endif %}" id="tab-dashboard">
+  <h3 class="section-title"><i class="fas fa-gauge"></i> Principal Dashboard</h3>
+  <div class="metrics-grid mb-3">
+    <div class="metric-card">
+      <div class="metric-label">Departments Covered</div>
+      <div class="metric-value">{{ departments|length }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Total Tests</div>
+      <div class="metric-value">{{ report_tests|length }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Total Messages</div>
+      <div class="metric-value">{{ msg_stats.total }}</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-trophy"></i> Top Counselors (Completion)</div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Department</th><th>Students</th><th>Reached</th><th>Week Messages</th></tr>
+        </thead>
+        <tbody>
+          {% for a in leaderboard %}
+          <tr>
+            <td>{{ a.name }}</td>
+            <td>{{ a.department }}</td>
+            <td>{{ a.student_count }}</td>
+            <td>{{ a.unique_students_messaged }}</td>
+            <td>{{ a.week_messages }}</td>
+          </tr>
+          {% endfor %}
+          {% if not leaderboard %}
+          <tr><td colspan="5" class="text-center text-muted" style="padding:20px;">No counselor activity yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== DATABASE TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'database' %}active{% endif %}" id="tab-database">
+  <h3 class="section-title"><i class="fas fa-database"></i> Database Maintenance</h3>
+  <div class="card mb-3" style="max-width:780px;">
+    <div class="card-title"><i class="fas fa-floppy-disk"></i> Create Backup</div>
+    <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:12px;">
+      Create a full database backup before batch operations.
+    </p>
+    <form method="POST" action="{{ url_for('api_database_backup_create') }}" class="form-row" style="align-items:end;">
+      <div class="form-group">
+        <label class="form-label">Batch Label</label>
+        <input class="form-control" name="batch_name" placeholder="2025-2026" required>
+      </div>
+      <div class="form-check" style="margin-bottom:10px;">
+        <input type="checkbox" name="overwrite" id="dbBackupOverwrite">
+        <label for="dbBackupOverwrite">Overwrite if same label exists</label>
+      </div>
+      <div class="form-group">
+        <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Create Backup</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-box-archive"></i> Existing Backups</div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Backup</th>
+            <th>Size</th>
+            <th>Modified</th>
+            <th style="text-align:right;">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for b in backup_files %}
+          <tr>
+            <td><strong>{{ b.name }}</strong></td>
+            <td>{{ b.size_kb }} KB</td>
+            <td>{{ b.modified }}</td>
+            <td style="text-align:right;">
+              <div class="btn-group" style="justify-content:flex-end;align-items:center;gap:8px;">
+                <form method="POST" action="{{ url_for('api_database_restore_backup') }}" style="display:flex;gap:6px;align-items:center;" onsubmit="return confirm('Restore backup {{ b.name }}? This logs out all users and replaces current database.')">
+                  <input type="hidden" name="backup_name" value="{{ b.name }}">
+                  <input class="form-control" type="password" name="password" placeholder="Password" required style="max-width:130px;">
+                  <button class="btn btn-outline btn-sm" type="submit"><i class="fas fa-rotate-left"></i> Restore</button>
+                </form>
+                <form method="POST" action="{{ url_for('api_database_delete_backup') }}" style="display:flex;gap:6px;align-items:center;" onsubmit="return confirm('Delete backup {{ b.name }}?')">
+                  <input type="hidden" name="backup_name" value="{{ b.name }}">
+                  <input class="form-control" type="password" name="password" placeholder="Password" required style="max-width:130px;">
+                  <button class="btn btn-danger btn-sm" type="submit"><i class="fas fa-trash"></i> Delete</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not backup_files %}
+          <tr><td colspan="4" class="text-center text-muted" style="padding:20px;">No backups available.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="max-width:780px;border:1px solid rgba(220,38,38,.35);">
+    <div class="card-title"><i class="fas fa-triangle-exclamation"></i> Clear Exam Data</div>
+    <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:12px;">
+      Clears uploaded exam/test/marks/message records for a new batch. Latest backup is required before clear. All users will be logged out.
+    </p>
+    <form method="POST" action="{{ url_for('api_database_clear_exam_data') }}" onsubmit="return confirm('Clear exam data now? Ensure latest backup exists.')">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Confirm Password</label>
+          <input class="form-control" type="password" name="password" required placeholder="Enter your password">
+        </div>
+      </div>
+      <button class="btn btn-danger" type="submit"><i class="fas fa-trash"></i> Clear Exam Data</button>
+    </form>
+  </div>
+</div>
+
+<!-- ==================== ACTIVITY TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'activity' %}active{% endif %}" id="tab-activity">
+  <h3 class="section-title"><i class="fas fa-chart-line"></i> Counsellor Activity</h3>
+  {% if activity_show_department %}
+  <h3 class="section-title"><i class="fas fa-building"></i> Select Department</h3>
+  <div class="metrics-grid mb-3" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
+    {% for d in departments if d.is_active %}
+    <a href="{{ url_for(panel_endpoint, tab='activity', act_dept=d.code) }}" class="metric-card" style="text-decoration:none;min-height:120px;display:flex;flex-direction:column;justify-content:center;">
+      <div class="metric-value" style="font-size:1.5rem;">{{ d.code }}</div>
+      <div style="font-size:.88rem;color:var(--text-dim);margin-top:4px;">{{ d.name }}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% elif activity_show_year %}
+  <div class="card mb-3" style="max-width:520px;">
+    <div class="card-title"><i class="fas fa-building"></i> Department: {{ act_department }}</div>
+    <div style="display:grid;grid-template-columns:1fr;gap:10px;">
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=1) }}"><strong>1.</strong>&nbsp; Year 1</a>
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=2) }}"><strong>2.</strong>&nbsp; Year 2</a>
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=3) }}"><strong>3.</strong>&nbsp; Year 3</a>
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=4) }}"><strong>4.</strong>&nbsp; Year 4</a>
+    </div>
+  </div>
+  {% elif activity_show_semester %}
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-list-check"></i> {{ act_department }} - Year {{ act_year_level }} Test Upload Status</div>
+    <div class="form-row">
+      {% for sem in ['1', '2'] %}
+      <div class="card" style="padding:14px;">
+        <div class="card-title" style="margin-bottom:10px;"><i class="fas fa-layer-group"></i> Semester {{ sem }}</div>
+        {% for test_name in ['IAT 1', 'IAT 2', 'MODEL EXAM'] %}
+        {% set uploaded = activity_test_status[sem][test_name] %}
+        <div class="d-flex align-center justify-between" style="gap:10px;margin-bottom:8px;">
+          <a class="btn btn-sm {{ 'btn-primary' if uploaded else 'btn-outline' }}" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=act_year_level, act_sem=sem, act_test=test_name) }}">{{ test_name }}</a>
+          <span class="badge {{ 'badge-success' if uploaded else 'badge-warning' }}">{{ 'Completed' if uploaded else 'Pending' }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if activity_selection_ready %}
+  <div class="metrics-grid mb-3">
+    <div class="metric-card"><div class="metric-label">Total Counselors</div><div class="metric-value">{{ activity_test_result.stats.total_counselors }}</div></div>
+    <div class="metric-card"><div class="metric-label">Complete</div><div class="metric-value text-success">{{ activity_test_result.stats.complete }}</div></div>
+    <div class="metric-card"><div class="metric-label">Pending</div><div class="metric-value text-warning">{{ activity_test_result.stats.pending }}</div></div>
+    <div class="metric-card"><div class="metric-label">Avg Completion</div><div class="metric-value">{{ activity_test_result.stats.avg_completion }}%</div></div>
+  </div>
+
+  <div class="card mb-3">
+    <div id="activityResultForm" class="d-flex align-center flex-wrap" style="gap:8px;">
+      <div style="position:relative;">
+        <input class="form-control" id="activitySearchInput" value="{{ act_search or '' }}" placeholder="Search counselor" style="max-width:280px;height:34px;padding:6px 10px;font-size:.82rem;">
+        <ul id="activitySearchSuggestions" class="search-suggestions" style="display:none;max-width:280px;"></ul>
+      </div>
+      <select class="form-control" id="activitySortSelect" style="max-width:150px;height:34px;padding:6px 10px;font-size:.8rem;">
+        <option value="pending_first" {% if act_sort == 'pending_first' %}selected{% endif %}>Pending</option>
+        <option value="name_asc" {% if act_sort == 'name_asc' %}selected{% endif %}>A-Z</option>
+        <option value="name_desc" {% if act_sort == 'name_desc' %}selected{% endif %}>Z-A</option>
+      </select>
+      <a class="btn btn-outline btn-sm" id="activityPdfLink" data-base-href="{{ url_for('api_export_activity_filtered_pdf', act_dept=act_department, act_year=act_year_level, act_sem=act_semester, act_test=act_test_name) }}" href="{{ url_for('api_export_activity_filtered_pdf', act_dept=act_department, act_year=act_year_level, act_sem=act_semester, act_test=act_test_name, act_q=act_search, act_sort=act_sort) }}" style="height:34px;"><i class="fas fa-file-pdf"></i> PDF</a>
+    </div>
+  </div>
+
+  <div class="table-wrapper mb-3">
+    <table>
+      <thead>
+        <tr>
+          <th>Counselor</th><th>Department</th><th>Year</th><th>Students</th><th>Reached</th><th>Pending</th><th>Completion %</th><th>Status</th><th>Last Login</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in activity_test_result.rows %}
+        <tr class="activity-row" data-counselor-name="{{ (a.name or '')|lower }}" data-counselor-email="{{ (a.email or '')|lower }}" data-status="{{ (a.work_status or '')|lower }}" data-completion="{{ a.completion_pct or 0 }}">
+          <td><strong>{{ a.name }}</strong><br><span style="font-size:.75rem;color:var(--text-dim)">{{ a.email }}</span></td>
+          <td>{{ a.department }}</td>
+          <td>{{ a.year_level }}</td>
+          <td>{{ a.student_count }}</td>
+          <td>{{ a.unique_students_messaged }}</td>
+          <td>{{ a.pending_count }}</td>
+          <td>{{ a.completion_pct }}%</td>
+          <td>{% if a.work_status == 'Complete' %}<span class="badge badge-success">Complete</span>{% else %}<span class="badge badge-warning">Pending</span>{% endif %}</td>
+          <td style="font-size:.8rem">{{ (a.last_login or 'Never')[:16] }}</td>
+        </tr>
+        {% endfor %}
+        {% if not activity_test_result.rows %}
+        <tr id="activityNoRows"><td colspan="9" class="text-center text-muted" style="padding:24px">No counselor rows for selected filters.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ==================== SESSION MONITORING TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'monitoring' %}active{% endif %}" id="tab-monitoring">
+  <h3 class="section-title"><i class="fas fa-chart-area"></i> Session Monitoring Dashboard</h3>
+  {% if not session_log_ok %}
+  <div class="card mb-3" style="border:1px solid rgba(245,158,11,.45);">
+    <div class="card-title"><i class="fas fa-triangle-exclamation"></i> Under Maintenance</div>
+    <p style="font-size:.88rem;color:var(--text-dim);">Session monitoring is temporarily under maintenance until session log write is restored.</p>
+    <p style="font-size:.82rem;color:var(--text-muted);">{{ session_log_message }}</p>
+  </div>
+  {% endif %}
+
+  <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
+    <h3 class="section-title" style="margin:0"><i class="fas fa-desktop"></i> Active Sessions ({{ sessions|length }})</h3>
+    <div class="btn-group">
+      <form method="POST" action="{{ url_for('api_logout_all') }}" style="display:inline"
+            onsubmit="return confirm('Logout ALL users?')">
+        <button class="btn btn-danger btn-sm"><i class="fas fa-power-off"></i> Logout All</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="table-wrapper mb-3">
+    <table>
+      <thead>
+        <tr><th>User</th><th>Role</th><th>Dept</th><th>Status</th><th>Last Activity</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for s in sessions %}
+        <tr>
+          <td>
+            <strong>{{ s.name or s.user_email }}</strong><br>
+            <span style="font-size:.75rem;color:var(--text-dim)">{{ s.user_email }}</span>
+          </td>
+          <td><span class="badge badge-primary">{{ (s.role or 'N/A')|title }}</span></td>
+          <td>{{ s.department or 'N/A' }}</td>
+          <td>
+            {% if s.status == 'Active' %}<span class="badge badge-success">Active</span>
+            {% elif s.status == 'Idle' %}<span class="badge badge-warning">Idle</span>
+            {% else %}<span class="badge badge-muted">{{ s.status }}</span>{% endif %}
+          </td>
+          <td style="font-size:.82rem">{{ s.time_ago }}</td>
+          <td>
+            <form method="POST" action="{{ url_for('api_force_logout', email=s.user_email) }}" style="display:inline">
+              <button class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Kick</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not sessions %}
+        <tr><td colspan="6" class="text-center text-muted" style="padding:24px">No active sessions.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  
+  <!-- Monitoring Metrics -->
+  <div class="metrics-grid mb-3">
+    <div class="metric-card">
+      <div class="metric-label">Active Sessions</div>
+      <div class="metric-value text-success">{{ session_stats.active_sessions }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Peak Concurrent</div>
+      <div class="metric-value">{{ session_stats.peak_concurrent }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Recent Session History</div>
+      <div class="metric-value">{{ session_history|length }}</div>
+    </div>
+  </div>
+  
+  <!-- Session History -->
+  <h3 class="section-title"><i class="fas fa-history"></i> Recent Session History</h3>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Role</th>
+          <th>Login Time</th>
+          <th>Duration</th>
+          <th>IP Address</th>
+          <th>Status</th>
+          <th>Logout Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in session_history[:50] %}
+        <tr>
+          <td>
+            <strong>{{ s.name or s.user_email }}</strong><br>
+            <span style="font-size:.75rem;color:var(--text-dim)">{{ s.user_email }}</span>
+          </td>
+          <td><span class="badge badge-primary">{{ (s.role or 'N/A')|title }}</span></td>
+          <td style="font-size:.82rem">{{ (s.login_time or '')[:16] }}</td>
+          <td>{{ s.duration or 'N/A' }}</td>
+          <td style="font-size:.82rem">{{ s.ip_address or 'N/A' }}</td>
+          <td>
+            {% if s.is_active %}<span class="badge badge-success">Active</span>
+            {% elif s.forced_logout %}<span class="badge badge-danger">Forced</span>
+            {% else %}<span class="badge badge-muted">Ended</span>{% endif %}
+          </td>
+          <td style="font-size:.82rem">{{ s.logout_reason or '—' }}</td>
+        </tr>
+        {% endfor %}
+        {% if not session_history %}
+        <tr><td colspan="7" class="text-center text-muted" style="padding:24px">No session history.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== CONFIGURATION TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'config' %}active{% endif %}" id="tab-config">
+  <h3 class="section-title"><i class="fas fa-cog"></i> Application Configuration</h3>
+  
+  <form method="POST" action="{{ url_for('api_update_config') }}">
+    <!-- Session Settings -->
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-shield-alt"></i> Session Security Settings</div>
+      
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Session Timeout (hours)</label>
+          <input type="number" class="form-control" name="session_timeout" 
+                 value="{{ ((app_config.session_timeout|int) // 3600) if (app_config.session_timeout|int) >= 3600 else 24 }}" min="1" max="168">
+          <small style="color:var(--text-dim);font-size:.75rem;">
+            Inactive users logged out after this time (1-168 hours)
+          </small>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Heartbeat Interval (seconds)</label>
+          <input type="number" class="form-control" name="session_heartbeat_interval" 
+                 value="{{ app_config.session_heartbeat_interval }}" min="10" max="120">
+          <small style="color:var(--text-dim);font-size:.75rem;">
+            How often to check session validity (10-120s)
+          </small>
+        </div>
+      </div>
+      
+      <div class="form-check">
+        <input type="checkbox" name="session_monitoring_enabled" id="sessionMonitoring"
+               {% if app_config.session_monitoring_enabled == 'true' %}checked{% endif %}>
+        <label for="sessionMonitoring">Enable Session Monitoring Dashboard</label>
+      </div>
+      
+      <div class="form-check">
+        <input type="checkbox" name="allow_concurrent_sessions" id="allowConcurrent"
+               {% if app_config.allow_concurrent_sessions == 'true' %}checked{% endif %}>
+        <label for="allowConcurrent">Allow Same User on Multiple Devices</label>
+      </div>
+      
+      <div class="form-group" style="margin-top:12px;">
+        <label class="form-label">Max Concurrent Sessions per User</label>
+        <input type="number" class="form-control" name="max_concurrent_sessions" 
+               value="{{ app_config.max_concurrent_sessions }}" min="1" max="5" style="max-width:120px;">
+      </div>
+    </div>
+    
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-circle-info"></i> Display Theme</div>
+      <p style="font-size:.85rem;color:var(--text-dim);">
+        Light/Dark mode is controlled by the theme toggle button in the top header.
+      </p>
+    </div>
+    
+    <div class="btn-group">
+      <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save All Settings</button>
+    </div>
+  </form>
+
+  <div class="card mt-3" style="max-width:760px;">
+    <div class="card-title"><i class="fas fa-key"></i> Reset User Password</div>
+    <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:14px;">
+      Admins can reset password for any counselor or admin account.
+    </p>
+    <form method="POST" action="{{ url_for('api_admin_reset_password') }}" id="resetUserForm" onsubmit="return validateResetUserSelection()">
+      <div class="form-group">
+        <label class="form-label">Search User</label>
+        <input type="text" class="form-control" id="resetUserSearch" placeholder="Type name or email" autocomplete="off" oninput="renderResetUserSuggestions()" onfocus="renderResetUserSuggestions()">
+        <input type="hidden" id="resetUserSelectedEmail" name="target_email" required>
+        <div id="resetUserSuggestions" class="table-wrapper" style="margin-top:8px;max-height:180px;overflow:auto;display:none;"></div>
+        <p id="resetUserPicked" style="margin-top:8px;font-size:.8rem;color:var(--text-dim);"></p>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">New Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="resetUserNewPassword" name="new_password" minlength="6" required>
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('resetUserNewPassword', 'iconResetUserNewPassword')" aria-label="Show or hide new password">
+              <i id="iconResetUserNewPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="resetUserConfirmPassword" name="confirm_password" minlength="6" required>
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('resetUserConfirmPassword', 'iconResetUserConfirmPassword')" aria-label="Show or hide confirm password">
+              <i id="iconResetUserConfirmPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-check">
+        <input type="checkbox" name="force_logout" id="forceLogoutAfterReset" checked>
+        <label for="forceLogoutAfterReset">Force logout from active sessions after reset</label>
+      </div>
+
+      <button type="submit" class="btn btn-warning">
+        <i class="fas fa-key"></i> Reset Password
+      </button>
+    </form>
+  </div>
+  
+</div>
+
+<!-- ==================== MESSAGE LOGS TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'messages' %}active{% endif %}" id="tab-messages">
+  <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
+    <h3 class="section-title" style="margin:0"><i class="fas fa-envelope"></i> Message Logs</h3>
+    <div class="btn-group">
+      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_csv', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-csv"></i> CSV</a>
+      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_excel', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-excel"></i> Excel</a>
+      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_pdf', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+    </div>
+  </div>
+
+  <div class="card mb-2">
+    <form method="GET" action="{{ url_for(panel_endpoint) }}" class="form-row" style="align-items:end;">
+      <input type="hidden" name="tab" value="messages">
+      <div class="form-group">
+        <label class="form-label">Year</label>
+        <input class="form-control" type="number" min="2020" max="2100" name="msg_year" value="{{ selected_message_year or '' }}" placeholder="YYYY">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Month</label>
+        <select class="form-control" name="msg_month">
+          <option value="">All Months</option>
+          <option value="01" {% if selected_message_month == '01' %}selected{% endif %}>January</option>
+          <option value="02" {% if selected_message_month == '02' %}selected{% endif %}>February</option>
+          <option value="03" {% if selected_message_month == '03' %}selected{% endif %}>March</option>
+          <option value="04" {% if selected_message_month == '04' %}selected{% endif %}>April</option>
+          <option value="05" {% if selected_message_month == '05' %}selected{% endif %}>May</option>
+          <option value="06" {% if selected_message_month == '06' %}selected{% endif %}>June</option>
+          <option value="07" {% if selected_message_month == '07' %}selected{% endif %}>July</option>
+          <option value="08" {% if selected_message_month == '08' %}selected{% endif %}>August</option>
+          <option value="09" {% if selected_message_month == '09' %}selected{% endif %}>September</option>
+          <option value="10" {% if selected_message_month == '10' %}selected{% endif %}>October</option>
+          <option value="11" {% if selected_message_month == '11' %}selected{% endif %}>November</option>
+          <option value="12" {% if selected_message_month == '12' %}selected{% endif %}>December</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Day</label>
+        <input class="form-control" type="number" min="1" max="31" name="msg_day_num" value="{{ selected_message_day_num or '' }}" placeholder="DD">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Exact Date</label>
+        <select class="form-control" name="msg_day">
+          <option value="">All Days</option>
+          {% for d in message_days %}
+          <option value="{{ d.day }}" {% if selected_message_day == d.day %}selected{% endif %}>{{ d.day }} ({{ d.total }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Search Counselor Name</label>
+        <input class="form-control" list="counselorNameSuggestions" type="text" name="msg_q" value="{{ message_query or '' }}" placeholder="Type counselor name">
+        <datalist id="counselorNameSuggestions">
+          {% for c in counselor_suggestions %}
+          <option value="{{ c.name }}"></option>
+          {% endfor %}
+        </datalist>
+      </div>
+      <div class="btn-group" style="margin-bottom:2px;">
+        <button class="btn btn-primary btn-sm" type="submit"><i class="fas fa-filter"></i> Apply</button>
+        <a class="btn btn-outline btn-sm" href="{{ url_for(panel_endpoint, tab='messages') }}"><i class="fas fa-rotate-left"></i> Reset</a>
+      </div>
+    </form>
+  </div>
+
+  {% if message_days %}
+  <div class="table-wrapper mb-2" style="padding:10px;">
+    <div class="d-flex flex-wrap" style="gap:8px;">
+      {% for d in message_days %}
+      <a class="badge {% if selected_message_day == d.day %}badge-primary{% else %}badge-info{% endif %}"
+         href="{{ url_for(panel_endpoint, tab='messages', msg_day=d.day, msg_q=message_query) }}"
+         style="text-decoration:none;">
+        {{ d.day }}: {{ d.total }} msg
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div>
+    <div class="d-flex justify-between align-center mb-1" style="gap:10px;">
+      <div class="form-check">
+        <input type="checkbox" id="selectAllMessages" onchange="toggleSelectAllMessages(this.checked)">
+        <label for="selectAllMessages">Select all on current view</label>
+      </div>
+      <button class="btn btn-danger btn-sm" type="button" onclick="submitBulkMessageDelete()"><i class="fas fa-trash"></i> Delete Selected</button>
+    </div>
+
+    {% if message_groups %}
+      {% for g in message_groups %}
+      <div class="card mb-2" style="padding:12px;">
+        <div class="d-flex justify-between align-center mb-1" style="gap:8px;">
+          <strong>Day: {{ g.day }}</strong>
+          <span class="badge badge-info">{{ g.total }} messages</span>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:34px;"></th>
+                <th>Time</th>
+                <th>Counselor</th>
+                <th>Student</th>
+                <th>Reg No</th>
+                <th>Format</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for m in g.messages %}
+              <tr>
+                <td><input type="checkbox" name="message_ids" value="{{ m.id }}" class="message-row-checkbox"></td>
+                <td style="font-size:.82rem;">{{ (m.sent_at or '')[11:19] }}</td>
+                <td>{{ m.counselor_name or m.counselor_email }}</td>
+                <td>{{ m.student_name }}</td>
+                <td><strong>{{ m.reg_no }}</strong></td>
+                <td><span class="badge badge-info">{{ m.format }}</span></td>
+                <td><span class="badge {% if (m.status or '').lower() == 'sent' %}badge-success{% else %}badge-warning{% endif %}">{{ m.status or 'sent' }}</span></td>
+                <td>
+                  <form method="POST" action="{{ url_for('api_delete_message', message_id=m.id) }}" style="display:inline" onsubmit="return confirm('Delete this message entry?')">
+                    <input type="hidden" name="tab" value="messages">
+                    <input type="hidden" name="msg_day" value="{{ selected_message_day or '' }}">
+                    <input type="hidden" name="msg_q" value="{{ message_query or '' }}">
+                    <input type="hidden" name="msg_year" value="{{ selected_message_year or '' }}">
+                    <input type="hidden" name="msg_month" value="{{ selected_message_month or '' }}">
+                    <input type="hidden" name="msg_day_num" value="{{ selected_message_day_num or '' }}">
+                    <button class="btn btn-danger btn-sm" type="submit"><i class="fas fa-trash"></i></button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+    <div class="table-wrapper">
+      <table>
+        <tbody>
+          <tr><td class="text-center text-muted" style="padding:24px">No message activity found for the selected filters.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <form id="bulkMessageDeleteForm" method="POST" action="{{ url_for('api_delete_messages_bulk') }}" style="display:none;">
+    <input type="hidden" name="tab" value="messages">
+    <input type="hidden" name="msg_day" value="{{ selected_message_day or '' }}">
+    <input type="hidden" name="msg_q" value="{{ message_query or '' }}">
+    <input type="hidden" name="msg_year" value="{{ selected_message_year or '' }}">
+    <input type="hidden" name="msg_month" value="{{ selected_message_month or '' }}">
+    <input type="hidden" name="msg_day_num" value="{{ selected_message_day_num or '' }}">
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TEST_VIEW_CACHE = {};
+const ADMIN_TEST_VIEW_IGNORED_KEYS = new Set([
+  'regno', 'registernumber', 'name', 'studentname', 'department', 'section', 'batch', 'semester',
+  'test', 'total', 'overall', 'percentage', 'grade', 'result', 'status', 'parentphone', 'phone',
+  'parentemail', 'email', 'sno', 'slno', 'serialno', 'serialnumber', 'rollno',
+  'absentees', 'absentee', 'absentstudents', 'examnotattended', 'notattended', 'absentcount', 'noofsubjectsabsent'
+]);
+
+function clearFilters() {
+  window.location.href = '{{ url_for(panel_endpoint) }}?tab=reports';
+}
+
+function toggleSelectAllMessages(checked) {
+  document.querySelectorAll('.message-row-checkbox').forEach((el) => {
+    el.checked = !!checked;
+  });
+}
+
+function getSelectedMessageIds() {
+  return Array.from(document.querySelectorAll('.message-row-checkbox:checked')).map((el) => el.value);
+}
+
+function confirmBulkMessageDelete() {
+  const ids = getSelectedMessageIds();
+  if (!ids.length) {
+    alert('Select at least one message to delete.');
+    return false;
+  }
+  return confirm(`Delete ${ids.length} selected message entr${ids.length === 1 ? 'y' : 'ies'}?`);
+}
+
+function submitBulkMessageDelete() {
+  if (!confirmBulkMessageDelete()) return;
+
+  const form = document.getElementById('bulkMessageDeleteForm');
+  if (!form) return;
+
+  form.querySelectorAll('input[name="message_ids"]').forEach((el) => el.remove());
+  getSelectedMessageIds().forEach((id) => {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'message_ids';
+    input.value = id;
+    form.appendChild(input);
+  });
+
+  form.submit();
+}
+
+function normalizeMetricKey(key) {
+  return String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isUnknownMetricField(rawKey, normalizedKey) {
+  const raw = String(rawKey || '').trim().toLowerCase();
+  if (!raw) return true;
+  if (raw === 'undefined' || raw.startsWith('unnamed')) return true;
+  if (/^subject[_\s-]*\d+$/.test(raw)) return true;
+  if (String(normalizedKey || '').startsWith('unnamed')) return true;
+  return false;
+}
+
+function shouldIncludeMarkEntry(rawKey, rawValue) {
+  const key = normalizeMetricKey(rawKey);
+  const value = String(rawValue ?? '').trim();
+
+  if (isUnknownMetricField(rawKey, key)) return false;
+  if (!key || ADMIN_TEST_VIEW_IGNORED_KEYS.has(key)) return false;
+  if (!value || value.toLowerCase() === 'undefined' || value.toLowerCase() === 'null') return false;
+  return true;
+}
+
+function getAdminTestViewSubjects(students) {
+  const seen = new Set();
+  const subjects = [];
+
+  (students || []).forEach((student) => {
+    const marks = student?.marks || {};
+    Object.entries(marks).forEach(([rawKey, rawVal]) => {
+      if (!shouldIncludeMarkEntry(rawKey, rawVal)) return;
+      const key = String(rawKey || '').trim();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      subjects.push(key);
+    });
+  });
+
+  return subjects;
+}
+
+function renderTestViewRows(students, subjects) {
+  return (students || []).map((s) => {
+    const marks = s?.marks || {};
+    const cells = subjects.map((subject) => {
+      const value = Object.prototype.hasOwnProperty.call(marks, subject) ? marks[subject] : '-';
+      return `<td>${escapeHtml(String(value ?? '-'))}</td>`;
+    }).join('');
+
+    return `<tr><td><strong>${escapeHtml(s.reg_no || '')}</strong></td><td>${escapeHtml(s.department || '—')}</td>${cells}</tr>`;
+  }).join('');
+}
+
+function renderTestView(host, students) {
+  if (!students.length) {
+    host.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:.82rem;">No student records in this test.</div>';
+    return;
+  }
+
+  const subjects = getAdminTestViewSubjects(students);
+  if (!subjects.length) {
+    host.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:.82rem;">No valid subject marks found.</div>';
+    return;
+  }
+
+  const subjectHeaders = subjects.map((s) => `<th>${escapeHtml(s)}</th>`).join('');
+  const rows = renderTestViewRows(students, subjects);
+
+  host.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Reg No</th>
+          <th>Department</th>
+          ${subjectHeaders}
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+async function openTestViewModal(testId) {
+  openModal('test-view-' + testId);
+  const host = document.getElementById('test-view-marks-' + testId);
+  if (!host) return;
+
+  if (TEST_VIEW_CACHE[testId]) {
+    renderTestView(host, TEST_VIEW_CACHE[testId]);
+    return;
+  }
+
+  host.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:.82rem;">Loading...</div>';
+
+  try {
+    const response = await fetch(`/api/tests/${testId}/marks`, { credentials: 'same-origin' });
+    const payload = await response.json();
+    if (!response.ok || !payload.success) {
+      host.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem;">Unable to load student marks.</div>';
+      return;
+    }
+
+    const data = payload.data || {};
+    const students = data.students || [];
+    TEST_VIEW_CACHE[testId] = students;
+    renderTestView(host, students);
+  } catch (e) {
+    host.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem;">Unable to load student marks.</div>';
+  }
+}
+
+async function openRecentTestViewModal(testId) {
+  openModal('recent-test-view-' + testId);
+  const host = document.getElementById('recent-test-view-marks-' + testId);
+  if (!host) return;
+
+  if (TEST_VIEW_CACHE[testId]) {
+    renderTestView(host, TEST_VIEW_CACHE[testId]);
+    return;
+  }
+
+  host.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:.82rem;">Loading...</div>';
+
+  try {
+    const response = await fetch(`/api/tests/${testId}/marks`, { credentials: 'same-origin' });
+    const payload = await response.json();
+    if (!response.ok || !payload.success) {
+      host.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem;">Unable to load student marks.</div>';
+      return;
+    }
+
+    const data = payload.data || {};
+    const students = data.students || [];
+    TEST_VIEW_CACHE[testId] = students;
+    renderTestView(host, students);
+  } catch (e) {
+    host.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem;">Unable to load student marks.</div>';
+  }
+}
+
+function toggleCreateUserFields() {
+  const roleEl = document.getElementById('createUserRole');
+  const roleValue = roleEl ? roleEl.value : 'counselor';
+  const isScopedRole = roleValue === 'counselor' || roleValue === 'hod' || roleValue === 'deo';
+  const isCounselor = roleValue === 'counselor';
+
+  const counselorRow = document.getElementById('createUserCounselorRow');
+  const counselorCapacityRow = document.getElementById('createUserCounselorCapacityRow');
+  const uploadPermissionWrap = document.getElementById('createUserUploadPermissionWrap');
+  const studentUploadWrap = document.getElementById('createUserStudentUploadWrap');
+  const chiefScopeWrap = document.getElementById('createUserChiefScopeWrap');
+
+  const deptEl = document.getElementById('createUserDepartment');
+  const yearLevelEl = document.getElementById('createUserYearLevel');
+  const maxStudentsEl = document.getElementById('createUserMaxStudents');
+  const canUploadEl = document.getElementById('canUpload');
+  const studentFileEl = document.getElementById('createUserStudentFile');
+
+  if (counselorRow) counselorRow.style.display = isScopedRole ? '' : 'none';
+  if (counselorCapacityRow) counselorCapacityRow.style.display = isCounselor ? '' : 'none';
+  if (uploadPermissionWrap) uploadPermissionWrap.style.display = isCounselor ? '' : 'none';
+  if (studentUploadWrap) studentUploadWrap.style.display = isCounselor ? '' : 'none';
+  if (chiefScopeWrap) chiefScopeWrap.style.display = 'none';
+
+  if (deptEl) {
+    deptEl.disabled = !isScopedRole;
+    deptEl.required = isScopedRole;
+    if (!isScopedRole) deptEl.value = '';
+  }
+
+  if (yearLevelEl) {
+    yearLevelEl.disabled = !isScopedRole;
+    yearLevelEl.required = isScopedRole;
+    if (!isScopedRole) yearLevelEl.value = '1';
+  }
+
+  if (maxStudentsEl) {
+    maxStudentsEl.disabled = !isCounselor;
+    maxStudentsEl.required = isCounselor;
+    if (!isCounselor) maxStudentsEl.value = '500';
+    else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
+  }
+
+  if (canUploadEl) {
+    canUploadEl.disabled = !isCounselor;
+    canUploadEl.checked = isCounselor ? canUploadEl.checked : true;
+  }
+
+  if (studentFileEl) {
+    studentFileEl.disabled = !isCounselor;
+    if (!isCounselor) {
+      studentFileEl.value = '';
+      const lbl = document.getElementById('createFileLabel');
+      if (lbl) lbl.textContent = '';
+    }
+  }
+}
+
+function toggleEditUserFields(userIndex) {
+  const idx = String(userIndex || '');
+  const roleEl = document.getElementById(`editRole-${idx}`);
+  const roleValue = roleEl ? (roleEl.value || 'counselor') : 'counselor';
+  const isScopedRole = roleValue === 'counselor' || roleValue === 'hod' || roleValue === 'deo';
+  const isCounselorRole = roleValue === 'counselor';
+
+  const counselorRow = document.getElementById(`editCounselorRow-${idx}`);
+  const capacityRow = document.getElementById(`editCapacityRow-${idx}`);
+  const uploadWrap = document.getElementById(`editUploadWrap-${idx}`);
+  const chiefScopeWrap = document.getElementById(`editChiefScopeWrap-${idx}`);
+  const departmentEl = document.getElementById(`editDepartment-${idx}`);
+  const yearLevelEl = document.getElementById(`editYearLevel-${idx}`);
+  const maxStudentsEl = document.getElementById(`editMaxStudents-${idx}`);
+  const canUploadEl = document.getElementById(`canUp-${idx}`);
+
+  if (counselorRow) counselorRow.style.display = isScopedRole ? '' : 'none';
+  if (capacityRow) capacityRow.style.display = isCounselorRole ? '' : 'none';
+  if (uploadWrap) uploadWrap.style.display = isCounselorRole ? '' : 'none';
+  if (chiefScopeWrap) chiefScopeWrap.style.display = 'none';
+
+  if (departmentEl) {
+    departmentEl.disabled = !isScopedRole;
+    departmentEl.required = isScopedRole;
+    if (!isScopedRole) departmentEl.value = '';
+  }
+
+  if (yearLevelEl) {
+    yearLevelEl.disabled = !isScopedRole;
+    yearLevelEl.required = isScopedRole;
+    if (!isScopedRole) yearLevelEl.value = '1';
+  }
+
+  if (maxStudentsEl) {
+    maxStudentsEl.disabled = !isCounselorRole;
+    maxStudentsEl.required = isCounselorRole;
+    if (!isCounselorRole) maxStudentsEl.value = '500';
+    else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
+  }
+
+  if (canUploadEl) {
+    canUploadEl.disabled = !isCounselorRole;
+    if (!isCounselorRole) canUploadEl.checked = true;
+  }
+}
+
+function filterUserCards() {
+  const q = (document.getElementById('userSearchBox')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('.user-card[data-user-search]').forEach((card) => {
+    const hay = card.getAttribute('data-user-search') || '';
+    card.style.display = !q || hay.includes(q) ? '' : 'none';
+  });
+}
+
+function togglePasswordInput(inputId, iconId) {
+  const input = document.getElementById(inputId);
+  const icon = document.getElementById(iconId);
+  if (!input) return;
+
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+
+  if (icon) {
+    icon.classList.remove(showing ? 'fa-eye-slash' : 'fa-eye');
+    icon.classList.add(showing ? 'fa-eye' : 'fa-eye-slash');
+  }
+}
+
+const adminScriptData = document.getElementById('adminScriptData');
+const RESET_USERS = (() => {
+  if (!adminScriptData) return [];
+  const raw = adminScriptData.getAttribute('data-reset-users') || '[]';
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+})();
+
+function openTestViewModalFromButton(btn) {
+  const id = Number(btn?.dataset?.testId || 0);
+  if (!id) return;
+  openTestViewModal(id);
+}
+
+function applyActivityProgressWidths() {
+  document.querySelectorAll('.activity-progress-bar[data-width]').forEach((el) => {
+    const pct = Number(el.getAttribute('data-width') || '0');
+    const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+    el.style.width = `${safePct}%`;
+  });
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function renderResetUserSuggestions() {
+  const input = document.getElementById('resetUserSearch');
+  const panel = document.getElementById('resetUserSuggestions');
+  const selectedEmail = document.getElementById('resetUserSelectedEmail');
+  const pickedText = document.getElementById('resetUserPicked');
+  if (!input || !panel || !selectedEmail || !pickedText) return;
+
+  const q = (input.value || '').trim().toLowerCase();
+  if (!q) {
+    panel.style.display = 'none';
+    selectedEmail.value = '';
+    pickedText.textContent = '';
+    return;
+  }
+
+  const matches = RESET_USERS
+    .filter(u => `${u.name} ${u.email} ${u.role}`.toLowerCase().includes(q))
+    .slice(0, 20);
+
+  if (!matches.length) {
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="padding:10px 12px;color:var(--text-dim);font-size:.85rem;">No matching users found.</div>';
+    selectedEmail.value = '';
+    pickedText.textContent = '';
+    return;
+  }
+
+  panel.style.display = 'block';
+  panel.innerHTML = matches.map((u) => {
+    const label = `${u.name} (${u.email}) - ${u.role.charAt(0).toUpperCase() + u.role.slice(1)}`;
+    return `<button type="button" class="btn btn-outline btn-sm" style="display:block;width:100%;text-align:left;border:none;border-bottom:1px solid var(--border-light);border-radius:0;padding:10px 12px;cursor:pointer;" data-user-email="${u.email}" data-user-label="${label.replace(/"/g, '&quot;')}">${escapeHtml(label)}</button>`;
+  }).join('');
+
+  // Attach click handlers to suggestion buttons
+  panel.querySelectorAll('button[data-user-email]').forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const email = btn.getAttribute('data-user-email');
+      const label = btn.getAttribute('data-user-label');
+      chooseResetUser(email, label);
+    });
+  });
+
+  // Auto-pick exact email match for quick keyboard flow.
+  const exact = matches.find(u => u.email.toLowerCase() === q);
+  if (exact) {
+    const label = `${exact.name} (${exact.email}) - ${exact.role.charAt(0).toUpperCase() + exact.role.slice(1)}`;
+    chooseResetUser(exact.email, label, true);
+  } else {
+    selectedEmail.value = '';
+    pickedText.textContent = '';
+  }
+}
+
+function chooseResetUser(email, label, keepOpen) {
+  const input = document.getElementById('resetUserSearch');
+  const panel = document.getElementById('resetUserSuggestions');
+  const selectedEmail = document.getElementById('resetUserSelectedEmail');
+  const pickedText = document.getElementById('resetUserPicked');
+  if (!input || !panel || !selectedEmail || !pickedText) return;
+
+  input.value = label;
+  selectedEmail.value = email;
+  pickedText.textContent = `Selected: ${label}`;
+  if (!keepOpen) panel.style.display = 'none';
+}
+
+function validateResetUserSelection() {
+  const selectedEmail = document.getElementById('resetUserSelectedEmail');
+  if (selectedEmail && selectedEmail.value) return true;
+  alert('Please select a user from the suggested list.');
+  return false;
+}
+
+function syncAdminPostFormsWithTab() {
+  const currentTab = adminScriptData ? (adminScriptData.getAttribute('data-current-tab') || 'reports') : 'reports';
+  document.querySelectorAll('form[method="POST"], form[method="post"]').forEach((form) => {
+    const existing = form.querySelector('input[name="tab"]');
+    if (existing) {
+      existing.value = currentTab;
+      return;
+    }
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.name = 'tab';
+    hidden.value = currentTab;
+    form.appendChild(hidden);
+  });
+}
+
+function moveRegisterFormBelowUserList() {
+  const usersPanel = document.getElementById('tab-users');
+  const registerCard = document.getElementById('registerUserCard');
+  const userTableWrap = usersPanel ? usersPanel.querySelector('.table-wrapper') : null;
+  if (!usersPanel || !registerCard || !userTableWrap) return;
+  if (registerCard.compareDocumentPosition(userTableWrap) & Node.DOCUMENT_POSITION_FOLLOWING) {
+    userTableWrap.insertAdjacentElement('afterend', registerCard);
+  }
+}
+
+function bindActivityAutoFilter() {
+  const form = document.getElementById('activityResultForm');
+  const search = document.getElementById('activitySearchInput');
+  const sort = document.getElementById('activitySortSelect');
+  const suggestions = document.getElementById('activitySearchSuggestions');
+  const tbody = document.querySelector('#tab-activity .table-wrapper tbody');
+  const noRows = document.getElementById('activityNoRows');
+  const pdfLink = document.getElementById('activityPdfLink');
+  if (!form) return;
+
+  function updatePdfLink() {
+    if (!pdfLink) return;
+    const baseHref = pdfLink.getAttribute('data-base-href');
+    if (!baseHref) return;
+    const url = new URL(baseHref, window.location.origin);
+    url.searchParams.set('act_q', (search?.value || '').trim());
+    url.searchParams.set('act_sort', sort?.value || 'pending_first');
+    pdfLink.href = url.pathname + url.search;
+  }
+
+  function rowMatches(row, q) {
+    if (!q) return true;
+    const name = row.getAttribute('data-counselor-name') || '';
+    const email = row.getAttribute('data-counselor-email') || '';
+    return name.includes(q) || email.includes(q);
+  }
+
+  function sortRows(rows, sortMode) {
+    return rows.sort((a, b) => {
+      const aName = a.getAttribute('data-counselor-name') || '';
+      const bName = b.getAttribute('data-counselor-name') || '';
+      if (sortMode === 'name_desc') return bName.localeCompare(aName);
+      if (sortMode === 'name_asc') return aName.localeCompare(bName);
+
+      const aStatus = a.getAttribute('data-status') || '';
+      const bStatus = b.getAttribute('data-status') || '';
+      const aPending = aStatus !== 'complete' ? 0 : 1;
+      const bPending = bStatus !== 'complete' ? 0 : 1;
+      if (aPending !== bPending) return aPending - bPending;
+      return aName.localeCompare(bName);
+    });
+  }
+
+  function updateSuggestions(rows, q) {
+    if (!suggestions) return;
+    if (!q) {
+      suggestions.style.display = 'none';
+      suggestions.innerHTML = '';
+      return;
+    }
+
+    const names = [];
+    rows.forEach((r) => {
+      const n = ((r.querySelector('td strong') || {}).textContent || '').trim();
+      if (n && n.toLowerCase().includes(q) && !names.includes(n)) names.push(n);
+    });
+
+    const limited = names.slice(0, 5);
+    if (!limited.length) {
+      suggestions.style.display = 'none';
+      suggestions.innerHTML = '';
+      return;
+    }
+
+    suggestions.innerHTML = limited.map((n) => `<li>${escapeHtml(n)}</li>`).join('');
+    suggestions.style.display = 'block';
+    suggestions.querySelectorAll('li').forEach((li) => {
+      li.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        if (search) search.value = li.textContent || '';
+        applyActivityFilter();
+        suggestions.style.display = 'none';
+      });
+    });
+  }
+
+  function applyActivityFilter() {
+    if (!tbody) return;
+    const query = (search?.value || '').trim().toLowerCase();
+    const sortMode = sort?.value || 'pending_first';
+    const rows = Array.from(tbody.querySelectorAll('tr.activity-row'));
+    const filtered = rows.filter((row) => rowMatches(row, query));
+    const sorted = sortRows(filtered, sortMode);
+
+    rows.forEach((row) => { row.style.display = 'none'; });
+    sorted.forEach((row) => {
+      row.style.display = '';
+      tbody.appendChild(row);
+    });
+
+    if (noRows) {
+      noRows.style.display = sorted.length ? 'none' : '';
+    }
+
+    updateSuggestions(rows, query);
+    updatePdfLink();
+  }
+
+  if (search) {
+    search.addEventListener('input', applyActivityFilter);
+    search.addEventListener('focus', applyActivityFilter);
+  }
+
+  if (sort) {
+    sort.addEventListener('change', applyActivityFilter);
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!suggestions) return;
+    if (e.target === search || suggestions.contains(e.target)) return;
+    suggestions.style.display = 'none';
+  });
+
+  applyActivityFilter();
+}
+
+function reopenRequestedManageModal() {
+  const params = new URLSearchParams(window.location.search);
+  const openManage = (params.get('open_manage') || '').trim().toLowerCase();
+  if (!openManage) return;
+
+  const target = Array.from(document.querySelectorAll('.modal-overlay[data-counselor-email]')).find((el) => {
+    return (el.getAttribute('data-counselor-email') || '').trim().toLowerCase() === openManage;
+  });
+
+  if (target) {
+    target.classList.add('open');
+  }
+}
+
+function toggleStudentQuickAdd(idx) {
+  const quickAdd = document.getElementById(`quickAddStudent-${idx}`);
+  if (!quickAdd) return;
+  quickAdd.style.display = quickAdd.style.display === 'none' ? 'block' : 'none';
+  // Autofocus first input after showing
+  if (quickAdd.style.display !== 'none') {
+    const firstInput = quickAdd.querySelector('input[name="reg_no"]');
+    if (firstInput) setTimeout(() => firstInput.focus(), 100);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  toggleCreateUserFields();
+  document.querySelectorAll('[data-edit-role]').forEach((el) => {
+    const idx = el.getAttribute('data-edit-role');
+    if (idx) toggleEditUserFields(idx);
+  });
+  applyActivityProgressWidths();
+  syncAdminPostFormsWithTab();
+  moveRegisterFormBelowUserList();
+  bindActivityAutoFilter();
+  reopenRequestedManageModal();
+});
+</script>
+{% endblock %}

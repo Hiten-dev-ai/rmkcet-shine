@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+<!--{% block title %}Login - {{ app_name }}{% endblock %}-->
+
+{% block content_login %}
+<div class="login-box">
+  <div class="login-logo">
+    <div class="login-banner-wrap">
+      <img src="{{ url_for('static', filename='assets/banner.png') }}" alt="RMKCET Banner" class="login-banner-image">
+    </div>
+    <p>RMKCET SHINE : RMKCET Science and Humanities Internal Notification Engine</p>
+  </div>
+
+  {% if session_conflict %}
+  <!-- Session Conflict Modal -->
+  <div class="session-conflict-alert">
+    <div class="conflict-icon"><i class="fas fa-exclamation-triangle"></i></div>
+    <h3>Active Session Detected</h3>
+    <p>You are already logged in on another device.</p>
+    <div class="device-info">
+      <p><i class="fas fa-desktop"></i> <strong>Device:</strong> {{ existing_session.device_type }}</p>
+      <p><i class="fas fa-globe"></i> <strong>Browser:</strong> {{ existing_session.browser }}</p>
+      <p><i class="fas fa-map-marker-alt"></i> <strong>IP:</strong> {{ existing_session.ip_address }}</p>
+      <p><i class="fas fa-clock"></i> <strong>Logged in:</strong> {{ existing_session.login_time[:16] if existing_session.login_time else 'Unknown' }}</p>
+    </div>
+    <p class="conflict-question">Do you want to logout from the other device and continue here?</p>
+    <form method="POST" action="{{ url_for('login') }}">
+      <input type="hidden" name="identifier" value="{{ stored_identifier }}">
+      <input type="hidden" name="password" value="{{ stored_password }}">
+      <input type="hidden" name="force_logout" value="true">
+      <div class="conflict-buttons">
+        <button type="submit" class="btn btn-primary">
+          <i class="fas fa-sign-out-alt"></i> Yes, Logout Other Device
+        </button>
+        <a href="{{ url_for('login') }}" class="btn btn-outline">
+          <i class="fas fa-times"></i> Cancel
+        </a>
+      </div>
+    </form>
+  </div>
+  {% else %}
+  <form method="POST" action="{{ url_for('login') }}" autocomplete="on">
+    <div class="form-group">
+      <label class="form-label" for="identifier">Email or Name</label>
+      <input type="text" class="form-control" id="identifier" name="identifier"
+             placeholder="Enter your email or name" required autofocus>
+      <small style="color:var(--text-dim);font-size:.75rem;margin-top:4px;display:block;">
+        You can login using your email address or full name
+      </small>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="password">Password</label>
+      <div style="position:relative">
+        <input type="password" class="form-control" id="password" name="password"
+               placeholder="Enter your password" required>
+        <button type="button" class="toggle-pw"
+                onclick="togglePassword()"
+                style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;">
+          <i class="fas fa-eye" id="pwIcon"></i>
+        </button>
+      </div>
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="margin-top:8px;">
+      <i class="fas fa-sign-in-alt"></i> Sign In
+    </button>
+  </form>
+  {% endif %}
+
+  <div style="margin-top:24px;text-align:center;">
+    <p style="font-size:.78rem;color:var(--text-muted);">
+      RMK CET Department of Science and Humanities. All rights reserved.
+    </p>
+  </div>
+</div>
+
+<style>
+.session-conflict-alert {
+  background: rgba(248, 80, 50, 0.1);
+  border: 1px solid rgba(248, 80, 50, 0.3);
+  border-radius: var(--radius);
+  padding: 24px;
+  text-align: center;
+}
+.session-conflict-alert .conflict-icon {
+  font-size: 3rem;
+  color: #f85032;
+  margin-bottom: 12px;
+}
+.session-conflict-alert h3 {
+  color: #f85032;
+  margin-bottom: 8px;
+}
+.session-conflict-alert .device-info {
+  background: rgba(0,0,0,0.2);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin: 16px 0;
+  text-align: left;
+}
+.session-conflict-alert .device-info p {
+  margin: 6px 0;
+  font-size: 0.85rem;
+}
+.session-conflict-alert .device-info i {
+  width: 20px;
+  color: var(--text-dim);
+}
+.session-conflict-alert .conflict-question {
+  font-weight: 500;
+  margin: 16px 0;
+}
+.session-conflict-alert .conflict-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+</style>
+
+<script>
+function togglePassword() {
+  const inp = document.getElementById('password');
+  const ico = document.getElementById('pwIcon');
+  if (inp.type === 'password') { inp.type = 'text'; ico.className = 'fas fa-eye-slash'; }
+  else { inp.type = 'password'; ico.className = 'fas fa-eye'; }
+}
+</script>
+{% endblock %}

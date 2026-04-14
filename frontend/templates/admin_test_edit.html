@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Edit Test - {{ app_name }}{% endblock %}
+{% block page_title %}Edit Test{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-pen"></i> Test Metadata</div>
+  <form method="POST" action="{{ url_for('api_update_test', test_id=test_id) }}">
+    <input type="hidden" name="tab" value="reports">
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Test Name</label>
+        <select class="form-control" name="test_name" {% if is_read_only %}disabled{% endif %}>
+          <option value="IAT 1" {% if (test_meta.test_name or '') == 'IAT 1' %}selected{% endif %}>IAT 1</option>
+          <option value="IAT 2" {% if (test_meta.test_name or '') == 'IAT 2' %}selected{% endif %}>IAT 2</option>
+          <option value="MODEL EXAM" {% if (test_meta.test_name or '') == 'MODEL EXAM' %}selected{% endif %}>MODEL EXAM</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Semester</label>
+        <select class="form-control" name="semester" {% if is_read_only %}disabled{% endif %}>
+          <option value="1" {% if (test_meta.semester|string) == '1' %}selected{% endif %}>1</option>
+          <option value="2" {% if (test_meta.semester|string) == '2' %}selected{% endif %}>2</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Department</label>
+        <input class="form-control" value="{{ test_meta.department or '—' }}" readonly>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Year</label>
+        <input class="form-control" value="{{ test_meta.year_level or 1 }}" readonly>
+      </div>
+    </div>
+    {% if not is_read_only %}
+    <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save Metadata</button>
+    {% endif %}
+    <a class="btn btn-outline" href="{{ url_for(role_panel_endpoint or 'admin', tab='reports', report_dept=test_meta.department, report_year=test_meta.year_level) }}">Back</a>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-title"><i class="fas fa-table"></i> Student Marks</div>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Reg No</th>
+          {% for s in subjects %}
+          <th>{{ s }}</th>
+          {% endfor %}
+          {% if not is_read_only %}<th>Action</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for st in students %}
+        <tr>
+          <td><strong>{{ st.reg_no }}</strong></td>
+          {% for s in subjects %}
+          <td>
+            {% if is_read_only %}
+            {{ (st.marks or {}).get(s, '') }}
+            {% else %}
+            <input class="form-control" data-reg="{{ st.reg_no }}" data-subject="{{ s }}" value="{{ (st.marks or {}).get(s, '') }}" style="min-width:80px;">
+            {% endif %}
+          </td>
+          {% endfor %}
+          {% if not is_read_only %}
+          <td>
+            <button class="btn btn-sm btn-primary" type="button" onclick="saveRowMarks('{{ st.reg_no }}')">
+              <i class="fas fa-save"></i>
+            </button>
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if not is_read_only %}
+<script>
+async function saveRowMarks(regNo) {
+  const inputs = Array.from(document.querySelectorAll(`input[data-reg="${regNo}"]`));
+  const marks = {};
+  inputs.forEach((inp) => {
+    marks[inp.dataset.subject] = inp.value;
+  });
+
+  const res = await fetch("{{ url_for('api_admin_update_marks', test_id=test_id) }}", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reg_no: regNo, marks }),
+  });
+  const data = await res.json();
+  if (!data.success) {
+    alert(data.error || "Failed to save marks.");
+    return;
+  }
+  alert("Marks updated.");
+}
+</script>
+{% endif %}
+{% endblock %}

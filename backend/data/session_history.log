@@ -1,0 +1,13 @@
+
+=== 2026-04-14 ===
+2026-04-09 21:29:54.902682 | admin@rmkcet.ac.in | last=2026-04-09 21:38:48.420965 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-09 21:39:13.123300 | hiten@rmkcet.ac.in | last=2026-04-09 22:01:17.853862 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-09 22:01:26.170272 | admin@rmkcet.ac.in | last=2026-04-09 22:01:37.906323 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-09 22:01:52.283514 | hiten@rmkcet.ac.in | last=2026-04-09 22:02:14.535416 | reason=new_device_login | forced=1 | ip=127.0.0.1
+2026-04-14 15:40:37.506974 | admin@rmkcet.ac.in | last=2026-04-14 15:45:35.115970 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-14 15:45:47.211257 | example@rmkcet.ac.in | last=2026-04-14 15:46:09.875256 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-14 15:52:11.926297 | admin@rmkcet.ac.in | last=2026-04-14 16:28:55.872216 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-14 16:29:55.830959 | example@rmkcet.ac.in | last=2026-04-14 16:36:09.940452 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-14 16:37:08.184111 | hiten@rmkcet.ac.in | last=2026-04-14 16:45:41.295643 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-14 16:45:46.610268 | admin@rmkcet.ac.in | last=2026-04-14 16:46:37.856649 | reason=user_logout | forced=0 | ip=127.0.0.1
+2026-04-14 16:46:58.234945 | deo@rmkcet.ac.in | last=2026-04-14 16:57:10.441374 | reason=user_logout | forced=0 | ip=127.0.0.1
