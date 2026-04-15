@@ -87,6 +87,8 @@ def login_required(f):
                 flash("Session expired. Please log in again.", "error")
             return redirect(url_for("login"))
         
+        _maybe_flash_disabled_department_warning()
+
         # Update session activity (heartbeat)
         db.touch_session(sid)
         return f(*args, **kwargs)
@@ -99,11 +101,6 @@ def admin_required(f):
         if session.get("role") not in {"admin", "chief_admin", "hod", "deo", "principal"}:
             flash("Admin access required.", "error")
             return redirect(url_for("index"))
-
-        user = db.get_user(session.get("user_email", "")) or {}
-        department = (user.get("department") or "").strip()
-        if _is_hod(session.get("role")) and department and not db.is_department_active(department):
-            flash("Department is currently blocked by system administration. Access is read-only limited.", "warning")
         return f(*args, **kwargs)
     return decorated
 
@@ -171,6 +168,33 @@ def _panel_endpoint_for_role(role):
     return "admin"
 
 
+def _tutorial_role_key(role):
+    role_norm = str(role or "").strip().lower()
+    if role_norm in {"chief_admin", "hod"}:
+        return "hod"
+    return role_norm
+
+
+def _tutorial_flags_from_config(config):
+    cfg = config or {}
+    return {
+        "master": str(cfg.get("tutorial_master_enabled", "true")).strip().lower() == "true",
+        "counselor": str(cfg.get("tutorial_counselor_enabled", "true")).strip().lower() == "true",
+        "hod": str(cfg.get("tutorial_hod_enabled", "true")).strip().lower() == "true",
+        "deo": str(cfg.get("tutorial_deo_enabled", "true")).strip().lower() == "true",
+        "principal": str(cfg.get("tutorial_principal_enabled", "true")).strip().lower() == "true",
+    }
+
+
+def _is_tutorial_enabled_for_role(role, config=None):
+    role_key = _tutorial_role_key(role)
+    if role_key not in {"counselor", "hod", "deo", "principal"}:
+        return False
+
+    flags = _tutorial_flags_from_config(config or db.get_app_config())
+    return bool(flags.get("master") and flags.get(role_key))
+
+
 def _get_actor_scope_pairs(actor_email, actor_role):
     if _is_system_admin(actor_role):
         return None
@@ -178,6 +202,123 @@ def _get_actor_scope_pairs(actor_email, actor_role):
         return None
     scopes = db.get_chief_admin_scopes(actor_email)
     return {(str(s.get("department") or "").upper(), int(s.get("year_level") or 1)) for s in scopes}
+
+
+def _parse_scope_pairs_from_form(form_key="scope_pairs"):
+    """Parse repeated scope inputs encoded as DEPT::YEAR pairs."""
+    parsed = []
+    for raw in request.form.getlist(form_key):
+        val = str(raw or "").strip()
+        if "::" not in val:
+            continue
+        dep_part, year_part = val.split("::", 1)
+        dep = dep_part.strip().upper()
+        try:
+            year_level = int(str(year_part).strip())
+        except (TypeError, ValueError):
+            continue
+        if dep and year_level in (1, 2, 3, 4):
+            parsed.append((dep, year_level))
+    return sorted(set(parsed))
+
+
+def _scope_pairs_to_nav_map(scope_pairs):
+    """Convert scope tuple set/list into sorted dept list and dept->years map."""
+    years_by_department = {}
+    for dep, yr in sorted(set(scope_pairs or [])):
+        years_by_department.setdefault(dep, []).append(int(yr))
+    for dep in list(years_by_department.keys()):
+        years_by_department[dep] = sorted(set(years_by_department[dep]))
+    departments = sorted(years_by_department.keys())
+    return departments, years_by_department
+
+
+def _build_example_scope_pairs(limit=4):
+    """Build deterministic example scopes for system-admin test mode preview."""
+    active_departments = db.get_departments(active_only=True)
+    pairs = []
+    for d in active_departments:
+        dep = str(d.get("code") or "").strip().upper()
+        if not dep:
+            continue
+        pairs.append((dep, 1))
+        pairs.append((dep, 2))
+        if len(pairs) >= limit:
+            break
+    return sorted(set(pairs[:limit]))
+
+
+def _get_assigned_departments_for_user(user_email, user_role):
+    """Return distinct department codes assigned to counselor/HOD/DEO users."""
+    role_norm = str(user_role or "").strip().lower()
+    email = str(user_email or "").strip()
+    if not email:
+        return []
+
+    if role_norm in {"counselor"}:
+        user = db.get_user(email) or {}
+        dep = str(user.get("department") or "").strip().upper()
+        return [dep] if dep else []
+
+    if role_norm in {"chief_admin", "hod", "deo"}:
+        scope_rows = db.get_chief_admin_scopes(email)
+        deps = {
+            str(s.get("department") or "").strip().upper()
+            for s in scope_rows
+            if s.get("department")
+        }
+        return sorted([d for d in deps if d])
+
+    return []
+
+
+def _build_assigned_department_badges(user_email, user_role):
+    """Build department badges with active/disabled flags for sidebar display."""
+    department_codes = _get_assigned_departments_for_user(user_email, user_role)
+    if not department_codes:
+        return []
+
+    all_departments = db.get_departments(active_only=False)
+    active_map = {
+        str(d.get("code") or "").strip().upper(): bool(d.get("is_active"))
+        for d in all_departments
+        if d.get("code")
+    }
+    return [
+        {
+            "code": dep,
+            "is_active": active_map.get(dep, True),
+        }
+        for dep in department_codes
+    ]
+
+
+def _maybe_flash_disabled_department_warning():
+    """Show a one-time warning per disabled assigned department for non-principal roles."""
+    role = session.get("role")
+    if _is_principal(role) or _is_system_admin(role):
+        return
+
+    email = session.get("user_email")
+    assigned_departments = _get_assigned_departments_for_user(email, role)
+    if not assigned_departments:
+        return
+
+    disabled_departments = [d for d in assigned_departments if not db.is_department_active(d)]
+    if not disabled_departments:
+        return
+
+    warned = {str(x).strip().upper() for x in (session.get("disabled_department_warning_seen") or [])}
+    pending = [d for d in disabled_departments if d not in warned]
+    if not pending:
+        return
+
+    flash(
+        "Warning: Your assigned department(s) are currently disabled: " + ", ".join(sorted(pending)),
+        "warning",
+    )
+    session["disabled_department_warning_seen"] = sorted(warned | set(pending))
+    session.modified = True
 
 
 def _can_chief_admin_touch_user(actor_email, target_user):
@@ -202,10 +343,30 @@ def _can_chief_admin_touch_user(actor_email, target_user):
     return False
 
 
-def _get_allowed_counselor_emails_for_actor(actor_email, actor_role):
+def _get_allowed_counselor_emails_for_actor(actor_email, actor_role, forced_scope_pairs=None):
     if _is_system_admin(actor_role):
         return None
     users = db.get_scoped_users_for_admin(actor_email, actor_role)
+    if forced_scope_pairs is not None and actor_role in {"hod", "deo"}:
+        forced_scope_set = {(str(dep).upper(), int(yr)) for dep, yr in forced_scope_pairs}
+        all_users = db.get_all_users()
+        preview_users = []
+        for u in all_users:
+            role_name = str(u.get("role") or "").strip().lower()
+            if role_name in {"counselor", "deo"}:
+                key = (str(u.get("department") or "").strip().upper(), int(u.get("year_level") or 1))
+                if key in forced_scope_set:
+                    preview_users.append(u)
+                continue
+            if role_name in {"chief_admin", "hod"}:
+                other_scopes = {
+                    (str(s.get("department") or "").strip().upper(), int(s.get("year_level") or 1))
+                    for s in db.get_chief_admin_scopes(u.get("email"))
+                }
+                if forced_scope_set & other_scopes:
+                    preview_users.append(u)
+                continue
+        users = preview_users
     return [u.get("email") for u in users if u.get("role") == "counselor"]
 
 
@@ -304,13 +465,29 @@ def _resolve_asset_file(filename):
 # ---------------------------------------------------------------------------
 @app.context_processor
 def inject_globals():
+    current_email = session.get("user_email")
+    current_role = session.get("role")
+    assigned_departments = _build_assigned_department_badges(current_email, current_role) if current_email else []
+    app_config = db.get_app_config() if current_email else {}
+    tutorial_flags = _tutorial_flags_from_config(app_config)
+    tutorial_role_key = _tutorial_role_key(current_role)
+    tutorial_enabled_for_current_role = bool(
+        tutorial_flags.get("master") and tutorial_flags.get(tutorial_role_key, False)
+    )
+
     return {
         "app_name": APP_NAME,
         "app_version": APP_VERSION,
-        "current_user_email": session.get("user_email"),
+        "current_user_email": current_email,
         "current_user_name": session.get("user_name"),
-        "current_role": session.get("role"),
-        "role_panel_endpoint": _panel_endpoint_for_role(session.get("role")),
+        "current_role": current_role,
+        "role_panel_endpoint": _panel_endpoint_for_role(current_role),
+        "assigned_scope_summary": "",
+        "assigned_departments": assigned_departments,
+        "tutorial_flags": tutorial_flags,
+        "tutorial_role_key": tutorial_role_key,
+        "tutorial_enabled_for_current_role": tutorial_enabled_for_current_role,
+        "tutorial_auto_welcome": request.args.get("tutorial_welcome") == "1",
         "now": datetime.now(),
     }
 
@@ -590,9 +767,13 @@ def login():
         session["session_id"] = sid
         session["department"] = user.get("department", "")
 
+        show_tutorial_welcome = (not user.get("last_login")) and _is_tutorial_enabled_for_role(user.get("role"))
+
+        redirect_params = {"tutorial_welcome": "1"} if show_tutorial_welcome else {}
+
         if _is_admin_portal_user(user["role"]):
-            return redirect(url_for(_panel_endpoint_for_role(user["role"])))
-        return redirect(url_for("counselor_page"))
+            return redirect(url_for(_panel_endpoint_for_role(user["role"]), **redirect_params))
+        return redirect(url_for("counselor_page", **redirect_params))
 
     return render_template("login.html")
 
@@ -626,9 +807,11 @@ def admin():
 def principal_panel():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if not _is_principal(actor_role):
+    preview_mode = _is_system_admin(actor_role) and session.get("ui_preview_role") == "principal"
+    if not _is_principal(actor_role) and not preview_mode:
         return redirect(url_for(_panel_endpoint_for_role(actor_role)))
-    return _render_admin_panel(actor_email, actor_role)
+    render_role = "principal" if preview_mode else actor_role
+    return _render_admin_panel(actor_email, render_role, preview_mode=preview_mode)
 
 
 @app.route("/hod")
@@ -637,9 +820,11 @@ def principal_panel():
 def hod_panel():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if not _is_hod(actor_role):
+    preview_mode = _is_system_admin(actor_role) and session.get("ui_preview_role") == "hod"
+    if not _is_hod(actor_role) and not preview_mode:
         return redirect(url_for(_panel_endpoint_for_role(actor_role)))
-    return _render_admin_panel(actor_email, actor_role)
+    forced_scope_pairs = _build_example_scope_pairs() if preview_mode else None
+    return _render_admin_panel(actor_email, "hod" if preview_mode else actor_role, preview_mode=preview_mode, forced_scope_pairs=forced_scope_pairs)
 
 
 @app.route("/deo")
@@ -648,12 +833,51 @@ def hod_panel():
 def deo_panel():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if not _is_deo(actor_role):
+    preview_mode = _is_system_admin(actor_role) and session.get("ui_preview_role") == "deo"
+    if not _is_deo(actor_role) and not preview_mode:
         return redirect(url_for(_panel_endpoint_for_role(actor_role)))
-    return _render_admin_panel(actor_email, actor_role)
+    forced_scope_pairs = _build_example_scope_pairs() if preview_mode else None
+    return _render_admin_panel(actor_email, "deo" if preview_mode else actor_role, preview_mode=preview_mode, forced_scope_pairs=forced_scope_pairs)
 
 
-def _render_admin_panel(actor_email, actor_role):
+@app.route("/admin/test-mode/<preview_role>")
+@login_required
+@admin_required
+def admin_test_mode_preview(preview_role):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    if not _is_system_admin(actor_role):
+        flash("Only system admin can use test mode previews.", "error")
+        return _redirect_admin_back("config")
+
+    role_norm = str(preview_role or "").strip().lower()
+    if role_norm in {"principal", "hod", "deo", "counselor"}:
+        session["ui_preview_role"] = role_norm
+
+    if role_norm == "principal":
+        return redirect(url_for("principal_panel", tab=request.args.get("tab") or "dashboard"))
+    if role_norm == "hod":
+        return redirect(url_for("hod_panel", tab=request.args.get("tab") or "reports"))
+    if role_norm == "deo":
+        return redirect(url_for("deo_panel", tab=request.args.get("tab") or "reports"))
+    if role_norm == "counselor":
+        return redirect(url_for("counselor_page", tab=request.args.get("tab") or "recent-tests"))
+
+    flash("Unsupported preview role.", "error")
+    return _redirect_admin_back("config")
+
+
+@app.route("/admin/test-mode/exit")
+@login_required
+@admin_required
+def admin_test_mode_exit():
+    if _is_system_admin(session.get("role")):
+        session.pop("ui_preview_role", None)
+        flash("Exited test mode preview.", "success")
+    return redirect(url_for("admin", tab="config"))
+
+
+def _render_admin_panel(actor_email, actor_role, preview_mode=False, forced_scope_pairs=None):
     requested_tab = (request.args.get("tab") or "").strip()
     current_tab = requested_tab or _default_tab_for_role(actor_role)
 
@@ -664,9 +888,17 @@ def _render_admin_panel(actor_email, actor_role):
             flash("Access denied for this section.", "warning")
         return redirect(url_for(_panel_endpoint_for_role(actor_role), tab=fallback))
 
-    allowed_scopes = _get_actor_scope_pairs(actor_email, actor_role)
+    if forced_scope_pairs is not None:
+        allowed_scopes = {(str(dep).upper(), int(yr)) for dep, yr in forced_scope_pairs}
+    else:
+        allowed_scopes = _get_actor_scope_pairs(actor_email, actor_role)
+
     users = db.get_scoped_users_for_admin(actor_email, actor_role)
     departments = db.get_departments_for_admin(actor_email, actor_role, active_only=False)
+    if forced_scope_pairs is not None:
+        all_departments = db.get_departments(active_only=False)
+        allowed_department_codes = {dep for dep, _ in forced_scope_pairs}
+        departments = [d for d in all_departments if str(d.get("code") or "").strip().upper() in allowed_department_codes]
     active_sessions = db.get_active_sessions() if _is_system_admin(actor_role) else []
     full_activity = db.get_counselor_activity_summary()
     activity = _filter_activity_for_actor(full_activity, actor_email, actor_role)
@@ -677,7 +909,11 @@ def _render_admin_panel(actor_email, actor_role):
     msg_year = (request.args.get("msg_year") or "").strip()
     msg_month = (request.args.get("msg_month") or "").strip()
     msg_day_num = (request.args.get("msg_day_num") or "").strip()
-    allowed_counselors = _get_allowed_counselor_emails_for_actor(actor_email, actor_role)
+    allowed_counselors = _get_allowed_counselor_emails_for_actor(
+        actor_email,
+        actor_role,
+        forced_scope_pairs=forced_scope_pairs,
+    )
 
     messages = db.get_message_history_filtered(
         day=msg_day or None,
@@ -723,14 +959,28 @@ def _render_admin_panel(actor_email, actor_role):
         allowed_scopes=allowed_scopes,
     )
 
-    report_department = (request.args.get("report_dept") or selected_department or "").strip().upper()
-    report_year_level = request.args.get("report_year", type=int)
+    is_scoped_admin_role = _is_hod(actor_role) or _is_deo(actor_role)
+    if forced_scope_pairs is not None and actor_role in {"hod", "deo"}:
+        scoped_rows = [{"department": dep, "year_level": yr} for dep, yr in forced_scope_pairs]
+    else:
+        scoped_rows = db.get_chief_admin_scopes(actor_email) if is_scoped_admin_role else []
 
-    if _is_hod(actor_role) or _is_deo(actor_role):
-        scoped = db.get_chief_admin_scopes(actor_email)
-        if scoped:
-            report_department = str(scoped[0].get("department") or "").strip().upper()
-            report_year_level = int(scoped[0].get("year_level") or 1)
+    scoped_department_codes, scoped_years_by_department = _scope_pairs_to_nav_map(
+        [(str(s.get("department") or "").strip().upper(), int(s.get("year_level") or 1)) for s in scoped_rows]
+    )
+
+    report_department = (request.args.get("report_dept") or selected_department or "").strip().upper()
+    if is_scoped_admin_role and report_department and report_department not in scoped_department_codes:
+        report_department = ""
+
+    report_available_years = (
+        scoped_years_by_department.get(report_department, [])
+        if (is_scoped_admin_role and report_department)
+        else [1, 2, 3, 4]
+    )
+    report_year_level = request.args.get("report_year", type=int)
+    if report_year_level not in report_available_years:
+        report_year_level = None
 
     report_tests = []
     if report_department and report_year_level in (1, 2, 3, 4):
@@ -743,7 +993,17 @@ def _render_admin_panel(actor_email, actor_role):
 
     # Counselor activity filter model
     act_department = (request.args.get("act_dept") or report_department or "").strip().upper()
-    act_year_level = request.args.get("act_year", type=int) or report_year_level
+    if is_scoped_admin_role and act_department and act_department not in scoped_department_codes:
+        act_department = ""
+
+    activity_available_years = (
+        scoped_years_by_department.get(act_department, [])
+        if (is_scoped_admin_role and act_department)
+        else [1, 2, 3, 4]
+    )
+    act_year_level = request.args.get("act_year", type=int)
+    if act_year_level not in activity_available_years:
+        act_year_level = None
     act_semester = (request.args.get("act_sem") or "").strip()
     act_test_name = _normalize_allowed_test_name(request.args.get("act_test") or "")
     act_search = (request.args.get("act_q") or "").strip()
@@ -751,18 +1011,11 @@ def _render_admin_panel(actor_email, actor_role):
     activity_selection_ready = False
     activity_test_result = {"rows": [], "stats": {"total_counselors": 0, "complete": 0, "pending": 0, "avg_completion": 0}}
 
-    if _is_hod(actor_role) or _is_deo(actor_role):
-        scopes = db.get_chief_admin_scopes(actor_email)
-        if scopes:
-            first_scope = scopes[0]
-            act_department = str(first_scope.get("department") or "").upper()
-            act_year_level = int(first_scope.get("year_level") or 1)
-
     activity_test_status = {
         "1": {"IAT 1": False, "IAT 2": False, "MODEL EXAM": False},
         "2": {"IAT 1": False, "IAT 2": False, "MODEL EXAM": False},
     }
-    activity_has_scope = bool(act_department and act_year_level in (1, 2, 3, 4))
+    activity_has_scope = bool(act_department and act_year_level in activity_available_years)
     if activity_has_scope:
         uploaded = db.get_all_unique_tests(
             filter_dept=act_department,
@@ -775,8 +1028,8 @@ def _render_admin_panel(actor_email, actor_role):
             if sem in activity_test_status and test_name in activity_test_status[sem]:
                 activity_test_status[sem][test_name] = True
 
-    activity_show_department = (_is_system_admin(actor_role) or _is_principal(actor_role)) and not act_department
-    activity_show_year = (_is_system_admin(actor_role) or _is_principal(actor_role)) and bool(act_department) and (act_year_level not in (1, 2, 3, 4))
+    activity_show_department = not act_department
+    activity_show_year = bool(act_department) and (act_year_level not in activity_available_years)
     activity_show_semester = activity_has_scope and not activity_selection_ready
 
     if act_department and act_year_level in (1, 2, 3, 4) and act_semester in {"1", "2"} and act_test_name:
@@ -804,14 +1057,14 @@ def _render_admin_panel(actor_email, actor_role):
             "size_kb": int(stat.st_size / 1024),
             "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
         })
-    chief_scopes = db.get_chief_admin_scopes(actor_email) if (_is_hod(actor_role) or _is_deo(actor_role)) else []
+    chief_scopes = scoped_rows if (_is_hod(actor_role) or _is_deo(actor_role)) else []
     chief_scope_keys = [
         f"{str(s.get('department') or '').upper()}::{int(s.get('year_level') or 1)}"
         for s in chief_scopes
     ]
     chief_scopes_by_email = {}
     for u in users:
-        if u.get("role") not in {"chief_admin", "hod"}:
+        if u.get("role") not in {"chief_admin", "hod", "deo"}:
             continue
         scopes_for_user = db.get_chief_admin_scopes(u.get("email"))
         chief_scopes_by_email[u.get("email")] = [
@@ -852,6 +1105,7 @@ def _render_admin_panel(actor_email, actor_role):
         report_department=report_department,
         report_year_level=report_year_level,
         report_tests=report_tests,
+        report_available_years=report_available_years,
         recent_report_tests=recent_report_tests,
         chief_scopes=chief_scopes,
         chief_scope_keys=chief_scope_keys,
@@ -871,6 +1125,7 @@ def _render_admin_panel(actor_email, actor_role):
         activity_test_result=activity_test_result,
         act_department=act_department,
         act_year_level=act_year_level,
+        activity_available_years=activity_available_years,
         act_semester=act_semester,
         act_test_name=act_test_name,
         act_search=act_search,
@@ -883,6 +1138,8 @@ def _render_admin_panel(actor_email, actor_role):
         activity_show_department=activity_show_department,
         activity_show_year=activity_show_year,
         activity_show_semester=activity_show_semester,
+        current_role_override=(actor_role if preview_mode else ""),
+        preview_mode=preview_mode,
     )
 
 
@@ -958,7 +1215,7 @@ def api_database_clear_exam_data():
         flash("Only system admin or principal can perform database maintenance.", "error")
         return _redirect_admin_back("reports")
 
-    password = request.form.get("password", "")
+    password = request.form.get("admin_password") or request.form.get("password", "")
     if not _validate_current_user_password(password):
         flash("Password verification failed.", "error")
         return _redirect_admin_back("database")
@@ -987,7 +1244,7 @@ def api_database_restore_backup():
         flash("Only system admin or principal can perform database maintenance.", "error")
         return _redirect_admin_back("reports")
 
-    password = request.form.get("password", "")
+    password = request.form.get("admin_password") or request.form.get("password", "")
     backup_name = (request.form.get("backup_name") or "").strip()
     if not _validate_current_user_password(password):
         flash("Password verification failed.", "error")
@@ -1021,7 +1278,7 @@ def api_database_delete_backup():
         flash("Only system admin or principal can perform database maintenance.", "error")
         return _redirect_admin_back("reports")
 
-    password = request.form.get("password", "")
+    password = request.form.get("admin_password") or request.form.get("password", "")
     backup_name = (request.form.get("backup_name") or "").strip()
     if not _validate_current_user_password(password):
         flash("Password verification failed.", "error")
@@ -1237,6 +1494,51 @@ def api_export_messages_pdf():
 @login_required
 def counselor_page():
     email = session["user_email"]
+    role = session.get("role")
+    preview_mode = _is_system_admin(role) and session.get("ui_preview_role") == "counselor"
+
+    if preview_mode:
+        example_scope_pairs = _build_example_scope_pairs(limit=1)
+        dep = example_scope_pairs[0][0] if example_scope_pairs else ""
+        yr = example_scope_pairs[0][1] if example_scope_pairs else 1
+        user = {
+            "email": "preview.counselor@rmkcet.local",
+            "name": "Example Counselor",
+            "role": "counselor",
+            "department": dep,
+            "year_level": yr,
+            "can_upload_students": 1,
+        }
+        tests = db.get_all_unique_tests(filter_dept=dep or None, filter_year_level=yr)[:20]
+        recent_tests = tests[:2]
+        msg_stats = {"total": 0, "week": 0}
+        msg_history = []
+        submissions = []
+        selected_test_id = None
+        selected_test_meta = None
+        pending_students = []
+        sent_reg_nos = set()
+        return render_template(
+            "counselor.html",
+            user=user,
+            is_blocked_department=False,
+            students=[],
+            assigned_students_count=0,
+            tests=tests,
+            recent_tests=recent_tests,
+            msg_stats=msg_stats,
+            msg_history=msg_history,
+            submissions=submissions,
+            selected_test_id=selected_test_id,
+            selected_test_meta=selected_test_meta,
+            pending_students=pending_students,
+            sent_count=0,
+            can_upload_students=True,
+            report_tab=(request.args.get("tab") or "recent-tests"),
+            current_role_override="counselor",
+            preview_mode=True,
+        )
+
     user = db.get_user(email)
     if not user:
         session.clear()
@@ -1279,6 +1581,8 @@ def counselor_page():
         sent_count=(len(sent_reg_nos) if selected_test_id else 0),
         can_upload_students=bool(user.get("can_upload_students", 1)),
         report_tab=(request.args.get("tab") or "recent-tests"),
+        current_role_override="",
+        preview_mode=False,
     )
 
 
@@ -1296,8 +1600,8 @@ def api_create_user():
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     email = request.form.get("email", "").strip()
-    password = request.form.get("password", "")
-    confirm_password = request.form.get("confirm_password", "")
+    password = request.form.get("account_password") or request.form.get("password", "")
+    confirm_password = request.form.get("account_confirm_password") or request.form.get("confirm_password", "")
     name = request.form.get("name", "").strip()
     role = (request.form.get("role", "counselor") or "counselor").strip().lower()
     if role == "chief_admin":
@@ -1317,6 +1621,8 @@ def api_create_user():
         flash("Only system admin can create principal accounts.", "error")
         return _redirect_admin_back("users")
 
+    scope_pairs = []
+
     if role == "admin":
         # Admins get unrestricted defaults and do not need counselor-specific fields.
         department = ""
@@ -1324,14 +1630,26 @@ def api_create_user():
         max_students = 500
         can_upload = True
     elif role in {"hod", "deo"}:
-        department = (request.form.get("department") or "").strip().upper()
-        year_level = request.form.get("year_level", type=int)
-        if not department:
-            flash("Department is required for HOD/DEO accounts.", "error")
+        scope_pairs = _parse_scope_pairs_from_form("scope_pairs")
+
+        # Backward-compatible fallback for older forms.
+        if not scope_pairs:
+            fallback_dep = (request.form.get("department") or "").strip().upper()
+            fallback_year = request.form.get("year_level", type=int)
+            if fallback_dep and fallback_year in (1, 2, 3, 4):
+                scope_pairs = [(fallback_dep, fallback_year)]
+
+        if not scope_pairs:
+            flash("Assign at least one department/year scope for HOD/DEO accounts.", "error")
             return _redirect_admin_back("users")
-        if year_level not in (1, 2, 3, 4):
-            flash("Year must be between 1 and 4 for HOD/DEO accounts.", "error")
-            return _redirect_admin_back("users")
+
+        if _is_hod(actor_role):
+            actor_scopes = _get_actor_scope_pairs(actor_email, actor_role) or set()
+            if not all((dep, yr) in actor_scopes for dep, yr in scope_pairs):
+                flash("You can assign only department/year scopes within your own assignment.", "error")
+                return _redirect_admin_back("users")
+
+        department, year_level = scope_pairs[0]
         max_students = 500
         can_upload = True
     elif role == "principal":
@@ -1342,7 +1660,7 @@ def api_create_user():
     else:
         department = request.form.get("department", "").strip()
         max_students_raw = request.form.get("max_students", "30")
-        can_upload = request.form.get("can_upload_students") == "on"
+        can_upload = True
 
         try:
             max_students = int(max_students_raw)
@@ -1381,7 +1699,7 @@ def api_create_user():
     )
 
     if ok and role in {"hod", "deo"}:
-        db.set_chief_admin_scopes(email, [(department, year_level)])
+        db.set_chief_admin_scopes(email, scope_pairs or [(department, year_level)])
 
     # Optional student file during registration (counselors only)
     if ok and role == "counselor" and "student_file" in request.files:
@@ -1444,6 +1762,7 @@ def api_update_user(email):
         updates["name"] = name
 
     requested_role = str(target.get("role") or "counselor").strip().lower() or "counselor"
+    requested_scope_pairs = []
     if _is_system_admin(actor_role):
         role_input = str(request.form.get("role") or requested_role).strip().lower()
         if role_input == "chief_admin":
@@ -1454,7 +1773,7 @@ def api_update_user(email):
         requested_role = role_input
         updates["role"] = requested_role
 
-    password = request.form.get("password", "").strip()
+    password = (request.form.get("account_password") or request.form.get("password", "")).strip()
     if password:
         if len(password) < 6:
             flash("Password must be at least 6 characters.", "error")
@@ -1468,14 +1787,20 @@ def api_update_user(email):
             updates["max_students"] = 500
             updates["can_upload_students"] = 1
         elif requested_role in {"hod", "deo"}:
-            department = (request.form.get("department") or "").strip().upper()
-            year_level = request.form.get("year_level", type=int)
-            if not department:
-                flash("Department is required for HOD/DEO accounts.", "error")
+            requested_scope_pairs = _parse_scope_pairs_from_form("scope_pairs")
+
+            # Backward-compatible fallback when old single-scope fields are still posted.
+            if not requested_scope_pairs:
+                fallback_dep = (request.form.get("department") or "").strip().upper()
+                fallback_year = request.form.get("year_level", type=int)
+                if fallback_dep and fallback_year in (1, 2, 3, 4):
+                    requested_scope_pairs = [(fallback_dep, fallback_year)]
+
+            if not requested_scope_pairs:
+                flash("Assign at least one department/year scope for HOD/DEO accounts.", "error")
                 return _redirect_admin_back("users")
-            if year_level not in (1, 2, 3, 4):
-                flash("Year must be between 1 and 4 for HOD/DEO accounts.", "error")
-                return _redirect_admin_back("users")
+
+            department, year_level = requested_scope_pairs[0]
             updates["department"] = department
             updates["year_level"] = year_level
             updates["max_students"] = 500
@@ -1538,9 +1863,12 @@ def api_update_user(email):
 
     if _is_system_admin(actor_role):
         if requested_role in {"hod", "deo"}:
-            dep = (updates.get("department") if "department" in updates else target.get("department") or "").strip().upper()
-            yr = int(updates.get("year_level") if "year_level" in updates else target.get("year_level") or 1)
-            db.set_chief_admin_scopes(email, [(dep, yr)])
+            if requested_scope_pairs:
+                db.set_chief_admin_scopes(email, requested_scope_pairs)
+            else:
+                dep = (updates.get("department") if "department" in updates else target.get("department") or "").strip().upper()
+                yr = int(updates.get("year_level") if "year_level" in updates else target.get("year_level") or 1)
+                db.set_chief_admin_scopes(email, [(dep, yr)])
         else:
             db.set_chief_admin_scopes(email, [])
 
@@ -2071,6 +2399,19 @@ def api_update_config():
     max_concurrent = request.form.get("max_concurrent_sessions")
     if max_concurrent:
         settings["max_concurrent_sessions"] = str(max_concurrent)
+
+    tutorial_master = request.form.get("tutorial_master_enabled")
+    settings["tutorial_master_enabled"] = "true" if tutorial_master == "on" else "false"
+
+    tutorial_fields = [
+        "tutorial_counselor_enabled",
+        "tutorial_hod_enabled",
+        "tutorial_deo_enabled",
+        "tutorial_principal_enabled",
+    ]
+    for field in tutorial_fields:
+        field_value = request.form.get(field)
+        settings[field] = "true" if (tutorial_master == "on" and field_value == "on") else "false"
     
     if settings:
         db.update_app_config_bulk(settings)
@@ -2250,11 +2591,14 @@ def api_export_activity_filtered_pdf():
     act_sort = (request.args.get("act_sort") or "pending_first").strip()
 
     if _is_hod(role) or _is_deo(role):
-        scopes = db.get_chief_admin_scopes(session.get("user_email"))
-        if scopes:
-            first = scopes[0]
-            act_department = str(first.get("department") or "").upper()
-            act_year = int(first.get("year_level") or 1)
+        allowed_scopes = {
+            (str(s.get("department") or "").strip().upper(), int(s.get("year_level") or 1))
+            for s in db.get_chief_admin_scopes(session.get("user_email"))
+        }
+        req_key = (act_department.strip().upper(), int(act_year or 0))
+        if req_key not in allowed_scopes:
+            flash("Select an allocated department/year before exporting PDF.", "error")
+            return _redirect_admin_back("activity")
 
     if not (act_department and act_year in (1, 2, 3, 4) and act_sem in {"1", "2"} and act_test):
         flash("Select department, year, semester and test before exporting PDF.", "error")
@@ -2414,6 +2758,9 @@ def api_delete_test(test_id):
         actor_email = session.get("user_email")
         actor_role = session.get("role")
         meta = db.get_test_metadata(test_id) or {}
+        if not meta:
+            flash("Test not found.", "error")
+            return _redirect_admin_back("reports")
         if not _can_manage_department_year(actor_email, actor_role, meta.get("department"), meta.get("year_level") or 1):
             flash("You can manage tests only in your assigned department/year scope.", "error")
             return _redirect_admin_back("reports")
@@ -2470,7 +2817,13 @@ def api_toggle_test_block(test_id):
         flash("Test not found.", "error")
         return _redirect_admin_back("reports")
 
-    if not _can_manage_department_year(actor_email, actor_role, meta.get("department"), meta.get("year_level") or 1):
+    can_toggle = _is_principal(actor_role) or _can_manage_department_year(
+        actor_email,
+        actor_role,
+        meta.get("department"),
+        meta.get("year_level") or 1,
+    )
+    if not can_toggle:
         flash("You can manage tests only in your assigned department/year scope.", "error")
         return _redirect_admin_back("reports")
 
@@ -2682,6 +3035,12 @@ def api_counselor_update_test(test_id):
         flash("Test details updated.", "success")
     except Exception as e:
         flash(f"Could not update test: {e}", "error")
+
+    next_url = (request.form.get("next") or "").strip()
+    if next_url:
+        parsed = urlparse(next_url)
+        if not parsed.scheme and not parsed.netloc and next_url.startswith("/"):
+            return redirect(next_url)
 
     return redirect(url_for("counselor_page", tab="test-database"))
 
@@ -2976,6 +3335,21 @@ def counselor_test_view_page(test_id):
 
     test_meta = db.get_test_metadata(test_id) or {}
     grouped = db.get_test_marks_grouped_for_counselor(test_id, email) if role == "counselor" else db.get_test_marks_grouped(test_id)
+    test_department = str(test_meta.get("department") or "").strip()
+    if role == "counselor" and not test_department:
+        user = db.get_user(email) or {}
+        test_department = str(user.get("department") or "").strip()
+
+    if not test_department:
+        for student in grouped.get("students", []):
+            candidate = str(student.get("department") or "").strip()
+            if candidate:
+                test_department = candidate
+                break
+
+    if test_department:
+        test_meta["department"] = test_department
+
     if role == "counselor":
         def _norm_reg(value):
             reg = str(value or "").strip().replace(" ", "")
@@ -2988,6 +3362,12 @@ def counselor_test_view_page(test_id):
             s for s in grouped.get("students", [])
             if _norm_reg(s.get("reg_no", "")) in allowed_reg_nos
         ]
+
+    if test_department:
+        for student in grouped.get("students", []):
+            if not str(student.get("department") or "").strip():
+                student["department"] = test_department
+
     return render_template(
         "counselor_test_view.html",
         test_id=test_id,

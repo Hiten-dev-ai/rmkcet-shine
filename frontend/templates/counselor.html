@@ -45,15 +45,7 @@
 
 {% set current_tab = request.args.get('tab', 'recent-tests') %}
 <div class="tab-panel {% if current_tab == 'recent-tests' %}active{% endif %}" id="tab-recent-tests">
-  <div class="card mb-3">
-    <div class="card-title"><i class="fas fa-info-circle"></i> Workflow Updated</div>
-    <p style="font-size:.86rem;color:var(--text-dim);line-height:1.5;">
-      Marksheet uploads are now handled only by Admin in Departments tab. You can view, edit test metadata,
-      and send WhatsApp results for tests mapped to your department and year.
-    </p>
-  </div>
-
-  <h3 class="section-title"><i class="fas fa-clock"></i> Recent Tests (Last 2)</h3>
+  <h3 class="section-title"><i class="fas fa-gauge"></i> Dashboard - Recent Tests</h3>
   <div class="table-wrapper">
     <table>
       <thead>
@@ -62,7 +54,6 @@
           <th>Year</th>
           <th>Batch</th>
           <th>Sem</th>
-          <th>Section</th>
           <th>Students</th>
           <th>Status</th>
           <th>Actions</th>
@@ -77,7 +68,6 @@
           <td>{{ t.year_level or (user.year_level or 1) }}</td>
           <td>{{ t.batch_name or '—' }}</td>
           <td>{{ t.semester or '—' }}</td>
-          <td>{{ t.section or '—' }}</td>
           <td>{{ total }}</td>
           <td>
             {% if t.is_blocked %}
@@ -91,11 +81,8 @@
           <td>
             <div class="btn-group">
               <a class="btn btn-outline btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_view_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
-                <i class="fas fa-eye"></i> View
+                <i class="fas fa-eye"></i> View/Edit
               </a>
-              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department or t.is_blocked %}disabled{% endif %}>
-                <i class="fas fa-pen"></i> Edit
-              </button>
               <a class="btn btn-primary btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_send_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
                 <i class="fas fa-paper-plane"></i> Send Results
               </a>
@@ -104,7 +91,7 @@
         </tr>
         {% endfor %}
         {% if not recent_tests %}
-        <tr><td colspan="8" class="text-center text-muted" style="padding:20px;">No recent tests available yet.</td></tr>
+        <tr><td colspan="7" class="text-center text-muted" style="padding:20px;">No recent tests available yet.</td></tr>
         {% endif %}
       </tbody>
     </table>
@@ -112,7 +99,73 @@
 </div>
 
 <div class="tab-panel {% if current_tab == 'test-database' %}active{% endif %}" id="tab-test-database">
-  <h3 class="section-title"><i class="fas fa-database"></i> Test Database</h3>
+  <h3 class="section-title"><i class="fas fa-file-lines"></i> Reports</h3>
+  {% set ns = namespace(sem1=[], sem2=[]) %}
+  {% for t in tests %}
+    {% set sem = (t.semester|string)|trim %}
+    {% if sem == '1' %}
+      {% set _ = ns.sem1.append(t) %}
+    {% elif sem == '2' %}
+      {% set _ = ns.sem2.append(t) %}
+    {% endif %}
+  {% endfor %}
+
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-database"></i> Semester 1</div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Test Name</th>
+            <th>Year</th>
+            <th>Batch</th>
+            <th>Sem</th>
+            <th>Students</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in ns.sem1 %}
+          {% set generated = t.generated_count or 0 %}
+          {% set total = t.student_count or 0 %}
+          <tr>
+            <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+            <td>{{ t.year_level or (user.year_level or 1) }}</td>
+            <td>{{ t.batch_name or '—' }}</td>
+            <td>{{ t.semester or '—' }}</td>
+            <td>{{ total }}</td>
+            <td>
+              {% if t.is_blocked %}
+              <span class="badge badge-danger">Blocked By Admin</span>
+              {% elif generated > 0 %}
+              <span class="badge badge-success">Generated</span>
+              {% else %}
+              <span class="badge badge-warning">Pending</span>
+              {% endif %}
+            </td>
+            <td>
+              <div class="btn-group">
+                <a class="btn btn-outline btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_view_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
+                  <i class="fas fa-eye"></i> View/Edit
+                </a>
+                <a class="btn btn-primary btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_send_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
+                  <i class="fas fa-paper-plane"></i> Send Results
+                </a>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not ns.sem1 %}
+          <tr><td colspan="7" class="text-center text-muted" style="padding:20px;">No semester 1 tests mapped yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-database"></i> Semester 2</div>
   <div class="table-wrapper">
     <table>
       <thead>
@@ -121,14 +174,13 @@
           <th>Year</th>
           <th>Batch</th>
           <th>Sem</th>
-          <th>Section</th>
           <th>Students</th>
           <th>Status</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
-        {% for t in tests %}
+        {% for t in ns.sem2 %}
         {% set generated = t.generated_count or 0 %}
         {% set total = t.student_count or 0 %}
         <tr>
@@ -136,7 +188,6 @@
           <td>{{ t.year_level or (user.year_level or 1) }}</td>
           <td>{{ t.batch_name or '—' }}</td>
           <td>{{ t.semester or '—' }}</td>
-          <td>{{ t.section or '—' }}</td>
           <td>{{ total }}</td>
           <td>
             {% if t.is_blocked %}
@@ -150,11 +201,8 @@
           <td>
             <div class="btn-group">
               <a class="btn btn-outline btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_view_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
-                <i class="fas fa-eye"></i> View
+                <i class="fas fa-eye"></i> View/Edit
               </a>
-              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department or t.is_blocked %}disabled{% endif %}>
-                <i class="fas fa-pen"></i> Edit
-              </button>
               <a class="btn btn-primary btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_send_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
                 <i class="fas fa-paper-plane"></i> Send Results
               </a>
@@ -162,16 +210,17 @@
           </td>
         </tr>
         {% endfor %}
-        {% if not tests %}
-        <tr><td colspan="8" class="text-center text-muted" style="padding:20px;">No tests mapped to your department/year yet.</td></tr>
+        {% if not ns.sem2 %}
+        <tr><td colspan="7" class="text-center text-muted" style="padding:20px;">No semester 2 tests mapped yet.</td></tr>
         {% endif %}
       </tbody>
     </table>
   </div>
+  </div>
 </div>
 
 <div class="tab-panel {% if current_tab == 'message-history' %}active{% endif %}" id="tab-message-history">
-  <h3 class="section-title"><i class="fas fa-envelope-open-text"></i> Recent Message History</h3>
+  <h3 class="section-title"><i class="fas fa-envelope-open-text"></i> Message Logs</h3>
   <div class="table-wrapper">
     <table>
       <thead>
@@ -188,46 +237,12 @@
         </tr>
         {% endfor %}
         {% if not msg_history %}
-        <tr><td colspan="5" class="text-center text-muted" style="padding:20px;">No message history available yet.</td></tr>
+        <tr><td colspan="5" class="text-center text-muted" style="padding:20px;">No message logs available yet.</td></tr>
         {% endif %}
       </tbody>
     </table>
   </div>
 </div>
-
-{% for t in tests %}
-<div class="modal-overlay" id="modal-test-edit-{{ t.id }}">
-  <div class="modal" style="max-width:640px;">
-    <div class="modal-header">
-      <h3><i class="fas fa-pen"></i> Edit Test</h3>
-      <button class="modal-close" onclick="closeModal('test-edit-{{ t.id }}')">&times;</button>
-    </div>
-    <form method="POST" action="{{ url_for('api_counselor_update_test', test_id=t.id) }}">
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Test Name</label>
-          <input class="form-control" name="test_name" value="{{ t.test_name or '' }}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Semester</label>
-          <input class="form-control" name="semester" value="{{ t.semester or '' }}">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Batch</label>
-          <input class="form-control" name="batch_name" value="{{ t.batch_name or '' }}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Section</label>
-          <input class="form-control" name="section" value="{{ t.section or '' }}">
-        </div>
-      </div>
-      <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save</button>
-    </form>
-  </div>
-</div>
-{% endfor %}
 
 {% endif %}
 

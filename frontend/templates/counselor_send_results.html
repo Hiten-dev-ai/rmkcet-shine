@@ -4,7 +4,7 @@
 
 {% block content %}
 <div class="d-flex justify-between align-center mb-2" style="gap:12px;">
-  <a href="{{ url_for('counselor_page', tab='test-database') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
+  <a href="{{ url_for('counselor_page', tab='test-database') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back To Reports</a>
   <span class="badge badge-info">{{ test_meta.test_name or 'Selected Test' }}</span>
 </div>
 
@@ -68,15 +68,15 @@ RMKCET</textarea>
     </thead>
     <tbody>
       {% for r in rows %}
-      <tr>
+      <tr data-reg-no="{{ r.reg_no }}" data-send-status="{{ 'generated' if r.status == 'Generated' else 'pending' }}">
         <td><strong>{{ r.reg_no }}</strong></td>
         <td>{{ r.student_name }}</td>
         <td>{{ r.parent_phone or '—' }}</td>
         <td>
           {% if r.status == 'Generated' %}
-          <span class="badge badge-success">Generated</span>
+          <span class="badge badge-success" data-status-badge>Generated</span>
           {% else %}
-          <span class="badge badge-warning">Pending</span>
+          <span class="badge badge-warning" data-status-badge>Pending</span>
           {% endif %}
         </td>
         <td>
@@ -99,6 +99,92 @@ RMKCET</textarea>
       {% endif %}
     </tbody>
   </table>
+</div>
+
+<div class="card mb-3 send-batch-card">
+  <div class="card-title"><i class="fas fa-flask"></i> Experimental</div>
+  <div class="experimental-notice-box">
+    <strong>Batch Send</strong>
+    <p style="margin:8px 0 0;">
+      By default, this iterates through <strong>Pending students</strong>, auto-opens WhatsApp compose links one by one, and marks each student as <strong>Generated</strong> after successful logging.
+    </p>
+    <p style="margin:8px 0 0;">
+      Important: Once you press <strong>Start Batch Send</strong> and confirm, this flow is designed to continue until every selected student is processed. Do not close the tab or refresh during the run.
+    </p>
+  </div>
+
+  <div class="form-check" style="margin-top:12px;">
+    <input type="checkbox" id="batchIncludeGenerated">
+    <label for="batchIncludeGenerated">Send from beginning (include already Generated students)</label>
+  </div>
+
+  <div class="form-row" style="margin-top:12px;">
+    <div class="form-group">
+      <label class="form-label">Delay Between Auto-Opens</label>
+      <select id="batchDelayPreset" class="form-control" onchange="handleBatchDelayPresetChange()">
+        <option value="5">5 seconds</option>
+        <option value="10" selected>10 seconds (Default)</option>
+        <option value="15">15 seconds</option>
+        <option value="20">20 seconds</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="form-group" id="batchDelayCustomWrap" style="display:none;">
+      <label class="form-label">Custom Delay (Seconds)</label>
+      <input id="batchDelayCustom" class="form-control" type="number" min="1" max="60" step="1" value="10" oninput="clampBatchCustomDelay()">
+      <div class="text-muted" style="font-size:.8rem;margin-top:6px;">Allowed range: 1 to 60 seconds</div>
+    </div>
+  </div>
+
+  <div class="batch-meta-row" id="batchMetaRow">
+    <span class="badge badge-info">Total: <span id="batchTotalCount">0</span></span>
+    <span class="badge badge-warning">Pending: <span id="batchPendingCount">0</span></span>
+    <span class="badge badge-success">Generated: <span id="batchGeneratedCount">0</span></span>
+  </div>
+
+  <div class="btn-group mt-2">
+    <button type="button" id="batchSendStartBtn" class="btn btn-primary" onclick="openBatchSendNotice()">
+      <i class="fab fa-whatsapp"></i> Start Batch Send
+    </button>
+  </div>
+
+  <div id="batchRunStatus" class="text-muted" style="font-size:.85rem;margin-top:10px;">
+    Batch send is idle.
+  </div>
+  <div class="text-muted" style="font-size:.8rem;margin-top:8px;">
+    Recommendation: Keep this tab active until completion and verify the final generated count.
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-batch-send-confirm">
+  <div class="modal" style="max-width:760px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-triangle-exclamation"></i> Confirm Batch Send</h3>
+      <button class="modal-close" onclick="cancelBatchSendNotice()">&times;</button>
+    </div>
+
+    <div class="batch-confirm-box">
+      <p><strong>Please read before proceeding:</strong></p>
+      <ul class="batch-confirm-list">
+        <li>This will auto-open WhatsApp for each pending student in sequence.</li>
+        <li>Each student will be marked as Generated after successful backend logging.</li>
+        <li>There is no in-page stop control once execution begins.</li>
+        <li>Do not refresh or close the tab while this operation is running.</li>
+      </ul>
+      <p style="margin:10px 0 0;">
+        A mandatory 5-second hold is enforced to reduce accidental bulk sending.
+      </p>
+    </div>
+
+    <div id="batchConfirmSummary" class="batch-confirm-summary"></div>
+
+    <div class="btn-group mt-2">
+      <button type="button" class="btn btn-outline" onclick="cancelBatchSendNotice()">Cancel</button>
+      <button type="button" class="btn btn-success" id="batchSendProceedBtn" onclick="startBatchSendConfirmed()" disabled>
+        Proceed (5)
+      </button>
+    </div>
+  </div>
 </div>
 
 <div class="modal-overlay" id="modal-send-preview">
@@ -138,6 +224,334 @@ let activeStudentContext = null;
 let orderList = [];
 let defaultOrderList = [];
 const SELECTED_TEST_ID = '{{ test_id or "" }}';
+let batchSendInProgress = false;
+let batchNoticeCountdownTimer = null;
+let batchNoticeSecondsLeft = 0;
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function getStudentContextFromButton(btn) {
+  if (!btn) return null;
+  return {
+    testId: btn.dataset.testId || '',
+    regNo: btn.dataset.regNo || '',
+    studentName: btn.dataset.studentName || '',
+    parentPhone: btn.dataset.parentPhone || '',
+    department: btn.dataset.department || '',
+    marks: safeJsonParse(btn.dataset.marks || '{}')
+  };
+}
+
+function getSendRows() {
+  return Array.from(document.querySelectorAll('tr[data-reg-no][data-send-status]'));
+}
+
+function shouldIncludeGeneratedInBatch() {
+  const toggle = document.getElementById('batchIncludeGenerated');
+  return !!(toggle && toggle.checked);
+}
+
+function getBatchTargetButtons() {
+  const includeGenerated = shouldIncludeGeneratedInBatch();
+  return getSendRows()
+    .filter((row) => includeGenerated || String(row.dataset.sendStatus || '').toLowerCase() !== 'generated')
+    .map((row) => row.querySelector('button[data-test-id][data-reg-no][data-marks]'))
+    .filter(Boolean);
+}
+
+function updateBatchStats() {
+  const rows = getSendRows();
+  const total = rows.length;
+  const generated = rows.filter((row) => String(row.dataset.sendStatus || '').toLowerCase() === 'generated').length;
+  const pending = Math.max(0, total - generated);
+
+  const totalEl = document.getElementById('batchTotalCount');
+  const pendingEl = document.getElementById('batchPendingCount');
+  const generatedEl = document.getElementById('batchGeneratedCount');
+
+  if (totalEl) totalEl.textContent = String(total);
+  if (pendingEl) pendingEl.textContent = String(pending);
+  if (generatedEl) generatedEl.textContent = String(generated);
+}
+
+function setBatchRunStatus(message, tone) {
+  const el = document.getElementById('batchRunStatus');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('batch-run-status-success', 'batch-run-status-warning', 'batch-run-status-error');
+  if (tone === 'success') el.classList.add('batch-run-status-success');
+  if (tone === 'warning') el.classList.add('batch-run-status-warning');
+  if (tone === 'error') el.classList.add('batch-run-status-error');
+}
+
+function markRowGeneratedForButton(btn) {
+  const row = btn ? btn.closest('tr[data-reg-no][data-send-status]') : null;
+  if (!row) return;
+
+  row.dataset.sendStatus = 'generated';
+  const badge = row.querySelector('[data-status-badge]');
+  if (badge) {
+    badge.className = 'badge badge-success';
+    badge.textContent = 'Generated';
+  }
+  updateBatchStats();
+}
+
+function getCurrentCommonVars() {
+  return {
+    test_name: document.getElementById('varTestName').value || '',
+    semester: document.getElementById('varSemester').value || '',
+    batch_name: document.getElementById('varBatch').value || '',
+    template: document.getElementById('varTemplate').value || ''
+  };
+}
+
+function buildMessageFromContext(context, commonVars) {
+  const vars = {
+    test_name: commonVars.test_name || '',
+    semester: commonVars.semester || '',
+    department: context.department || '{{ test_meta.department or "" }}',
+    batch_name: commonVars.batch_name || '',
+    student_name: context.studentName || '',
+    reg_no: context.regNo || '',
+    subjects_table: buildSubjectsTableFromOrder(orderList, context.marks || {})
+  };
+
+  return {
+    vars,
+    message: applyTemplate(commonVars.template || '', vars)
+  };
+}
+
+function handleBatchDelayPresetChange() {
+  const preset = document.getElementById('batchDelayPreset');
+  const wrap = document.getElementById('batchDelayCustomWrap');
+  if (!preset || !wrap) return;
+  wrap.style.display = preset.value === 'custom' ? '' : 'none';
+}
+
+function clampBatchCustomDelay() {
+  const input = document.getElementById('batchDelayCustom');
+  if (!input) return;
+  const raw = parseInt(input.value || '10', 10);
+  if (!Number.isFinite(raw)) {
+    input.value = '10';
+    return;
+  }
+  const clamped = Math.max(1, Math.min(60, raw));
+  input.value = String(clamped);
+}
+
+function getEffectiveBatchDelaySeconds() {
+  const preset = document.getElementById('batchDelayPreset');
+  if (!preset) return 10;
+
+  if (preset.value !== 'custom') {
+    const parsed = parseInt(preset.value || '10', 10);
+    return Number.isFinite(parsed) ? parsed : 10;
+  }
+
+  clampBatchCustomDelay();
+  const custom = document.getElementById('batchDelayCustom');
+  const parsedCustom = parseInt((custom && custom.value) || '10', 10);
+  if (!Number.isFinite(parsedCustom)) return 10;
+  return Math.max(1, Math.min(60, parsedCustom));
+}
+
+function resetBatchNoticeCountdown() {
+  if (batchNoticeCountdownTimer) {
+    clearInterval(batchNoticeCountdownTimer);
+    batchNoticeCountdownTimer = null;
+  }
+  batchNoticeSecondsLeft = 0;
+}
+
+function renderBatchProceedButton() {
+  const proceedBtn = document.getElementById('batchSendProceedBtn');
+  if (!proceedBtn) return;
+
+  if (batchNoticeSecondsLeft > 0) {
+    proceedBtn.disabled = true;
+    proceedBtn.textContent = `Proceed (${batchNoticeSecondsLeft})`;
+  } else {
+    proceedBtn.disabled = false;
+    proceedBtn.textContent = 'Proceed';
+  }
+}
+
+function startBatchNoticeCountdown() {
+  resetBatchNoticeCountdown();
+  batchNoticeSecondsLeft = 5;
+  renderBatchProceedButton();
+
+  batchNoticeCountdownTimer = setInterval(() => {
+    batchNoticeSecondsLeft -= 1;
+    if (batchNoticeSecondsLeft <= 0) {
+      batchNoticeSecondsLeft = 0;
+      resetBatchNoticeCountdown();
+    }
+    renderBatchProceedButton();
+  }, 1000);
+}
+
+function openBatchSendNotice() {
+  if (batchSendInProgress) {
+    alert('Batch send is already running.');
+    return;
+  }
+
+  const targetButtons = getBatchTargetButtons();
+  if (!targetButtons.length) {
+    alert('No students found for batch send with the current mode.');
+    return;
+  }
+
+  const delaySeconds = getEffectiveBatchDelaySeconds();
+  const includeGenerated = shouldIncludeGeneratedInBatch();
+  const modeLabel = includeGenerated ? 'All students (from beginning)' : 'Pending students only';
+  const summary = document.getElementById('batchConfirmSummary');
+  if (summary) {
+    summary.innerHTML = `
+      <strong>Batch Summary</strong><br>
+      Mode: <strong>${modeLabel}</strong><br>
+      Students to Process: <strong>${targetButtons.length}</strong><br>
+      Delay Between Opens: <strong>${delaySeconds} second(s)</strong><br>
+      Reason for 5-second wait: <strong>prevents accidental bulk sending</strong>.
+    `;
+  }
+
+  openModal('batch-send-confirm');
+  startBatchNoticeCountdown();
+}
+
+function cancelBatchSendNotice() {
+  resetBatchNoticeCountdown();
+  closeModal('batch-send-confirm');
+}
+
+function setBatchControlsDisabled(disabled) {
+  const startBtn = document.getElementById('batchSendStartBtn');
+  const preset = document.getElementById('batchDelayPreset');
+  const custom = document.getElementById('batchDelayCustom');
+  const includeGenerated = document.getElementById('batchIncludeGenerated');
+
+  if (startBtn) startBtn.disabled = !!disabled;
+  if (preset) preset.disabled = !!disabled;
+  if (custom) custom.disabled = !!disabled;
+  if (includeGenerated) includeGenerated.disabled = !!disabled;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function startBatchSendConfirmed() {
+  if (batchSendInProgress) return;
+  if (batchNoticeSecondsLeft > 0) return;
+
+  cancelBatchSendNotice();
+
+  const targetButtons = getBatchTargetButtons();
+  if (!targetButtons.length) {
+    alert('No students found for batch send with the current mode.');
+    return;
+  }
+
+  const includeGenerated = shouldIncludeGeneratedInBatch();
+  const modeLabel = includeGenerated ? 'all students from beginning' : 'pending students only';
+  const delaySeconds = getEffectiveBatchDelaySeconds();
+  const total = targetButtons.length;
+  let successCount = 0;
+  let failedCount = 0;
+  const failedRegs = [];
+
+  batchSendInProgress = true;
+  setBatchControlsDisabled(true);
+  setBatchRunStatus(`Batch started (${modeLabel}). Processing ${total} students with ${delaySeconds}s delay.`, 'warning');
+
+  try {
+    for (let index = 0; index < targetButtons.length; index += 1) {
+      const btn = targetButtons[index];
+      const context = getStudentContextFromButton(btn);
+      if (!context || !context.testId || !context.regNo) {
+        failedCount += 1;
+        continue;
+      }
+
+      const commonVars = getCurrentCommonVars();
+      const composed = buildMessageFromContext(context, commonVars);
+      const formData = new FormData();
+      formData.set('test_id', context.testId);
+      formData.set('reg_no', context.regNo);
+      formData.set('action', 'send');
+      formData.set('ajax', '1');
+      formData.set('message_template', commonVars.template || '');
+      formData.set('test_name', commonVars.test_name || '');
+      formData.set('semester', commonVars.semester || '');
+      formData.set('batch_name', commonVars.batch_name || '');
+      formData.set('department', composed.vars.department || '');
+      formData.set('ordered_fields', JSON.stringify(getOrderedFieldPayload()));
+
+      setBatchRunStatus(`Processing ${index + 1}/${total}: ${context.regNo}`, 'warning');
+
+      let waLink = '';
+      let success = false;
+
+      try {
+        const response = await fetch('{{ url_for("api_send_single_report") }}', {
+          method: 'POST',
+          body: formData,
+          credentials: 'same-origin'
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.ok && payload.success) {
+          success = true;
+          waLink = String(payload.wa_link || '').trim();
+        }
+      } catch (error) {
+        success = false;
+      }
+
+      if (success) {
+        if (!waLink) {
+          waLink = buildWhatsAppLink(context.parentPhone, composed.message);
+        }
+        if (waLink) {
+          openWhatsAppAppDirect(waLink);
+        }
+        markRowGeneratedForButton(btn);
+        successCount += 1;
+      } else {
+        failedCount += 1;
+        failedRegs.push(context.regNo);
+      }
+
+      if (index < targetButtons.length - 1) {
+        await sleep(delaySeconds * 1000);
+      }
+    }
+
+    if (failedCount > 0) {
+      const preview = failedRegs.slice(0, 5).join(', ');
+      const extra = failedRegs.length > 5 ? ` and ${failedRegs.length - 5} more` : '';
+      setBatchRunStatus(`Batch completed with warnings. Generated: ${successCount}, Failed: ${failedCount}.`, 'warning');
+      alert(`Batch send completed. Generated: ${successCount}, Failed: ${failedCount}. Failed Reg Nos: ${preview}${extra}.`);
+    } else {
+      setBatchRunStatus(`Batch completed successfully. Generated: ${successCount}/${total}.`, 'success');
+      alert(`Batch send completed successfully for ${successCount} students.`);
+    }
+  } finally {
+    batchSendInProgress = false;
+    setBatchControlsDisabled(false);
+    updateBatchStats();
+  }
+}
 
 const ATTENDANCE_KEYS = new Set(['attendance', 'att']);
 const GPA_KEYS = new Set(['gpa', 'cgpa']);
@@ -433,26 +847,8 @@ function isAbsentMark(value) {
 
 function openSendPreview(btn) {
   activeSendButton = btn;
-  const testId = btn.dataset.testId;
-  const regNo = btn.dataset.regNo;
-  const studentName = btn.dataset.studentName;
-  const parentPhone = btn.dataset.parentPhone || '';
-  const department = btn.dataset.department;
-  let marks = {};
-  try {
-    marks = JSON.parse(btn.dataset.marks || '{}');
-  } catch (e) {
-    marks = {};
-  }
-
-  activeStudentContext = {
-    testId,
-    regNo,
-    studentName,
-    parentPhone,
-    department,
-    marks: marks || {}
-  };
+  activeStudentContext = getStudentContextFromButton(btn);
+  if (!activeStudentContext) return;
 
   if (!orderList.length) {
     initializeOrderPanelForTest();
@@ -490,13 +886,6 @@ async function sendToWhatsAppDirect() {
   const msg = document.getElementById('previewText').value || '';
   const waLink = buildWhatsAppLink(phone, msg);
 
-  if (!waLink) {
-    alert('Parent phone number is missing or invalid for this student.');
-    return;
-  }
-
-  openWhatsAppAppDirect(waLink);
-
   const formData = new FormData(form);
   formData.set('action', 'send');
   formData.set('ajax', '1');
@@ -509,13 +898,22 @@ async function sendToWhatsAppDirect() {
     });
     const result = await response.json().catch(() => ({}));
     if (response.ok && result.success && activeSendButton) {
-      const row = activeSendButton.closest('tr');
-      if (row && row.children && row.children.length >= 4) {
-        row.children[3].innerHTML = '<span class="badge badge-success">Generated</span>';
+      const directLink = String(result.wa_link || '').trim() || waLink;
+      if (!directLink) {
+        alert('Parent phone number is missing or invalid for this student.');
+        return;
       }
+      openWhatsAppAppDirect(directLink);
+      markRowGeneratedForButton(activeSendButton);
+      setBatchRunStatus('Single send completed and status updated to Generated.', 'success');
+    } else {
+      const err = String(result.error || '').trim() || 'Unable to send this student.';
+      alert(err);
     }
   } catch (error) {
     console.error('Send logging failed:', error);
+    setBatchRunStatus('Single send could not be logged. Status remains Pending.', 'error');
+    alert('Unable to send this student right now. Please try again.');
   }
 
   closeModal('send-preview');
@@ -526,6 +924,8 @@ document.addEventListener('DOMContentLoaded', () => {
   loadCommonVarsFromStorage();
   bindCommonVarsAutoSave();
   initializeOrderPanelForTest();
+  handleBatchDelayPresetChange();
+  updateBatchStats();
   ['varTestName', 'varSemester', 'varBatch', 'varTemplate'].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -578,6 +978,60 @@ document.addEventListener('DOMContentLoaded', () => {
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   background: rgba(255,255,255,.02);
+}
+
+.experimental-notice-box {
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: .86rem;
+  line-height: 1.5;
+}
+
+.send-batch-card {
+  margin-top: 16px;
+}
+
+.batch-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.batch-confirm-box {
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: .86rem;
+}
+
+.batch-confirm-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.batch-confirm-summary {
+  margin-top: 12px;
+  font-size: .85rem;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+#batchRunStatus.batch-run-status-success {
+  color: var(--success);
+}
+
+#batchRunStatus.batch-run-status-warning {
+  color: var(--warning);
+}
+
+#batchRunStatus.batch-run-status-error {
+  color: var(--danger);
 }
 
 @media (max-width: 768px) {

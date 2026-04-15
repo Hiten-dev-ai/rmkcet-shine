@@ -2,7 +2,7 @@
 {% block title %}Admin Panel - {{ app_name }}{% endblock %}
 {% block page_title %}
 {% set header_tab = request.args.get('tab', default_tab or 'reports') %}
-{% set role_name = (current_role or '')|lower %}
+{% set role_name = ((current_role_override or current_role or ''))|lower %}
 {% if role_name == 'admin' %}
 {% set panel_label = 'Admin Panel' %}
 {% elif role_name == 'principal' %}
@@ -15,7 +15,7 @@
 {% set panel_label = 'Admin Panel' %}
 {% endif %}
 
-{% if is_system_admin or is_principal %}
+{% if is_system_admin or is_principal or is_chief_admin or is_deo %}
   {% if header_tab == 'reports' %}
     {% if report_year_level and report_department %}
 <a href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department) }}" class="btn btn-outline btn-sm" style="margin-right:8px;"><i class="fas fa-arrow-left"></i></a>
@@ -73,22 +73,22 @@
   <!-- Create User -->
   <div class="card mb-3" id="registerUserCard" style="margin-top:18px;">
     <div class="card-title"><i class="fas fa-user-plus"></i> Register New User</div>
-    <form method="POST" action="{{ url_for('api_create_user') }}" enctype="multipart/form-data">
+    <form method="POST" action="{{ url_for('api_create_user') }}" enctype="multipart/form-data" autocomplete="off">
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Full Name</label>
-          <input type="text" class="form-control" name="name" required placeholder="Dr. John Doe">
+          <input type="text" class="form-control" name="name" required placeholder="Dr. John Doe" autocomplete="off" spellcheck="false">
         </div>
         <div class="form-group">
           <label class="form-label">Email</label>
-          <input type="email" class="form-control" name="email" required placeholder="john@rmkcet.ac.in">
+          <input type="email" class="form-control" name="email" required placeholder="john@rmkcet.ac.in" autocomplete="off" spellcheck="false">
         </div>
       </div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Password</label>
           <div class="d-flex align-center" style="gap:8px;">
-            <input type="password" class="form-control" id="createUserPassword" name="password" required placeholder="Minimum 6 characters">
+            <input type="password" class="form-control" id="createUserPassword" name="account_password" required placeholder="Minimum 6 characters" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" spellcheck="false">
             <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('createUserPassword', 'iconCreateUserPassword')" aria-label="Show or hide password">
               <i id="iconCreateUserPassword" class="fas fa-eye"></i>
             </button>
@@ -97,7 +97,7 @@
         <div class="form-group">
           <label class="form-label">Confirm Password</label>
           <div class="d-flex align-center" style="gap:8px;">
-            <input type="password" class="form-control" id="createUserConfirmPassword" name="confirm_password" required placeholder="Re-enter password">
+            <input type="password" class="form-control" id="createUserConfirmPassword" name="account_confirm_password" required placeholder="Re-enter password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" spellcheck="false">
             <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('createUserConfirmPassword', 'iconCreateUserConfirmPassword')" aria-label="Show or hide confirm password">
               <i id="iconCreateUserConfirmPassword" class="fas fa-eye"></i>
             </button>
@@ -143,15 +143,30 @@
           </select>
         </div>
       </div>
+      <div class="card mb-2" id="createUserScopeCard" style="display:none;padding:12px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.28);">
+        <div class="card-title" style="font-size:.86rem;margin-bottom:10px;"><i class="fas fa-layer-group"></i> Assigned Scopes (HOD/DEO)</div>
+        <div class="scope-grid">
+          {% for d in departments if d.is_active %}
+          <div class="scope-item">
+            <div class="scope-item-title">{{ d.code }}</div>
+            <div class="scope-year-list">
+              {% for y in [1,2,3,4] %}
+              <label class="scope-chip">
+                <input type="checkbox" name="scope_pairs" value="{{ d.code }}::{{ y }}">
+                <span>Y{{ y }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <small style="font-size:.74rem;color:var(--text-dim);">Choose one or more department-year scopes for HOD/DEO.</small>
+      </div>
       <div class="form-row" id="createUserCounselorCapacityRow">
         <div class="form-group">
           <label class="form-label">Max Students</label>
           <input type="number" class="form-control" name="max_students" id="createUserMaxStudents" value="30" min="1" max="200">
         </div>
-      </div>
-      <div class="form-check" id="createUserUploadPermissionWrap">
-        <input type="checkbox" name="can_upload_students" id="canUpload" checked>
-        <label for="canUpload">Allow counselor to upload their own student list</label>
       </div>
       <div class="form-group" id="createUserStudentUploadWrap">
         <label class="form-label">Upload Student List (Optional — assign students now)</label>
@@ -176,7 +191,7 @@
       <div class="form-group" style="flex:1;min-width:260px;">
         <label class="form-label">Search by Name</label>
         <div style="position:relative;">
-          <input id="userSearchBox" class="form-control" type="text" placeholder="Type name to search..." oninput="filterUserTable()">
+          <input id="userSearchBox" class="form-control" type="text" placeholder="Type name to search..." autocomplete="off" oninput="filterUserTable()">
           <ul id="userSearchSuggestions" class="search-suggestions" style="display:none;"></ul>
         </div>
       </div>
@@ -234,11 +249,19 @@
         {% set scope_key = (u.department or '')|upper ~ '::' ~ (u.year_level or 1) %}
         {% set chief_assignments = chief_scopes_by_email.get(u.email, []) %}
         {% set chief_departments = [] %}
-        {% if u.role in ['chief_admin', 'hod'] and chief_assignments %}
+        {% if u.role in ['chief_admin', 'hod', 'deo'] and chief_assignments %}
           {% for assignment in chief_assignments %}
             {% set dep_code = (assignment.split('::')[0] if '::' in assignment else assignment)|upper %}
             {% if dep_code and dep_code not in chief_departments %}
               {% set _ = chief_departments.append(dep_code) %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% set scoped_role_has_overlap = false %}
+        {% if is_chief_admin and u.role in ['chief_admin', 'hod', 'deo'] %}
+          {% for assignment in chief_assignments %}
+            {% if assignment in chief_scope_keys %}
+              {% set scoped_role_has_overlap = true %}
             {% endif %}
           {% endfor %}
         {% endif %}
@@ -251,7 +274,7 @@
             {% endif %}
           {% endfor %}
         {% endif %}
-        {% set can_edit_user = (u.role != 'principal') and (is_system_admin or (is_chief_admin and ((u.role in ['counselor', 'deo'] and scope_key in chief_scope_keys) or (u.role in ['chief_admin', 'hod'] and chief_admin_has_overlap)))) %}
+        {% set can_edit_user = (u.role != 'principal') and (is_system_admin or (is_chief_admin and ((u.role == 'counselor' and scope_key in chief_scope_keys) or (u.role == 'deo' and scoped_role_has_overlap) or (u.role in ['chief_admin', 'hod'] and chief_admin_has_overlap)))) %}
         {% set can_manage_user = (is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or (is_chief_admin and can_edit_user) %}
         <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{% if u.is_active and not u.is_locked %}active{% else %}inactive{% endif %}" data-user-created="{{ u.created_at or '' }}">
           <td>
@@ -263,7 +286,7 @@
             </span>
           </td>
           <td>
-            {% if u.role in ['chief_admin', 'hod'] %}
+            {% if u.role in ['chief_admin', 'hod', 'deo'] %}
               {% if chief_departments|length == 0 %}
                 —
               {% elif chief_departments|length <= 2 %}
@@ -376,6 +399,25 @@
               </select>
             </div>
           </div>
+          <div class="card mb-2" id="editScopeCard-{{ loop.index }}" style="display:none;padding:12px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.28);">
+            <div class="card-title" style="font-size:.84rem;margin-bottom:10px;"><i class="fas fa-layer-group"></i> Assigned Scopes (HOD/DEO)</div>
+            <div class="scope-grid">
+              {% for d in departments if d.is_active %}
+              <div class="scope-item">
+                <div class="scope-item-title">{{ d.code }}</div>
+                <div class="scope-year-list">
+                  {% for y in [1,2,3,4] %}
+                  {% set scope_key_edit = d.code ~ '::' ~ y %}
+                  <label class="scope-chip">
+                    <input type="checkbox" name="scope_pairs" value="{{ d.code }}::{{ y }}" {% if scope_key_edit in chief_assignments %}checked{% endif %}>
+                    <span>Y{{ y }}</span>
+                  </label>
+                  {% endfor %}
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
           <div class="form-row" id="editCapacityRow-{{ loop.index }}">
             <div class="form-group">
               <label class="form-label">Max Students</label>
@@ -384,7 +426,7 @@
           </div>
           <div class="form-group">
             <label class="form-label">New Password (leave blank to keep current)</label>
-            <input type="password" class="form-control" name="password" placeholder="New password">
+            <input type="password" class="form-control" name="account_password" placeholder="New password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" spellcheck="false">
           </div>
           <div class="form-check" id="editUploadWrap-{{ loop.index }}">
             <input type="checkbox" name="can_upload_students" id="canUp-{{ loop.index }}"
@@ -423,7 +465,7 @@
 
             <!-- Quick Add Student Form (Hidden by default) -->
             <div id="quickAddStudent-{{ loop.index }}" style="display:none;padding:12px;background:var(--bg-input);border-radius:var(--radius-sm);border:1px solid var(--border);margin-bottom:12px;">
-              <form method="POST" action="{{ url_for('api_admin_save_student') }}" style="margin-bottom:10px;">
+              <form method="POST" action="{{ url_for('api_admin_save_student') }}" autocomplete="off" style="margin-bottom:10px;">
                 <input type="hidden" name="counselor_email" value="{{ u.email }}">
                 <div class="form-row">
                   <div class="form-group" style="margin:0;">
@@ -537,7 +579,7 @@
 
         <div class="card mb-2" style="padding:14px;">
           <div class="card-title" style="font-size:.9rem;"><i class="fas fa-user-plus"></i> Add Student Manually</div>
-          <form method="POST" action="{{ url_for('api_admin_save_student') }}">
+          <form method="POST" action="{{ url_for('api_admin_save_student') }}" autocomplete="off">
             <input type="hidden" name="counselor_email" value="{{ u.email }}">
             <div class="form-row">
               <div class="form-group"><label class="form-label">Reg No</label><input class="form-control" name="reg_no" required></div>
@@ -556,7 +598,7 @@
             <tbody>
               {% for st in students_map.get(u.email, []) %}
               <tr>
-                <form method="POST" action="{{ url_for('api_admin_save_student') }}">
+                <form method="POST" action="{{ url_for('api_admin_save_student') }}" autocomplete="off">
                   <input type="hidden" name="counselor_email" value="{{ u.email }}">
                   <input type="hidden" name="original_reg_no" value="{{ st.reg_no }}">
                   <td><input class="form-control" name="reg_no" value="{{ st.reg_no }}" required style="min-width:120px;"></td>
@@ -673,10 +715,12 @@
   <div class="card mb-3">
     <div class="card-title"><i class="fas fa-building"></i> Department: {{ report_department }}</div>
     <div style="display:grid;grid-template-columns:1fr;gap:10px;max-width:520px;">
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=1) }}"><strong>1.</strong>&nbsp; Year 1</a>
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=2) }}"><strong>2.</strong>&nbsp; Year 2</a>
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=3) }}"><strong>3.</strong>&nbsp; Year 3</a>
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=4) }}"><strong>4.</strong>&nbsp; Year 4</a>
+      {% for y in report_available_years %}
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='reports', report_dept=report_department, report_year=y) }}"><strong>{{ loop.index }}.</strong>&nbsp; Year {{ y }}</a>
+      {% endfor %}
+      {% if not report_available_years %}
+      <div class="card" style="padding:12px;font-size:.86rem;color:var(--text-dim);">No years allocated for this department.</div>
+      {% endif %}
     </div>
   </div>
   {% else %}
@@ -736,8 +780,17 @@
   </div>
   {% endif %}
 
-  {% set sem1_tests = report_tests | selectattr('semester', 'equalto', '1') | list %}
-  {% set sem2_tests = report_tests | selectattr('semester', 'equalto', '2') | list %}
+  {% set sem_ns = namespace(sem1_tests=[], sem2_tests=[]) %}
+  {% for t in report_tests %}
+    {% set sem_value = (t.semester|string)|trim %}
+    {% if sem_value == '1' %}
+      {% set _ = sem_ns.sem1_tests.append(t) %}
+    {% elif sem_value == '2' %}
+      {% set _ = sem_ns.sem2_tests.append(t) %}
+    {% endif %}
+  {% endfor %}
+  {% set sem1_tests = sem_ns.sem1_tests %}
+  {% set sem2_tests = sem_ns.sem2_tests %}
 
   <div class="card mb-3">
     <div class="card-title"><i class="fas fa-database"></i> {{ report_department }} - Year {{ report_year_level }} - Semester 1</div>
@@ -772,6 +825,20 @@
               <a class="btn btn-outline btn-sm" href="{{ url_for('admin_test_edit_page', test_id=t.id) }}" title="Edit">
                 <i class="fas fa-pen"></i>
               </a>
+              {% endif %}
+              {% if not preview_mode %}
+              <form method="POST" action="{{ url_for('api_toggle_test_block', test_id=t.id) }}" style="display:inline;">
+                <button class="btn {% if t.is_blocked %}btn-success{% else %}btn-warning{% endif %} btn-sm" type="submit" title="{% if t.is_blocked %}Unlock Test{% else %}Lock Test{% endif %}">
+                  <i class="fas {% if t.is_blocked %}fa-lock-open{% else %}fa-lock{% endif %}"></i>
+                </button>
+              </form>
+              {% if not is_principal %}
+              <form method="POST" action="{{ url_for('api_delete_test', test_id=t.id) }}" style="display:inline;" onsubmit="return confirm('Delete this test and all associated marks? This cannot be undone.');">
+                <button class="btn btn-danger btn-sm" type="submit" title="Delete Test">
+                  <i class="fas fa-trash"></i>
+                </button>
+              </form>
+              {% endif %}
               {% endif %}
             </div>
           </td>
@@ -819,6 +886,20 @@
                   <i class="fas fa-pen"></i>
                 </a>
                 {% endif %}
+                {% if not preview_mode %}
+                <form method="POST" action="{{ url_for('api_toggle_test_block', test_id=t.id) }}" style="display:inline;">
+                  <button class="btn {% if t.is_blocked %}btn-success{% else %}btn-warning{% endif %} btn-sm" type="submit" title="{% if t.is_blocked %}Unlock Test{% else %}Lock Test{% endif %}">
+                    <i class="fas {% if t.is_blocked %}fa-lock-open{% else %}fa-lock{% endif %}"></i>
+                  </button>
+                </form>
+                {% if not is_principal %}
+                <form method="POST" action="{{ url_for('api_delete_test', test_id=t.id) }}" style="display:inline;" onsubmit="return confirm('Delete this test and all associated marks? This cannot be undone.');">
+                  <button class="btn btn-danger btn-sm" type="submit" title="Delete Test">
+                    <i class="fas fa-trash"></i>
+                  </button>
+                </form>
+                {% endif %}
+                {% endif %}
               </div>
             </td>
           </tr>
@@ -846,7 +927,7 @@
       <p><strong>Batch:</strong> {{ t.batch_name or 'N/A' }}</p>
       <p><strong>Semester:</strong> {{ t.semester or 'N/A' }}</p>
       <p><strong>Year:</strong> {{ t.year_level or report_year_level }}</p>
-      <p><strong>Department:</strong> {{ t.department or 'N/A' }}</p>
+      <p><strong>Department:</strong> {{ t.department or report_department or 'N/A' }}</p>
       <p><strong>Uploaded By:</strong> {{ t.uploaded_by_name or t.uploaded_by or 'Unknown' }}</p>
       <p><strong>Uploaded At:</strong> {{ (t.uploaded_at or 'N/A')[:19] }}</p>
       <p><strong>Students:</strong> {{ t.student_count or 0 }}</p>
@@ -996,14 +1077,14 @@
             <td>{{ b.modified }}</td>
             <td style="text-align:right;">
               <div class="btn-group" style="justify-content:flex-end;align-items:center;gap:8px;">
-                <form method="POST" action="{{ url_for('api_database_restore_backup') }}" style="display:flex;gap:6px;align-items:center;" onsubmit="return confirm('Restore backup {{ b.name }}? This logs out all users and replaces current database.')">
+                <form method="POST" action="{{ url_for('api_database_restore_backup') }}" style="display:flex;gap:6px;align-items:center;" autocomplete="off" onsubmit="return confirm('Restore backup {{ b.name }}? This logs out all users and replaces current database.')">
                   <input type="hidden" name="backup_name" value="{{ b.name }}">
-                  <input class="form-control" type="password" name="password" placeholder="Password" required style="max-width:130px;">
+                  <input class="form-control" type="password" name="admin_password" placeholder="Password" required autocomplete="off" data-lpignore="true" data-1p-ignore="true" spellcheck="false" style="max-width:130px;">
                   <button class="btn btn-outline btn-sm" type="submit"><i class="fas fa-rotate-left"></i> Restore</button>
                 </form>
-                <form method="POST" action="{{ url_for('api_database_delete_backup') }}" style="display:flex;gap:6px;align-items:center;" onsubmit="return confirm('Delete backup {{ b.name }}?')">
+                <form method="POST" action="{{ url_for('api_database_delete_backup') }}" style="display:flex;gap:6px;align-items:center;" autocomplete="off" onsubmit="return confirm('Delete backup {{ b.name }}?')">
                   <input type="hidden" name="backup_name" value="{{ b.name }}">
-                  <input class="form-control" type="password" name="password" placeholder="Password" required style="max-width:130px;">
+                  <input class="form-control" type="password" name="admin_password" placeholder="Password" required autocomplete="off" data-lpignore="true" data-1p-ignore="true" spellcheck="false" style="max-width:130px;">
                   <button class="btn btn-danger btn-sm" type="submit"><i class="fas fa-trash"></i> Delete</button>
                 </form>
               </div>
@@ -1023,11 +1104,11 @@
     <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:12px;">
       Clears uploaded exam/test/marks/message records for a new batch. Latest backup is required before clear. All users will be logged out.
     </p>
-    <form method="POST" action="{{ url_for('api_database_clear_exam_data') }}" onsubmit="return confirm('Clear exam data now? Ensure latest backup exists.')">
+    <form method="POST" action="{{ url_for('api_database_clear_exam_data') }}" autocomplete="off" onsubmit="return confirm('Clear exam data now? Ensure latest backup exists.')">
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Confirm Password</label>
-          <input class="form-control" type="password" name="password" required placeholder="Enter your password">
+          <input class="form-control" type="password" name="admin_password" required placeholder="Enter your password" autocomplete="off" data-lpignore="true" data-1p-ignore="true" spellcheck="false">
         </div>
       </div>
       <button class="btn btn-danger" type="submit"><i class="fas fa-trash"></i> Clear Exam Data</button>
@@ -1052,10 +1133,12 @@
   <div class="card mb-3" style="max-width:520px;">
     <div class="card-title"><i class="fas fa-building"></i> Department: {{ act_department }}</div>
     <div style="display:grid;grid-template-columns:1fr;gap:10px;">
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=1) }}"><strong>1.</strong>&nbsp; Year 1</a>
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=2) }}"><strong>2.</strong>&nbsp; Year 2</a>
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=3) }}"><strong>3.</strong>&nbsp; Year 3</a>
-      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=4) }}"><strong>4.</strong>&nbsp; Year 4</a>
+      {% for y in activity_available_years %}
+      <a class="btn btn-outline" style="padding:16px;font-size:1rem;justify-content:flex-start;" href="{{ url_for(panel_endpoint, tab='activity', act_dept=act_department, act_year=y) }}"><strong>{{ loop.index }}.</strong>&nbsp; Year {{ y }}</a>
+      {% endfor %}
+      {% if not activity_available_years %}
+      <div class="card" style="padding:12px;font-size:.86rem;color:var(--text-dim);">No years allocated for this department.</div>
+      {% endif %}
     </div>
   </div>
   {% elif activity_show_semester %}
@@ -1089,7 +1172,7 @@
   <div class="card mb-3">
     <div id="activityResultForm" class="d-flex align-center flex-wrap" style="gap:8px;">
       <div style="position:relative;">
-        <input class="form-control" id="activitySearchInput" value="{{ act_search or '' }}" placeholder="Search counselor" style="max-width:280px;height:34px;padding:6px 10px;font-size:.82rem;">
+        <input class="form-control" id="activitySearchInput" value="{{ act_search or '' }}" placeholder="Search counselor" autocomplete="off" style="max-width:280px;height:34px;padding:6px 10px;font-size:.82rem;">
         <ul id="activitySearchSuggestions" class="search-suggestions" style="display:none;max-width:280px;"></ul>
       </div>
       <select class="form-control" id="activitySortSelect" style="max-width:150px;height:34px;padding:6px 10px;font-size:.8rem;">
@@ -1247,6 +1330,26 @@
 <!-- ==================== CONFIGURATION TAB ==================== -->
 <div class="tab-panel {% if current_tab == 'config' %}active{% endif %}" id="tab-config">
   <h3 class="section-title"><i class="fas fa-cog"></i> Application Configuration</h3>
+
+  {% if is_system_admin %}
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-flask"></i> Test Mode</div>
+    <p style="font-size:.84rem;color:var(--text-dim);margin-bottom:10px;">
+      Open UI previews for example roles. Preview is view-oriented and does not change account assignments.
+    </p>
+    <div class="btn-group" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+      <a class="btn btn-outline" href="{{ url_for('admin_test_mode_preview', preview_role='principal') }}"><i class="fas fa-user-tie"></i> Principal Preview</a>
+      <a class="btn btn-outline" href="{{ url_for('admin_test_mode_preview', preview_role='deo') }}"><i class="fas fa-user-gear"></i> DEO Preview</a>
+      <a class="btn btn-outline" href="{{ url_for('admin_test_mode_preview', preview_role='hod') }}"><i class="fas fa-user-shield"></i> HOD Preview</a>
+      <a class="btn btn-outline" href="{{ url_for('admin_test_mode_preview', preview_role='counselor') }}"><i class="fas fa-user-graduate"></i> Counselor Preview</a>
+    </div>
+    {% if preview_mode %}
+    <div style="margin-top:10px;">
+      <a class="btn btn-warning btn-sm" href="{{ url_for('admin_test_mode_exit') }}"><i class="fas fa-eye-slash"></i> Exit Test Mode</a>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
   
   <form method="POST" action="{{ url_for('api_update_config') }}">
     <!-- Session Settings -->
@@ -1290,6 +1393,43 @@
                value="{{ app_config.max_concurrent_sessions }}" min="1" max="5" style="max-width:120px;">
       </div>
     </div>
+
+    <div class="card mb-3" id="tutorialSettingsCard">
+      <div class="card-title"><i class="fas fa-person-chalkboard"></i> Guided Tutorial Settings</div>
+      <p style="font-size:.84rem;color:var(--text-dim);margin-bottom:12px;">
+        Control first-login tutorial walkthroughs for DEO, HOD, Principal and Counselor roles.
+      </p>
+
+      <div class="form-check" style="margin-bottom:12px;">
+        <input type="checkbox" name="tutorial_master_enabled" id="tutorialMasterEnabled"
+               {% if app_config.tutorial_master_enabled == 'true' %}checked{% endif %}
+               onchange="syncTutorialRoleToggleState()">
+        <label for="tutorialMasterEnabled">Enable Guided Tutorials (Master)</label>
+      </div>
+
+      <div id="tutorialRoleToggleGroup" class="tutorial-toggle-group">
+        <div class="form-check">
+          <input type="checkbox" name="tutorial_counselor_enabled" id="tutorialCounselorEnabled" data-tutorial-role-toggle
+                 {% if app_config.tutorial_counselor_enabled == 'true' %}checked{% endif %}>
+          <label for="tutorialCounselorEnabled">Counselor Tutorial</label>
+        </div>
+        <div class="form-check">
+          <input type="checkbox" name="tutorial_hod_enabled" id="tutorialHodEnabled" data-tutorial-role-toggle
+                 {% if app_config.tutorial_hod_enabled == 'true' %}checked{% endif %}>
+          <label for="tutorialHodEnabled">HOD Tutorial</label>
+        </div>
+        <div class="form-check">
+          <input type="checkbox" name="tutorial_deo_enabled" id="tutorialDeoEnabled" data-tutorial-role-toggle
+                 {% if app_config.tutorial_deo_enabled == 'true' %}checked{% endif %}>
+          <label for="tutorialDeoEnabled">DEO Tutorial</label>
+        </div>
+        <div class="form-check">
+          <input type="checkbox" name="tutorial_principal_enabled" id="tutorialPrincipalEnabled" data-tutorial-role-toggle
+                 {% if app_config.tutorial_principal_enabled == 'true' %}checked{% endif %}>
+          <label for="tutorialPrincipalEnabled">Principal Tutorial</label>
+        </div>
+      </div>
+    </div>
     
     <div class="card mb-3">
       <div class="card-title"><i class="fas fa-circle-info"></i> Display Theme</div>
@@ -1321,7 +1461,7 @@
         <div class="form-group">
           <label class="form-label">New Password</label>
           <div class="d-flex align-center" style="gap:8px;">
-            <input type="password" class="form-control" id="resetUserNewPassword" name="new_password" minlength="6" required>
+            <input type="password" class="form-control" id="resetUserNewPassword" name="new_password" minlength="6" required autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" spellcheck="false">
             <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('resetUserNewPassword', 'iconResetUserNewPassword')" aria-label="Show or hide new password">
               <i id="iconResetUserNewPassword" class="fas fa-eye"></i>
             </button>
@@ -1330,7 +1470,7 @@
         <div class="form-group">
           <label class="form-label">Confirm Password</label>
           <div class="d-flex align-center" style="gap:8px;">
-            <input type="password" class="form-control" id="resetUserConfirmPassword" name="confirm_password" minlength="6" required>
+            <input type="password" class="form-control" id="resetUserConfirmPassword" name="confirm_password" minlength="6" required autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" spellcheck="false">
             <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('resetUserConfirmPassword', 'iconResetUserConfirmPassword')" aria-label="Show or hide confirm password">
               <i id="iconResetUserConfirmPassword" class="fas fa-eye"></i>
             </button>
@@ -1356,9 +1496,7 @@
   <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
     <h3 class="section-title" style="margin:0"><i class="fas fa-envelope"></i> Message Logs</h3>
     <div class="btn-group">
-      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_csv', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-csv"></i> CSV</a>
       <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_excel', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-excel"></i> Excel</a>
-      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_pdf', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-pdf"></i> PDF</a>
     </div>
   </div>
 
@@ -1402,7 +1540,7 @@
       </div>
       <div class="form-group">
         <label class="form-label">Search Counselor Name</label>
-        <input class="form-control" list="counselorNameSuggestions" type="text" name="msg_q" value="{{ message_query or '' }}" placeholder="Type counselor name">
+        <input class="form-control" list="counselorNameSuggestions" type="text" name="msg_q" value="{{ message_query or '' }}" placeholder="Type counselor name" autocomplete="off">
         <datalist id="counselorNameSuggestions">
           {% for c in counselor_suggestions %}
           <option value="{{ c.name }}"></option>
@@ -1704,37 +1842,44 @@ async function openRecentTestViewModal(testId) {
 function toggleCreateUserFields() {
   const roleEl = document.getElementById('createUserRole');
   const roleValue = roleEl ? roleEl.value : 'counselor';
-  const isScopedRole = roleValue === 'counselor' || roleValue === 'hod' || roleValue === 'deo';
   const isCounselor = roleValue === 'counselor';
+  const isHodOrDeo = roleValue === 'hod' || roleValue === 'deo';
 
   const counselorRow = document.getElementById('createUserCounselorRow');
+  const scopeCard = document.getElementById('createUserScopeCard');
   const counselorCapacityRow = document.getElementById('createUserCounselorCapacityRow');
-  const uploadPermissionWrap = document.getElementById('createUserUploadPermissionWrap');
   const studentUploadWrap = document.getElementById('createUserStudentUploadWrap');
   const chiefScopeWrap = document.getElementById('createUserChiefScopeWrap');
 
   const deptEl = document.getElementById('createUserDepartment');
   const yearLevelEl = document.getElementById('createUserYearLevel');
   const maxStudentsEl = document.getElementById('createUserMaxStudents');
-  const canUploadEl = document.getElementById('canUpload');
   const studentFileEl = document.getElementById('createUserStudentFile');
+  const scopeInputs = scopeCard ? scopeCard.querySelectorAll('input[name="scope_pairs"]') : [];
 
-  if (counselorRow) counselorRow.style.display = isScopedRole ? '' : 'none';
+  if (counselorRow) counselorRow.style.display = isCounselor ? '' : 'none';
+  if (scopeCard) scopeCard.style.display = isHodOrDeo ? '' : 'none';
   if (counselorCapacityRow) counselorCapacityRow.style.display = isCounselor ? '' : 'none';
-  if (uploadPermissionWrap) uploadPermissionWrap.style.display = isCounselor ? '' : 'none';
   if (studentUploadWrap) studentUploadWrap.style.display = isCounselor ? '' : 'none';
   if (chiefScopeWrap) chiefScopeWrap.style.display = 'none';
 
   if (deptEl) {
-    deptEl.disabled = !isScopedRole;
-    deptEl.required = isScopedRole;
-    if (!isScopedRole) deptEl.value = '';
+    deptEl.disabled = !isCounselor;
+    deptEl.required = isCounselor;
+    if (!isCounselor) deptEl.value = '';
   }
 
   if (yearLevelEl) {
-    yearLevelEl.disabled = !isScopedRole;
-    yearLevelEl.required = isScopedRole;
-    if (!isScopedRole) yearLevelEl.value = '1';
+    yearLevelEl.disabled = !isCounselor;
+    yearLevelEl.required = isCounselor;
+    if (!isCounselor) yearLevelEl.value = '1';
+  }
+
+  if (scopeInputs && scopeInputs.length) {
+    scopeInputs.forEach((input) => {
+      input.disabled = !isHodOrDeo;
+      if (!isHodOrDeo) input.checked = false;
+    });
   }
 
   if (maxStudentsEl) {
@@ -1742,11 +1887,6 @@ function toggleCreateUserFields() {
     maxStudentsEl.required = isCounselor;
     if (!isCounselor) maxStudentsEl.value = '500';
     else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
-  }
-
-  if (canUploadEl) {
-    canUploadEl.disabled = !isCounselor;
-    canUploadEl.checked = isCounselor ? canUploadEl.checked : true;
   }
 
   if (studentFileEl) {
@@ -1763,10 +1903,11 @@ function toggleEditUserFields(userIndex) {
   const idx = String(userIndex || '');
   const roleEl = document.getElementById(`editRole-${idx}`);
   const roleValue = roleEl ? (roleEl.value || 'counselor') : 'counselor';
-  const isScopedRole = roleValue === 'counselor' || roleValue === 'hod' || roleValue === 'deo';
   const isCounselorRole = roleValue === 'counselor';
+  const isHodOrDeo = roleValue === 'hod' || roleValue === 'deo';
 
   const counselorRow = document.getElementById(`editCounselorRow-${idx}`);
+  const scopeCard = document.getElementById(`editScopeCard-${idx}`);
   const capacityRow = document.getElementById(`editCapacityRow-${idx}`);
   const uploadWrap = document.getElementById(`editUploadWrap-${idx}`);
   const chiefScopeWrap = document.getElementById(`editChiefScopeWrap-${idx}`);
@@ -1774,22 +1915,31 @@ function toggleEditUserFields(userIndex) {
   const yearLevelEl = document.getElementById(`editYearLevel-${idx}`);
   const maxStudentsEl = document.getElementById(`editMaxStudents-${idx}`);
   const canUploadEl = document.getElementById(`canUp-${idx}`);
+  const scopeInputs = scopeCard ? scopeCard.querySelectorAll('input[name="scope_pairs"]') : [];
 
-  if (counselorRow) counselorRow.style.display = isScopedRole ? '' : 'none';
+  if (counselorRow) counselorRow.style.display = isCounselorRole ? '' : 'none';
+  if (scopeCard) scopeCard.style.display = isHodOrDeo ? '' : 'none';
   if (capacityRow) capacityRow.style.display = isCounselorRole ? '' : 'none';
   if (uploadWrap) uploadWrap.style.display = isCounselorRole ? '' : 'none';
   if (chiefScopeWrap) chiefScopeWrap.style.display = 'none';
 
   if (departmentEl) {
-    departmentEl.disabled = !isScopedRole;
-    departmentEl.required = isScopedRole;
-    if (!isScopedRole) departmentEl.value = '';
+    departmentEl.disabled = !isCounselorRole;
+    departmentEl.required = isCounselorRole;
+    if (!isCounselorRole) departmentEl.value = '';
   }
 
   if (yearLevelEl) {
-    yearLevelEl.disabled = !isScopedRole;
-    yearLevelEl.required = isScopedRole;
-    if (!isScopedRole) yearLevelEl.value = '1';
+    yearLevelEl.disabled = !isCounselorRole;
+    yearLevelEl.required = isCounselorRole;
+    if (!isCounselorRole) yearLevelEl.value = '1';
+  }
+
+  if (scopeInputs && scopeInputs.length) {
+    scopeInputs.forEach((input) => {
+      input.disabled = !isHodOrDeo;
+      if (!isHodOrDeo) input.checked = false;
+    });
   }
 
   if (maxStudentsEl) {
@@ -1837,6 +1987,126 @@ const RESET_USERS = (() => {
     return [];
   }
 })();
+
+const CREATE_USER_DRAFT_KEY = 'create_user_form_draft_v1';
+
+function getCurrentAdminTab() {
+  return adminScriptData ? (adminScriptData.getAttribute('data-current-tab') || 'reports') : 'reports';
+}
+
+function getCreateUserForm() {
+  return document.querySelector('#registerUserCard form[action*="/api/users"]');
+}
+
+function clearCreateUserDraftOnPageRefresh() {
+  let isReload = false;
+  try {
+    const navEntries = performance.getEntriesByType ? performance.getEntriesByType('navigation') : [];
+    if (navEntries && navEntries.length && navEntries[0].type === 'reload') {
+      isReload = true;
+    } else if (performance.navigation && performance.navigation.type === 1) {
+      isReload = true;
+    }
+  } catch (e) {
+    isReload = false;
+  }
+
+  if (!isReload) return;
+  try {
+    sessionStorage.removeItem(CREATE_USER_DRAFT_KEY);
+  } catch (e) {
+    // Ignore storage failures.
+  }
+}
+
+function clearCreateUserDraftAfterSuccessfulCreate() {
+  const successFlashes = Array.from(document.querySelectorAll('.flash.flash-success'));
+  const hasCreateSuccess = successFlashes.some((el) => {
+    const text = (el.textContent || '').toLowerCase();
+    return text.includes('user created');
+  });
+  if (!hasCreateSuccess) return;
+
+  try {
+    sessionStorage.removeItem(CREATE_USER_DRAFT_KEY);
+  } catch (e) {
+    // Ignore storage failures.
+  }
+}
+
+function persistCreateUserDraft() {
+  const form = getCreateUserForm();
+  if (!form) return;
+  if (getCurrentAdminTab() !== 'users') return;
+
+  const scopeCard = document.getElementById('createUserScopeCard');
+  const scopeInputs = scopeCard ? Array.from(scopeCard.querySelectorAll('input[name="scope_pairs"]')) : [];
+  const payload = {
+    name: document.getElementById('createUserName') ? document.getElementById('createUserName').value : (form.querySelector('input[name="name"]')?.value || ''),
+    email: form.querySelector('input[name="email"]')?.value || '',
+    account_password: form.querySelector('input[name="account_password"]')?.value || '',
+    account_confirm_password: form.querySelector('input[name="account_confirm_password"]')?.value || '',
+    role: document.getElementById('createUserRole')?.value || 'counselor',
+    department: document.getElementById('createUserDepartment')?.value || '',
+    year_level: document.getElementById('createUserYearLevel')?.value || '1',
+    max_students: document.getElementById('createUserMaxStudents')?.value || '30',
+    scope_pairs: scopeInputs.filter((input) => input.checked).map((input) => input.value),
+  };
+
+  try {
+    sessionStorage.setItem(CREATE_USER_DRAFT_KEY, JSON.stringify(payload));
+  } catch (e) {
+    // Ignore storage failures.
+  }
+}
+
+function restoreCreateUserDraft() {
+  if (getCurrentAdminTab() !== 'users') return;
+
+  let draft = null;
+  try {
+    const raw = sessionStorage.getItem(CREATE_USER_DRAFT_KEY);
+    draft = raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    draft = null;
+  }
+  if (!draft || typeof draft !== 'object') return;
+
+  const roleEl = document.getElementById('createUserRole');
+  if (roleEl && draft.role) roleEl.value = draft.role;
+  toggleCreateUserFields();
+
+  const nameEl = document.querySelector('#registerUserCard input[name="name"]');
+  const emailEl = document.querySelector('#registerUserCard input[name="email"]');
+  const passEl = document.querySelector('#registerUserCard input[name="account_password"]');
+  const confirmPassEl = document.querySelector('#registerUserCard input[name="account_confirm_password"]');
+  const deptEl = document.getElementById('createUserDepartment');
+  const yearEl = document.getElementById('createUserYearLevel');
+  const maxEl = document.getElementById('createUserMaxStudents');
+
+  if (nameEl && typeof draft.name === 'string') nameEl.value = draft.name;
+  if (emailEl && typeof draft.email === 'string') emailEl.value = draft.email;
+  if (passEl && typeof draft.account_password === 'string') passEl.value = draft.account_password;
+  if (confirmPassEl && typeof draft.account_confirm_password === 'string') confirmPassEl.value = draft.account_confirm_password;
+  if (deptEl && typeof draft.department === 'string') deptEl.value = draft.department;
+  if (yearEl && draft.year_level != null) yearEl.value = String(draft.year_level);
+  if (maxEl && draft.max_students != null) maxEl.value = String(draft.max_students);
+
+  const selectedScopes = new Set(Array.isArray(draft.scope_pairs) ? draft.scope_pairs.map((v) => String(v)) : []);
+  const scopeCard = document.getElementById('createUserScopeCard');
+  const scopeInputs = scopeCard ? Array.from(scopeCard.querySelectorAll('input[name="scope_pairs"]')) : [];
+  scopeInputs.forEach((input) => {
+    input.checked = selectedScopes.has(String(input.value));
+  });
+}
+
+function bindCreateUserDraftPersistence() {
+  const form = getCreateUserForm();
+  if (!form) return;
+  form.addEventListener('input', persistCreateUserDraft);
+  form.addEventListener('change', persistCreateUserDraft);
+  form.addEventListener('submit', persistCreateUserDraft);
+}
 
 function openTestViewModalFromButton(btn) {
   const id = Number(btn?.dataset?.testId || 0);
@@ -1934,6 +2204,19 @@ function validateResetUserSelection() {
   if (selectedEmail && selectedEmail.value) return true;
   alert('Please select a user from the suggested list.');
   return false;
+}
+
+function syncTutorialRoleToggleState() {
+  const master = document.getElementById('tutorialMasterEnabled');
+  const group = document.getElementById('tutorialRoleToggleGroup');
+  if (!master || !group) return;
+
+  const enabled = !!master.checked;
+  group.classList.toggle('is-disabled', !enabled);
+
+  group.querySelectorAll('input[data-tutorial-role-toggle]').forEach((input) => {
+    input.disabled = !enabled;
+  });
 }
 
 function syncAdminPostFormsWithTab() {
@@ -2104,11 +2387,16 @@ function toggleStudentQuickAdd(idx) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  clearCreateUserDraftOnPageRefresh();
+  clearCreateUserDraftAfterSuccessfulCreate();
   toggleCreateUserFields();
+  restoreCreateUserDraft();
+  bindCreateUserDraftPersistence();
   document.querySelectorAll('[data-edit-role]').forEach((el) => {
     const idx = el.getAttribute('data-edit-role');
     if (idx) toggleEditUserFields(idx);
   });
+  syncTutorialRoleToggleState();
   applyActivityProgressWidths();
   syncAdminPostFormsWithTab();
   moveRegisterFormBelowUserList();

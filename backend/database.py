@@ -197,6 +197,7 @@ def init_database():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         test_id INTEGER NOT NULL,
         reg_no TEXT NOT NULL,
+        student_name TEXT,
         subject_name TEXT NOT NULL,
         subject_code TEXT,
         marks TEXT,
@@ -280,6 +281,7 @@ def init_database():
     ensure_can_upload_students_column()
     ensure_users_year_level_column()
     ensure_test_metadata_columns()
+    ensure_student_marks_student_name_column()
     ensure_chief_admin_scopes_table()
     ensure_counselor_mark_overrides_table()
     ensure_counselor_student_departments()
@@ -1006,6 +1008,13 @@ def get_app_config():
         "max_concurrent_sessions": "1",
         "session_monitoring_enabled": "true",
         "session_heartbeat_interval": "30",
+
+        # Guided Tutorial
+        "tutorial_master_enabled": "true",
+        "tutorial_counselor_enabled": "true",
+        "tutorial_hod_enabled": "true",
+        "tutorial_deo_enabled": "true",
+        "tutorial_principal_enabled": "true",
         
         # Theme Colors - Primary
         "color_primary": "#667eea",
@@ -1111,7 +1120,24 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
     rows = conn.execute("""
         SELECT t.id, t.test_name as t_name, t.test_date,
                tm.id as tm_id, tm.test_id, tm.test_name, tm.batch_name, tm.semester,
-                         tm.department, tm.section, tm.year_level, tm.uploaded_at, tm.uploaded_by, tm.subjects,
+               COALESCE(
+                   NULLIF(tm.department, ''),
+                   (
+                       SELECT sm.department
+                       FROM student_marks sm
+                       WHERE sm.test_id = t.id
+                         AND TRIM(COALESCE(sm.department, '')) <> ''
+                       LIMIT 1
+                   ),
+                   (
+                       SELECT u2.department
+                       FROM users u2
+                       WHERE u2.email = tm.uploaded_by
+                       LIMIT 1
+                   ),
+                   ''
+               ) AS department,
+               tm.section, tm.year_level, tm.uploaded_at, tm.uploaded_by, tm.subjects,
                COALESCE(tm.is_blocked, 0) as is_blocked,
                u.name as uploaded_by_name,
                (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count,
@@ -1554,14 +1580,14 @@ def save_test_metadata(test_id, metadata: dict):
 
 
 def save_student_marks(test_id, marks_data, uploaded_by=None):
-    """marks_data: list of dicts {reg_no, subject_name, subject_code, marks, department}."""
+    """marks_data: list of dicts {reg_no, student_name, subject_name, subject_code, marks, department}."""
     conn = get_conn()
     for m in marks_data:
         try:
             conn.execute("""INSERT OR REPLACE INTO student_marks
-                            (test_id, reg_no, subject_name, subject_code, marks, department, uploaded_by)
-                            VALUES (?,?,?,?,?,?,?)""",
-                         (test_id, m["reg_no"], m["subject_name"],
+                            (test_id, reg_no, student_name, subject_name, subject_code, marks, department, uploaded_by)
+                            VALUES (?,?,?,?,?,?,?,?)""",
+                         (test_id, m["reg_no"], m.get("student_name", ""), m["subject_name"],
                           m.get("subject_code", ""), str(m.get("marks", "")),
                           m.get("department", ""), uploaded_by))
         except Exception:
@@ -1596,12 +1622,12 @@ def upsert_test_mark(test_id, reg_no, subject_name, marks, department="", upload
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO student_marks (test_id, reg_no, subject_name, subject_code, marks, department, uploaded_by)
-        VALUES (?,?,?,?,?,?,?)
+        INSERT INTO student_marks (test_id, reg_no, student_name, subject_name, subject_code, marks, department, uploaded_by)
+        VALUES (?,?,?,?,?,?,?,?)
         ON CONFLICT(test_id, reg_no, subject_name)
         DO UPDATE SET marks=excluded.marks, department=excluded.department, uploaded_by=excluded.uploaded_by
         """,
-        (int(test_id), str(reg_no), str(subject_name), "", str(marks), str(department or ""), str(uploaded_by or "")),
+        (int(test_id), str(reg_no), "", str(subject_name), "", str(marks), str(department or ""), str(uploaded_by or "")),
     )
     conn.commit()
     conn.close()
@@ -1631,16 +1657,61 @@ def get_test_marks_grouped(test_id):
     
     # Get all marks for this test
     rows = conn.execute("""
-        SELECT DISTINCT reg_no, subject_name, marks, department
-        FROM student_marks WHERE test_id = ?
-        ORDER BY reg_no, subject_name
+        SELECT DISTINCT
+            sm.reg_no,
+            sm.subject_name,
+            sm.marks,
+            COALESCE(
+                NULLIF(sm.department, ''),
+                (
+                    SELECT cs.department
+                    FROM counselor_students cs
+                    WHERE UPPER(TRIM(cs.reg_no)) = UPPER(TRIM(sm.reg_no))
+                      AND TRIM(COALESCE(cs.department, '')) <> ''
+                    ORDER BY cs.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT tm.department
+                    FROM test_metadata tm
+                    WHERE tm.test_id = sm.test_id
+                    LIMIT 1
+                ),
+                ''
+            ) AS resolved_department,
+            COALESCE(
+                NULLIF(sm.student_name, ''),
+                (
+                    SELECT cs.student_name
+                    FROM counselor_students cs
+                    WHERE UPPER(TRIM(cs.reg_no)) = UPPER(TRIM(sm.reg_no))
+                    ORDER BY cs.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT s2.student_name
+                    FROM sent_messages s2
+                    WHERE s2.test_id = sm.test_id
+                      AND UPPER(TRIM(s2.reg_no)) = UPPER(TRIM(sm.reg_no))
+                      AND COALESCE(TRIM(s2.student_name), '') <> ''
+                    ORDER BY s2.sent_at DESC
+                    LIMIT 1
+                ),
+                ''
+            ) AS student_name
+        FROM student_marks sm
+        WHERE sm.test_id = ?
+        ORDER BY sm.reg_no, sm.subject_name
     """, (test_id,)).fetchall()
     
     # Get subjects list from metadata
-    meta = conn.execute("SELECT subjects FROM test_metadata WHERE test_id = ?", (test_id,)).fetchone()
+    meta = conn.execute("SELECT subjects, department FROM test_metadata WHERE test_id = ?", (test_id,)).fetchone()
     conn.close()
     
     subjects = []
+    fallback_department = ""
+    if meta:
+        fallback_department = str(meta["department"] or "").strip()
 
     def _is_named_subject(name):
         txt = str(name or "").strip()
@@ -1667,12 +1738,16 @@ def get_test_marks_grouped(test_id):
     students = {}
     for r in rows:
         reg = r["reg_no"]
+        resolved_department = (r["resolved_department"] if "resolved_department" in r.keys() else "") or fallback_department
         if reg not in students:
             students[reg] = {
                 "reg_no": reg,
-                "department": r["department"] or "",
+                "student_name": (r["student_name"] if "student_name" in r.keys() else "") or "",
+                "department": resolved_department,
                 "marks": {}
             }
+        elif not students[reg].get("department") and resolved_department:
+            students[reg]["department"] = resolved_department
         students[reg]["marks"][r["subject_name"]] = r["marks"]
     
     return {
@@ -2042,7 +2117,17 @@ def get_visible_tests_for_counselor(counselor_email):
         SELECT DISTINCT t.id,
                COALESCE(tm.test_name, t.test_name) AS test_name,
                COALESCE(tm.semester, '') AS semester,
-               COALESCE(tm.department, '') AS department,
+               COALESCE(
+                   NULLIF(tm.department, ''),
+                   (
+                       SELECT sm.department
+                       FROM student_marks sm
+                       WHERE sm.test_id = t.id
+                         AND TRIM(COALESCE(sm.department, '')) <> ''
+                       LIMIT 1
+                   ),
+                   COALESCE(u.department, '')
+               ) AS department,
                COALESCE(tm.year_level, 1) AS year_level,
                COALESCE(tm.batch_name, '') AS batch_name,
                COALESCE(tm.section, '') AS section,
@@ -2058,7 +2143,17 @@ def get_visible_tests_for_counselor(counselor_email):
         FROM tests t
         JOIN test_metadata tm ON t.id = tm.test_id
         JOIN users u ON u.email = ?
-        WHERE COALESCE(tm.department, '') = COALESCE(u.department, '')
+                WHERE COALESCE(
+                                    NULLIF(tm.department, ''),
+                                    (
+                                            SELECT sm.department
+                                            FROM student_marks sm
+                                            WHERE sm.test_id = t.id
+                                                AND TRIM(COALESCE(sm.department, '')) <> ''
+                                            LIMIT 1
+                                    ),
+                                    COALESCE(u.department, '')
+                            ) = COALESCE(u.department, '')
                     AND COALESCE(tm.year_level, 1) = COALESCE(u.year_level, 1)
           AND EXISTS (
               SELECT 1
@@ -2240,6 +2335,7 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects,
                 mark_val = marks_dict.get(subj, '')
                 marks_data.append({
                     "reg_no": student.get('reg_no', ''),
+                    "student_name": student.get('name', ''),
                     "subject_name": subj,
                     "subject_code": "",
                     "marks": mark_val,
@@ -2420,6 +2516,10 @@ def get_counselor_activity_for_test(department, year_level, semester, test_name,
     except (TypeError, ValueError):
         yr = 1
     sem = str(semester or "").strip()
+    try:
+        sem_int = int(sem)
+    except (TypeError, ValueError):
+        sem_int = 0
     tname = str(test_name or "").strip().upper()
 
     conn = get_conn()
@@ -2429,12 +2529,12 @@ def get_counselor_activity_for_test(department, year_level, semester, test_name,
         FROM test_metadata tm
         WHERE UPPER(COALESCE(tm.department,''))=?
           AND COALESCE(tm.year_level,1)=?
-          AND COALESCE(tm.semester,'')=?
+                    AND CAST(COALESCE(tm.semester,0) AS INTEGER)=?
           AND UPPER(COALESCE(tm.test_name,''))=?
         ORDER BY tm.uploaded_at DESC, tm.test_id DESC
         LIMIT 1
         """,
-        (dep, yr, sem, tname),
+                (dep, yr, sem_int, tname),
     ).fetchone()
 
     test_id = int(test_row["test_id"]) if test_row else None
@@ -2641,6 +2741,50 @@ def ensure_test_metadata_columns():
         conn.execute("ALTER TABLE test_metadata ADD COLUMN is_blocked INTEGER DEFAULT 0")
         conn.execute("UPDATE test_metadata SET is_blocked=0 WHERE is_blocked IS NULL")
         conn.commit()
+    conn.close()
+
+
+def ensure_student_marks_student_name_column():
+    """Add student_name to student_marks and backfill from available sources."""
+    conn = get_conn()
+    try:
+        conn.execute("SELECT student_name FROM student_marks LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE student_marks ADD COLUMN student_name TEXT")
+        conn.commit()
+
+    # Backfill from counselor-student roster where possible.
+    conn.execute(
+        """
+        UPDATE student_marks
+        SET student_name = (
+            SELECT cs.student_name
+            FROM counselor_students cs
+            WHERE UPPER(TRIM(cs.reg_no)) = UPPER(TRIM(student_marks.reg_no))
+            ORDER BY cs.id DESC
+            LIMIT 1
+        )
+        WHERE COALESCE(TRIM(student_name), '') = ''
+        """
+    )
+
+    # Backfill from message history where roster lookup was not available.
+    conn.execute(
+        """
+        UPDATE student_marks
+        SET student_name = (
+            SELECT s2.student_name
+            FROM sent_messages s2
+            WHERE s2.test_id = student_marks.test_id
+              AND UPPER(TRIM(s2.reg_no)) = UPPER(TRIM(student_marks.reg_no))
+              AND COALESCE(TRIM(s2.student_name), '') <> ''
+            ORDER BY s2.sent_at DESC
+            LIMIT 1
+        )
+        WHERE COALESCE(TRIM(student_name), '') = ''
+        """
+    )
+    conn.commit()
     conn.close()
 
 

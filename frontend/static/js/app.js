@@ -640,20 +640,43 @@ function toggleCreateUserFields() {
   const roleSelect = document.getElementById('createUserRole');
   const chiefWrap = document.getElementById('createUserChiefScopeWrap');
   const counselorRow = document.getElementById('createUserCounselorRow');
+  const scopeCard = document.getElementById('createUserScopeCard');
   const counselorCapacityRow = document.getElementById('createUserCounselorCapacityRow');
-  const uploadPermissionWrap = document.getElementById('createUserUploadPermissionWrap');
   const studentUploadWrap = document.getElementById('createUserStudentUploadWrap');
+  const departmentEl = document.getElementById('createUserDepartment');
+  const yearEl = document.getElementById('createUserYearLevel');
+  const scopeInputs = scopeCard ? scopeCard.querySelectorAll('input[name="scope_pairs"]') : [];
   
   if (!roleSelect) return;
   
   const role = roleSelect.value;
-  const isScopedRole = role === 'counselor' || role === 'hod' || role === 'deo';
+  const isCounselor = role === 'counselor';
+  const isHodOrDeo = role === 'hod' || role === 'deo';
   
   if (chiefWrap) chiefWrap.style.display = 'none';
-  if (counselorRow) counselorRow.style.display = isScopedRole ? 'grid' : 'none';
-  if (counselorCapacityRow) counselorCapacityRow.style.display = role === 'counselor' ? 'grid' : 'none';
-  if (uploadPermissionWrap) uploadPermissionWrap.style.display = role === 'counselor' ? 'flex' : 'none';
-  if (studentUploadWrap) studentUploadWrap.style.display = role === 'counselor' ? 'block' : 'none';
+  if (counselorRow) counselorRow.style.display = isCounselor ? 'grid' : 'none';
+  if (scopeCard) scopeCard.style.display = isHodOrDeo ? 'block' : 'none';
+  if (counselorCapacityRow) counselorCapacityRow.style.display = isCounselor ? 'grid' : 'none';
+  if (studentUploadWrap) studentUploadWrap.style.display = isCounselor ? 'block' : 'none';
+
+  if (departmentEl) {
+    departmentEl.disabled = !isCounselor;
+    departmentEl.required = isCounselor;
+    if (!isCounselor) departmentEl.value = '';
+  }
+
+  if (yearEl) {
+    yearEl.disabled = !isCounselor;
+    yearEl.required = isCounselor;
+    if (!isCounselor) yearEl.value = '1';
+  }
+
+  if (scopeInputs && scopeInputs.length) {
+    scopeInputs.forEach((input) => {
+      input.disabled = !isHodOrDeo;
+      if (!isHodOrDeo) input.checked = false;
+    });
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

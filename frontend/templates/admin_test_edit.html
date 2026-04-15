@@ -3,6 +3,12 @@
 {% block page_title %}Edit Test{% endblock %}
 
 {% block content %}
+<div class="d-flex align-center mb-2" style="gap:10px;">
+  <a class="btn btn-outline btn-sm" href="{{ url_for(role_panel_endpoint or 'admin', tab='reports', report_dept=test_meta.department, report_year=test_meta.year_level) }}">
+    <i class="fas fa-arrow-left"></i> Back To Reports
+  </a>
+</div>
+
 <div class="card mb-3">
   <div class="card-title"><i class="fas fa-pen"></i> Test Metadata</div>
   <form method="POST" action="{{ url_for('api_update_test', test_id=test_id) }}">
@@ -46,6 +52,7 @@
       <thead>
         <tr>
           <th>Reg No</th>
+          <th>Student Name</th>
           {% for s in subjects %}
           <th>{{ s }}</th>
           {% endfor %}
@@ -56,6 +63,7 @@
         {% for st in students %}
         <tr>
           <td><strong>{{ st.reg_no }}</strong></td>
+          <td>{{ st.student_name or '—' }}</td>
           {% for s in subjects %}
           <td>
             {% if is_read_only %}

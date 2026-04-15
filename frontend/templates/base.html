@@ -92,7 +92,8 @@
     })();
   </script>
   {% if current_user_email %}
-  {% set panel_endpoint = role_panel_endpoint or 'admin' %}
+  {% set panel_endpoint = panel_endpoint or role_panel_endpoint or 'admin' %}
+  {% set effective_role = current_role_override or current_role %}
   <!-- SIDEBAR -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
@@ -108,9 +109,9 @@
     </div>
 
     <nav class="sidebar-nav">
-      {% if current_role in ['admin', 'hod', 'chief_admin', 'deo', 'principal'] %}
+      {% if effective_role in ['admin', 'hod', 'chief_admin', 'deo', 'principal'] %}
       {% set active_admin_tab = request.args.get('tab', default_tab or 'reports') %}
-      {% if current_role == 'principal' %}
+      {% if effective_role == 'principal' %}
       <a href="{{ url_for(panel_endpoint, tab='dashboard') }}" class="nav-link tab-nav {% if active_admin_tab == 'dashboard' %}active{% endif %}" data-tab="dashboard">
         <i class="fas fa-gauge"></i><span>Dashboard</span>
       </a>
@@ -118,7 +119,7 @@
       <a href="{{ url_for(panel_endpoint, tab='reports') }}" class="nav-link tab-nav {% if active_admin_tab == 'reports' %}active{% endif %}" data-tab="reports">
         <i class="fas fa-file-lines"></i><span>Reports</span>
       </a>
-      {% if current_role == 'admin' %}
+      {% if effective_role == 'admin' %}
       <a href="{{ url_for(panel_endpoint, tab='departments') }}" class="nav-link tab-nav {% if active_admin_tab == 'departments' %}active{% endif %}" data-tab="departments">
         <i class="fas fa-building"></i><span>Departments</span>
       </a>
@@ -126,22 +127,22 @@
       <a href="{{ url_for(panel_endpoint, tab='activity') }}" class="nav-link tab-nav {% if active_admin_tab == 'activity' %}active{% endif %}" data-tab="activity">
         <i class="fas fa-chart-line"></i><span>Counsellor Activity</span>
       </a>
-      {% if current_role == 'admin' %}
+      {% if effective_role == 'admin' %}
       <a href="{{ url_for(panel_endpoint, tab='users') }}" class="nav-link tab-nav {% if active_admin_tab == 'users' %}active{% endif %}" data-tab="users">
         <i class="fas fa-users"></i><span>Users</span>
       </a>
       {% endif %}
-      {% if current_role in ['admin', 'principal'] %}
+      {% if effective_role in ['admin', 'principal'] %}
       <a href="{{ url_for(panel_endpoint, tab='database') }}" class="nav-link tab-nav {% if active_admin_tab == 'database' %}active{% endif %}" data-tab="database">
         <i class="fas fa-database"></i><span>Database</span>
       </a>
       {% endif %}
-      {% if current_role == 'admin' %}
+      {% if effective_role == 'admin' %}
       <a href="{{ url_for(panel_endpoint, tab='monitoring') }}" class="nav-link tab-nav {% if active_admin_tab == 'monitoring' %}active{% endif %}" data-tab="monitoring">
         <i class="fas fa-chart-area"></i><span>Session Monitoring</span>
       </a>
       {% endif %}
-      {% if current_role in ['admin', 'hod', 'chief_admin', 'deo'] %}
+      {% if effective_role in ['admin', 'hod', 'chief_admin', 'deo'] %}
       <a href="{{ url_for(panel_endpoint, tab='messages') }}" class="nav-link tab-nav {% if active_admin_tab == 'messages' %}active{% endif %}" data-tab="messages">
         <i class="fas fa-envelope"></i><span>Message Logs</span>
       </a>
@@ -149,13 +150,13 @@
       {% else %}
       {% set active_counselor_tab = request.args.get('tab', 'recent-tests') %}
       <a href="{{ url_for('counselor_page', tab='recent-tests') }}" class="nav-link tab-nav {% if active_counselor_tab == 'recent-tests' %}active{% endif %}" data-tab="recent-tests">
-        <i class="fas fa-clock"></i><span>Recent Tests</span>
+        <i class="fas fa-gauge"></i><span>Dashboard</span>
       </a>
       <a href="{{ url_for('counselor_page', tab='test-database') }}" class="nav-link tab-nav {% if active_counselor_tab == 'test-database' %}active{% endif %}" data-tab="test-database">
-        <i class="fas fa-database"></i><span>Test Database</span>
+        <i class="fas fa-file-lines"></i><span>Reports</span>
       </a>
       <a href="{{ url_for('counselor_page', tab='message-history') }}" class="nav-link tab-nav {% if active_counselor_tab == 'message-history' %}active{% endif %}" data-tab="message-history">
-        <i class="fas fa-envelope-open-text"></i><span>Message History</span>
+        <i class="fas fa-envelope-open-text"></i><span>Message Logs</span>
       </a>
       {% endif %}
     </nav>
@@ -165,9 +166,23 @@
         <div class="user-avatar">{{ current_user_name[0] if current_user_name else '?' }}</div>
         <div class="user-details">
           <span class="user-name">{{ current_user_name }}</span>
-          <span class="user-role">{{ current_role|title }}</span>
+          <span class="user-role">{% if effective_role in ['chief_admin', 'hod'] %}HOD{% elif effective_role == 'deo' %}DEO{% elif effective_role == 'admin' %}ADMIN{% elif effective_role == 'principal' %}PRINCIPAL{% elif effective_role == 'counselor' %}COUNSELOR{% else %}{{ effective_role|upper }}{% endif %}</span>
+          {% if assigned_departments and effective_role in ['chief_admin', 'hod', 'deo', 'counselor'] %}
+          <div class="user-department-list">
+            {% for dep in assigned_departments %}
+            <span class="user-department-chip {% if dep.is_active %}is-active{% else %}is-disabled{% endif %}">
+              <span class="user-department-dot"></span>{{ dep.code }}
+            </span>
+            {% endfor %}
+          </div>
+          {% endif %}
         </div>
       </div>
+      {% if preview_mode %}
+      <a href="{{ url_for('admin_test_mode_exit') }}" class="logout-btn" style="margin-bottom:8px;background:rgba(245,158,11,.14);color:var(--warning);">
+        <i class="fas fa-eye-slash"></i> Exit Test Mode
+      </a>
+      {% endif %}
       <a href="{{ url_for('logout') }}" class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
   </aside>
@@ -184,12 +199,12 @@
             <i class="fas fa-sun" id="themeToggleIcon"></i>
             <span>Theme</span>
           </button>
-          {% if current_role == 'admin' %}
+          {% if effective_role == 'admin' %}
           <a href="{{ url_for(panel_endpoint, tab='config') }}" class="btn btn-outline btn-sm icon-btn" title="Settings">
             <i class="fas fa-cog"></i>
             <span>Settings</span>
           </a>
-          {% elif current_role in ['hod', 'chief_admin'] %}
+          {% elif effective_role in ['hod', 'chief_admin'] %}
           <button class="btn btn-outline btn-sm icon-btn" onclick="openPasswordResetModal()" type="button" title="Credential Reset">
             <i class="fas fa-key"></i>
             <span>Credential Reset</span>
@@ -228,7 +243,7 @@
         </div>
         <div class="global-footer-links">
           <button type="button" class="global-footer-link global-footer-btn" onclick="openModal('support-downloads')">Support</button>
-          <a href="{{ url_for('instructions_page') }}" class="global-footer-link">Instructions</a>
+          <button type="button" class="global-footer-link global-footer-btn" onclick="return startFooterTutorial(event)">Instructions</button>
         </div>
       </div>
     </footer>
@@ -364,7 +379,903 @@
     </div>
   </div>
 
+  {% if current_user_email %}
+  <div class="tutorial-overlay" id="tutorialOverlay" aria-hidden="true">
+    <div class="tutorial-overlay-backdrop"></div>
+    <div class="tutorial-highlight" id="tutorialHighlight"></div>
+    <div class="tutorial-card" role="dialog" aria-modal="true" aria-labelledby="tutorialCardTitle">
+      <h3 class="tutorial-card-title" id="tutorialCardTitle"></h3>
+      <p class="tutorial-card-text" id="tutorialCardText"></p>
+      <p class="tutorial-card-meta" id="tutorialCardMeta"></p>
+      <div class="tutorial-actions">
+        <button type="button" class="btn btn-outline btn-sm" id="tutorialBackBtn">Back</button>
+        <button type="button" class="btn btn-primary btn-sm" id="tutorialNextBtn">Next</button>
+        <button type="button" class="btn btn-outline btn-sm" id="tutorialSkipBtn">Skip Tutorial</button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% if current_user_email %}
+  <script>
+  (function() {
+    {% set tutorial_panel_base = url_for(panel_endpoint) if effective_role in ['admin', 'hod', 'chief_admin', 'deo', 'principal'] else url_for('counselor_page') %}
+    const roleRaw = {{ (effective_role or "")|tojson }}.toLowerCase();
+    const roleKey = roleRaw === 'chief_admin' ? 'hod' : roleRaw;
+    const supportedRoles = new Set(['deo', 'hod', 'principal', 'counselor']);
+    const tutorialFlags = {{ tutorial_flags|tojson }};
+    const tutorialEnabledForRole = {{ 'true' if tutorial_enabled_for_current_role else 'false' }};
+    const autoWelcome = {{ 'true' if tutorial_auto_welcome else 'false' }};
+    const userName = {{ (current_user_name or "User")|tojson }};
+    const fallbackInstructionsUrl = {{ url_for("instructions_page")|tojson }};
+    const panelBaseUrl = {{ tutorial_panel_base|tojson }};
+    const counselorBaseUrl = {{ url_for("counselor_page")|tojson }};
+
+    const overlay = document.getElementById('tutorialOverlay');
+    const highlight = document.getElementById('tutorialHighlight');
+    const titleEl = document.getElementById('tutorialCardTitle');
+    const textEl = document.getElementById('tutorialCardText');
+    const metaEl = document.getElementById('tutorialCardMeta');
+    const backBtn = document.getElementById('tutorialBackBtn');
+    const skipBtn = document.getElementById('tutorialSkipBtn');
+    const nextBtn = document.getElementById('tutorialNextBtn');
+
+    if (!overlay || !highlight || !titleEl || !textEl || !metaEl || !backBtn || !skipBtn || !nextBtn) {
+      window.startFooterTutorial = function(event) {
+        if (event) event.preventDefault();
+        window.location.href = fallbackInstructionsUrl;
+        return false;
+      };
+      return;
+    }
+
+    let steps = [];
+    let currentIndex = 0;
+    let inWelcomeMode = false;
+    let activeHighlightTarget = null;
+    const tutorialContextStorageKey = `tutorial_context_${roleKey}`;
+
+    function withTab(baseUrl, tab) {
+      const url = new URL(baseUrl, window.location.origin);
+      if (tab) url.searchParams.set('tab', tab);
+      return `${url.pathname}${url.search}`;
+    }
+
+    function getDefaultTutorialLandingUrl() {
+      if (roleKey === 'counselor') {
+        return withTab(counselorBaseUrl, 'recent-tests');
+      }
+      if (roleKey === 'principal') {
+        return withTab(panelBaseUrl, 'dashboard');
+      }
+      return withTab(panelBaseUrl, 'reports');
+    }
+
+    function stripTutorialParamsFromCurrentUrl() {
+      const url = new URL(window.location.href);
+      ['tutorial', 'tutorial_step', 'tutorial_role', 'tutorial_direct', 'tutorial_welcome'].forEach((key) => {
+        url.searchParams.delete(key);
+      });
+      const cleaned = `${url.pathname}${url.search}${url.hash}`;
+      window.history.replaceState({}, '', cleaned);
+    }
+
+    function isStepLocationSatisfied(targetInput) {
+      const currentUrl = new URL(window.location.href);
+      const targetUrl = new URL(targetInput, window.location.origin);
+
+      if (currentUrl.pathname !== targetUrl.pathname) {
+        return false;
+      }
+
+      for (const [key, value] of targetUrl.searchParams.entries()) {
+        if (currentUrl.searchParams.get(key) !== value) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    function navTabSelector(tab) {
+      return `.sidebar-nav .tab-nav[data-tab="${tab}"]`;
+    }
+
+    function normalizeHref(href) {
+      if (!href) return '';
+      try {
+        const url = new URL(href, window.location.origin);
+        return `${url.pathname}${url.search}`;
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function getFirstHref(selectors) {
+      const list = Array.isArray(selectors) ? selectors : [selectors];
+      for (const selector of list) {
+        if (!selector) continue;
+        const el = document.querySelector(selector);
+        const href = el && el.getAttribute('href');
+        if (href) return normalizeHref(href);
+      }
+      return '';
+    }
+
+    function readTutorialContext() {
+      try {
+        const raw = sessionStorage.getItem(tutorialContextStorageKey);
+        return raw ? JSON.parse(raw) : {};
+      } catch (error) {
+        return {};
+      }
+    }
+
+    function writeTutorialContext(context) {
+      try {
+        sessionStorage.setItem(tutorialContextStorageKey, JSON.stringify(context || {}));
+      } catch (error) {
+        // Ignore storage failures.
+      }
+    }
+
+    function getTutorialContext() {
+      const existing = readTutorialContext();
+      const discovered = {
+        reportsDeptHref: getFirstHref('#tab-reports .metrics-grid .metric-card[href*="report_dept="]'),
+        reportsYearHref: getFirstHref('#tab-reports .btn.btn-outline[href*="report_year="]'),
+        activityDeptHref: getFirstHref('#tab-activity .metrics-grid .metric-card[href*="act_dept="]'),
+        activityYearHref: getFirstHref('#tab-activity .btn.btn-outline[href*="act_year="]'),
+        activityTestHref: getFirstHref([
+          '#tab-activity .btn.btn-primary[href*="act_test="]',
+          '#tab-activity .btn.btn-outline[href*="act_test="]',
+        ]),
+      };
+
+      const merged = { ...existing };
+      Object.keys(discovered).forEach((key) => {
+        if (discovered[key]) merged[key] = discovered[key];
+      });
+      writeTutorialContext(merged);
+      return merged;
+    }
+
+    function readSimpleTutorialValue(key) {
+      try {
+        return sessionStorage.getItem(key) || '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function writeSimpleTutorialValue(key, value) {
+      if (!value) return;
+      try {
+        sessionStorage.setItem(key, value);
+      } catch (error) {
+        // Ignore storage failures.
+      }
+    }
+
+    function getCounselorSendWalkthroughUrl() {
+      const contextKey = 'tutorial_counselor_send_href';
+      const discovered = getFirstHref([
+        '#tab-test-database a[href*="/send"]',
+        '#tab-recent-tests a[href*="/send"]',
+      ]);
+
+      if (discovered) {
+        writeSimpleTutorialValue(contextKey, discovered);
+        return discovered;
+      }
+
+      if (window.location.pathname.includes('/send')) {
+        const currentSendUrl = `${window.location.pathname}${window.location.search}`;
+        writeSimpleTutorialValue(contextKey, currentSendUrl);
+        return currentSendUrl;
+      }
+
+      return readSimpleTutorialValue(contextKey);
+    }
+
+    function buildAdminSteps(role) {
+      const ctx = getTutorialContext();
+      const reportsTabUrl = withTab(panelBaseUrl, 'reports');
+      const reportsDeptUrl = ctx.reportsDeptHref || reportsTabUrl;
+      const reportsYearUrl = ctx.reportsYearHref || reportsDeptUrl;
+
+      const activityTabUrl = withTab(panelBaseUrl, 'activity');
+      const activityDeptUrl = ctx.activityDeptHref || activityTabUrl;
+      const activityYearUrl = ctx.activityYearHref || activityDeptUrl;
+      const activityTestUrl = ctx.activityTestHref || activityYearUrl;
+
+      const sharedActivitySteps = [
+        {
+          url: activityTabUrl,
+          title: 'Activity - Department Selection',
+          text: 'Start here by selecting one department card. This defines the counselor activity scope for everything that follows.',
+          selectors: ['#tab-activity .metrics-grid .metric-card', '#tab-activity .section-title', '#tab-activity .card'],
+        },
+        {
+          url: activityDeptUrl,
+          title: 'Activity - Year Selection',
+          text: 'Choose the year level for the selected department. This narrows activity to the exact student cohort.',
+          selectors: ['#tab-activity .card .btn.btn-outline[href*="act_year="]', '#tab-activity .card .card-title', '#tab-activity .card'],
+        },
+        {
+          url: activityYearUrl,
+          title: 'Activity - Semester and Test Selection',
+          text: 'Select semester and test buttons to open one concrete checkpoint (for example IAT 1 or Model Exam) before analysis.',
+          selectors: [
+            '#tab-activity .card .btn.btn-primary, #tab-activity .card .btn.btn-outline[href*="act_test="]',
+            '#tab-activity .card .card-title',
+            '#tab-activity .card',
+          ],
+        },
+        {
+          url: activityTestUrl,
+          title: 'Activity - KPI Summary Cards',
+          text: 'These cards summarize Total Counselors, Complete, Pending and Average Completion. Use this as the quick status snapshot.',
+          selectors: [
+            '#tab-activity .metrics-grid .metric-card',
+            '#tab-activity .metrics-grid',
+            '#tab-activity .card',
+          ],
+        },
+        {
+          url: activityTestUrl,
+          title: 'Activity - Search, Sort and Export',
+          text: 'Use counselor search, sorting (Pending/A-Z/Z-A) and PDF export in this toolbar. Apply these controls before final review.',
+          selectors: [
+            '#tab-activity #activityResultForm',
+            '#tab-activity #activitySearchInput',
+            '#tab-activity #activitySortSelect',
+            '#tab-activity #activityPdfLink',
+            '#tab-activity .card',
+          ],
+        },
+        {
+          url: activityTestUrl,
+          title: 'Activity - Counselor Results Table',
+          text: 'Review each counselor row in detail: student count, reached, pending, completion percentage, status and last login for accountability.',
+          selectors: [
+            '#tab-activity #activityResultForm',
+            '#tab-activity .table-wrapper',
+            '#tab-activity .card .card-title',
+            '#tab-activity .card',
+          ],
+        },
+      ];
+
+      const tabConfig = {
+        principal: [
+          {
+            tab: 'dashboard',
+            navTitle: 'Open Dashboard',
+            navText: 'Use this tab to access institution-wide progress and completion signals.',
+            sectionSteps: [
+              {
+                title: 'Dashboard Overview',
+                text: 'Review the KPI cards and top-performer section to monitor overall performance quickly.',
+                selectors: ['#tab-dashboard .metrics-grid', '#tab-dashboard .card', '#tab-dashboard .table-wrapper'],
+              },
+            ],
+          },
+          {
+            tab: 'reports',
+            navTitle: 'Open Reports',
+            navText: 'Use Reports to move through department, year and final result/test actions in a guided sequence.',
+            sectionSteps: [
+              {
+                url: reportsTabUrl,
+                title: 'Reports - Department Selection',
+                text: 'Start by selecting a department card to enter that department\'s report context.',
+                selectors: [
+                  '#tab-reports .metrics-grid .metric-card',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsDeptUrl,
+                title: 'Reports - Year Selection',
+                text: 'Choose the academic year to load semester-wise test/result tables for that department.',
+                selectors: [
+                  '#tab-reports .card .btn.btn-outline[href*="report_year="]',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsYearUrl,
+                title: 'Reports - Result and Test Actions',
+                text: 'Review semester tables, confirm Test Name and Year columns, then use the view action button to inspect detailed results.',
+                selectors: [
+                  '#tab-reports .card .table-wrapper button[data-test-id]',
+                  '#tab-reports .card .table-wrapper',
+                  '#tab-reports .card .table-wrapper thead th:nth-child(1)',
+                  '#tab-reports .card .table-wrapper thead th:nth-child(2)',
+                  '#tab-reports .card .card-title',
+                  '#tab-reports .card',
+                ],
+              },
+            ],
+          },
+          {
+            tab: 'activity',
+            navTitle: 'Open Counsellor Activity',
+            navText: 'Review every counselor-activity function from selection, analytics controls and KPI cards to final completion table audit.',
+            sectionSteps: sharedActivitySteps,
+          },
+          {
+            tab: 'database',
+            navTitle: 'Open Database',
+            navText: 'Database tools are for backup, restore and maintenance operations.',
+            sectionSteps: [
+              {
+                title: 'Database Maintenance',
+                text: 'Run backup/restore actions carefully and validate current backup inventory before changes.',
+                selectors: ['#tab-database .card', '#tab-database .table-wrapper'],
+              },
+            ],
+          },
+        ],
+        hod: [
+          {
+            tab: 'reports',
+            navTitle: 'Open Reports',
+            navText: 'Inspect tests in your scoped departments and years.',
+            sectionSteps: [
+              {
+                url: reportsTabUrl,
+                title: 'Reports - Department Selection',
+                text: 'Start by selecting one department card from your allowed scope.',
+                selectors: [
+                  '#tab-reports .metrics-grid .metric-card',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsDeptUrl,
+                title: 'Reports - Year Selection',
+                text: 'Then pick a year from the available buttons before reviewing tests.',
+                selectors: [
+                  '#tab-reports .card .btn.btn-outline[href*="report_year="]',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsYearUrl,
+                title: 'Reports - Test View Actions',
+                text: 'Use the test rows and the view action button to inspect the selected test carefully.',
+                selectors: [
+                  '#tab-reports .card .table-wrapper button[data-test-id]',
+                  '#tab-reports .card .table-wrapper',
+                  '#tab-reports .card .card-title',
+                  '#tab-reports .card',
+                ],
+              },
+            ],
+          },
+          {
+            tab: 'activity',
+            navTitle: 'Open Counsellor Activity',
+            navText: 'Check completion progress by counselor for selected test contexts.',
+            sectionSteps: sharedActivitySteps,
+          },
+          {
+            tab: 'messages',
+            navTitle: 'Open Message Logs',
+            navText: 'Audit outbound communication history in your scope.',
+            sectionSteps: [
+              {
+                title: 'Message Filters and Log Rows',
+                text: 'Filter by date or counselor and review grouped daily entries before exporting.',
+                selectors: ['#tab-messages .card form', '#tab-messages .table-wrapper'],
+              },
+            ],
+          },
+        ],
+        deo: [
+          {
+            tab: 'reports',
+            navTitle: 'Open Reports',
+            navText: 'Use Reports to upload and verify tests per department and year.',
+            sectionSteps: [
+              {
+                url: reportsTabUrl,
+                title: 'Reports - Department Selection',
+                text: 'Pick the department card you want to work on first.',
+                selectors: [
+                  '#tab-reports .metrics-grid .metric-card',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsDeptUrl,
+                title: 'Reports - Year Selection',
+                text: 'Choose a year to open year-specific upload and test sections.',
+                selectors: [
+                  '#tab-reports .card .btn.btn-outline[href*="report_year="]',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsYearUrl,
+                title: 'Reports - Upload and Test View',
+                text: 'Upload marksheet first, then use test rows and view buttons to validate uploaded tests.',
+                selectors: [
+                  '#tab-reports .card form',
+                  '#tab-reports .card .table-wrapper button[data-test-id]',
+                  '#tab-reports .card .table-wrapper',
+                  '#tab-reports .card .card-title',
+                  '#tab-reports .card',
+                ],
+              },
+            ],
+          },
+          {
+            tab: 'activity',
+            navTitle: 'Open Counsellor Activity',
+            navText: 'Track counselor completion against selected test checkpoints.',
+            sectionSteps: sharedActivitySteps,
+          },
+          {
+            tab: 'messages',
+            navTitle: 'Open Message Logs',
+            navText: 'Verify communication records and use exports for reporting.',
+            sectionSteps: [
+              {
+                title: 'Message Log Coverage',
+                text: 'Apply filters and inspect grouped records to verify all sent communication.',
+                selectors: ['#tab-messages .card form', '#tab-messages .table-wrapper'],
+              },
+            ],
+          },
+        ],
+      };
+
+      const tabs = tabConfig[role] || [];
+      if (!tabs.length) return [];
+
+      const result = [
+        {
+          url: withTab(panelBaseUrl, tabs[0].tab),
+          selector: '.sidebar-nav',
+          title: 'Navigation',
+          text: 'Use the sidebar to move through each work area in sequence.',
+        },
+      ];
+
+      tabs.forEach((item) => {
+        const tabUrl = withTab(panelBaseUrl, item.tab);
+        result.push({
+          url: tabUrl,
+          selector: navTabSelector(item.tab),
+          title: item.navTitle || `Open ${item.tab}`,
+          text: item.navText || 'Use this tab to continue the tutorial flow.',
+        });
+
+        (item.sectionSteps || []).forEach((section) => {
+          result.push({
+            url: section.url || tabUrl,
+            selector: section.selectors || section.selector,
+            title: section.title,
+            text: section.text,
+          });
+        });
+      });
+
+      result.push({
+        url: withTab(panelBaseUrl, tabs[tabs.length - 1].tab),
+        selector: '.global-footer-links',
+        title: 'Support and Instructions',
+        text: 'Use Support for templates and Instructions to relaunch this tutorial anytime.',
+      });
+
+      return result;
+    }
+
+    function buildCounselorSteps() {
+      const sendUiUrl = getCounselorSendWalkthroughUrl();
+      const sendWalkthroughUrl = sendUiUrl || withTab(counselorBaseUrl, 'test-database');
+
+      const tabs = [
+        {
+          tab: 'recent-tests',
+          navTitle: 'Open Dashboard',
+          navText: 'Use Dashboard to review recently uploaded tests and action shortcuts.',
+          sectionSteps: [
+            {
+              title: 'Dashboard - Recent Tests Table',
+              text: 'Review this table carefully for test name, year, status and action shortcuts.',
+              selectors: [
+                '#tab-recent-tests .section-title',
+                '#tab-recent-tests .table-wrapper',
+                '#tab-recent-tests .table-wrapper thead th:nth-child(1)',
+                '#tab-recent-tests .table-wrapper thead th:nth-child(2)',
+              ],
+            },
+          ],
+        },
+        {
+          tab: 'test-database',
+          navTitle: 'Open Reports',
+          navText: 'Use Reports to validate year-wise and test-wise coverage before sending.',
+          sectionSteps: [
+            {
+              title: 'Reports - Semester 1 Tests',
+              text: 'This section contains Semester 1 tests. Verify Test Name and Year columns before taking action.',
+              selectors: [
+                '#tab-test-database .card:nth-of-type(1) .card-title',
+                '#tab-test-database .card:nth-of-type(1) .table-wrapper',
+                '#tab-test-database .card:nth-of-type(1) thead th:nth-child(1)',
+                '#tab-test-database .card:nth-of-type(1) thead th:nth-child(2)',
+              ],
+            },
+            {
+              title: 'Reports - Semester 2 Tests',
+              text: 'This section contains Semester 2 tests. Make sure every required test is reviewed here as well.',
+              selectors: [
+                '#tab-test-database .card:nth-of-type(2) .card-title',
+                '#tab-test-database .card:nth-of-type(2) .table-wrapper',
+                '#tab-test-database .card:nth-of-type(2) thead th:nth-child(1)',
+                '#tab-test-database .card:nth-of-type(2) thead th:nth-child(2)',
+              ],
+            },
+            {
+              title: 'Reports - Send Result Entry',
+              text: 'Use this Send Results button to open the result delivery interface for a selected test.',
+              selectors: [
+                '#tab-test-database a[href*="/send"]',
+                '#tab-test-database .btn.btn-primary',
+              ],
+            },
+          ],
+        },
+      ];
+
+      const result = [
+        {
+          url: withTab(counselorBaseUrl, tabs[0].tab),
+          selector: '.sidebar-nav',
+          title: 'Navigation',
+          text: 'Use these tabs to move through dashboard, reports and message history.',
+        },
+      ];
+
+      tabs.forEach((item) => {
+        const tabUrl = withTab(counselorBaseUrl, item.tab);
+        result.push({
+          url: tabUrl,
+          selector: navTabSelector(item.tab),
+          title: item.navTitle,
+          text: item.navText,
+        });
+
+        (item.sectionSteps || []).forEach((section) => {
+          result.push({
+            url: section.url || tabUrl,
+            selector: section.selectors,
+            title: section.title,
+            text: section.text,
+          });
+        });
+      });
+
+      const sendTutorialSteps = [
+        {
+          url: sendWalkthroughUrl,
+          selector: [
+            '#varTemplate',
+            '#fieldOrderList',
+            '#fieldOrderHint',
+            '.content-area',
+          ],
+          title: 'Send Results - Template and Subject Parse Order',
+          text: 'Edit the message template here and manage subject/metric parse order in the field-order section. Reorder to control how marks, attendance, failed subjects and GPA appear in parent messages.',
+        },
+        {
+          url: sendWalkthroughUrl,
+          selector: [
+            'table tbody .btn.btn-primary.btn-sm',
+            '#sendPreviewForm',
+            '#previewText',
+            '.table-wrapper',
+            '.content-area',
+          ],
+          title: 'Send Results - Single Send Button Flow',
+          text: 'Use each Send to WhatsApp button to open a student-level preview, verify message content, then complete individual send and status logging.',
+        },
+        {
+          url: sendWalkthroughUrl,
+          selector: [
+            '.send-batch-card',
+            '#batchIncludeGenerated',
+            '#batchDelayPreset',
+            '#batchSendStartBtn',
+            '#batchRunStatus',
+            '.content-area',
+          ],
+          title: 'Send Results - Batch Send Section',
+          text: 'Batch Send supports include-generated mode, delay tuning and a guided confirm flow. Start only after final checks, then monitor live status here until the run completes.',
+        },
+      ];
+
+      sendTutorialSteps.forEach((step) => result.push(step));
+
+      result.push({
+        url: withTab(counselorBaseUrl, 'message-history'),
+        selector: navTabSelector('message-history'),
+        title: 'Open Message Logs',
+        text: 'After send operations, use Message Logs to confirm delivery records and statuses.',
+      });
+
+      result.push({
+        url: withTab(counselorBaseUrl, 'message-history'),
+        selector: [
+          '#tab-message-history .section-title',
+          '#tab-message-history .table-wrapper',
+          '.content-area',
+        ],
+        title: 'Message History Table',
+        text: 'Review date, student, registration number, status and format here for delivery auditing.',
+      });
+
+      result.push({
+        url: withTab(counselorBaseUrl, 'message-history'),
+        selector: '.global-footer-links',
+        title: 'Support and Instructions',
+        text: 'Use Support for templates and Instructions to replay this walkthrough anytime.',
+      });
+
+      return result;
+    }
+
+    function buildStepsForRole(role) {
+      if (role === 'counselor') return buildCounselorSteps();
+      return buildAdminSteps(role);
+    }
+
+    function openOverlay() {
+      overlay.classList.add('open');
+      overlay.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('open');
+      overlay.classList.remove('spotlight-active');
+      overlay.classList.remove('welcome-mode');
+      overlay.setAttribute('aria-hidden', 'true');
+      highlight.style.display = 'none';
+      if (activeHighlightTarget) {
+        activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+        activeHighlightTarget = null;
+      }
+    }
+
+    function applyHighlightRect(target) {
+      const rect = target.getBoundingClientRect();
+      const padding = 8;
+      const verticalNudge = -2;
+
+      highlight.style.display = 'block';
+      highlight.style.top = `${Math.max(6, rect.top - padding + verticalNudge)}px`;
+      highlight.style.left = `${Math.max(6, rect.left - padding)}px`;
+      highlight.style.width = `${Math.max(28, rect.width + (padding * 2))}px`;
+      highlight.style.height = `${Math.max(28, rect.height + (padding * 2))}px`;
+    }
+
+    function setHighlightForSelector(selector) {
+      const selectorList = Array.isArray(selector)
+        ? selector.filter(Boolean)
+        : (selector ? [selector] : []);
+
+      if (!selectorList.length) {
+        overlay.classList.remove('spotlight-active');
+        highlight.style.display = 'none';
+        if (activeHighlightTarget) {
+          activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+          activeHighlightTarget = null;
+        }
+        return null;
+      }
+
+      let target = null;
+      for (const candidate of selectorList) {
+        try {
+          target = document.querySelector(candidate);
+        } catch (err) {
+          target = null;
+        }
+        if (target) break;
+      }
+
+      if (!target) {
+        overlay.classList.remove('spotlight-active');
+        highlight.style.display = 'none';
+        if (activeHighlightTarget) {
+          activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+          activeHighlightTarget = null;
+        }
+        return null;
+      }
+
+      if (activeHighlightTarget && activeHighlightTarget !== target) {
+        activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+      }
+
+      target.classList.add('tutorial-spotlight-target');
+      activeHighlightTarget = target;
+      overlay.classList.add('spotlight-active');
+
+      target.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+      applyHighlightRect(target);
+      window.requestAnimationFrame(() => {
+        if (activeHighlightTarget === target && overlay.classList.contains('open')) {
+          applyHighlightRect(target);
+        }
+      });
+
+      return target;
+    }
+
+    function finishTutorial(options) {
+      const redirectToDefault = !!(options && options.redirectToDefault);
+      closeOverlay();
+      inWelcomeMode = false;
+      if (redirectToDefault) {
+        window.location.href = getDefaultTutorialLandingUrl();
+        return;
+      }
+      stripTutorialParamsFromCurrentUrl();
+    }
+
+    function navigateToStep(index) {
+      if (!Array.isArray(steps) || !steps.length) {
+        finishTutorial();
+        return;
+      }
+
+      const safeIndex = Math.max(0, Math.min(steps.length - 1, index));
+      const step = steps[safeIndex];
+
+      if (!isStepLocationSatisfied(step.url)) {
+        const target = new URL(step.url, window.location.origin);
+        target.searchParams.set('tutorial', '1');
+        target.searchParams.set('tutorial_step', String(safeIndex));
+        target.searchParams.set('tutorial_role', roleKey);
+        target.searchParams.set('tutorial_direct', '1');
+        window.location.href = `${target.pathname}${target.search}`;
+        return;
+      }
+
+      currentIndex = safeIndex;
+      inWelcomeMode = false;
+      openOverlay();
+      overlay.classList.remove('welcome-mode');
+
+      titleEl.textContent = step.title;
+      textEl.textContent = step.text;
+      metaEl.textContent = `Step ${safeIndex + 1} of ${steps.length}`;
+
+      backBtn.style.display = safeIndex > 0 ? '' : 'none';
+      skipBtn.style.display = safeIndex >= steps.length - 1 ? 'none' : '';
+      skipBtn.textContent = 'Skip Tutorial';
+      nextBtn.textContent = safeIndex >= steps.length - 1 ? 'Finish' : 'Next';
+
+      const target = setHighlightForSelector(step.selector);
+      if (!target) {
+        setHighlightForSelector(['.content-area', '.page-title']);
+      }
+    }
+
+    function showWelcomeDialog() {
+      steps = buildStepsForRole(roleKey);
+      if (!steps.length) return;
+
+      inWelcomeMode = true;
+      openOverlay();
+      overlay.classList.remove('spotlight-active');
+      overlay.classList.add('welcome-mode');
+      highlight.style.display = 'none';
+
+      titleEl.textContent = `Welcome ${userName} Sir`;
+      textEl.textContent = 'Would you like a quick guided tutorial of your panel? You can skip now and start it later from Instructions in the footer.';
+      metaEl.textContent = 'This appears on first login for your role.';
+
+      backBtn.style.display = 'none';
+      skipBtn.style.display = '';
+      skipBtn.textContent = 'Skip Tutorial';
+      nextBtn.textContent = 'Continue Tutorial';
+    }
+
+    function startTutorialFromBeginning() {
+      steps = buildStepsForRole(roleKey);
+      if (!steps.length) {
+        alert('Tutorial steps are not available for this role right now.');
+        return;
+      }
+      navigateToStep(0);
+    }
+
+    backBtn.addEventListener('click', () => {
+      if (inWelcomeMode) return;
+      navigateToStep(currentIndex - 1);
+    });
+
+    skipBtn.addEventListener('click', () => {
+      finishTutorial({ redirectToDefault: true });
+    });
+
+    nextBtn.addEventListener('click', () => {
+      if (inWelcomeMode) {
+        startTutorialFromBeginning();
+        return;
+      }
+      if (currentIndex >= steps.length - 1) {
+        finishTutorial({ redirectToDefault: true });
+        return;
+      }
+      navigateToStep(currentIndex + 1);
+    });
+
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay || event.target.classList.contains('tutorial-overlay-backdrop')) {
+        finishTutorial();
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      if (!overlay.classList.contains('open') || inWelcomeMode || !steps.length) return;
+      const step = steps[currentIndex];
+      if (!step) return;
+      setHighlightForSelector(step.selector);
+    });
+
+    window.startFooterTutorial = function(event) {
+      if (event) event.preventDefault();
+
+      if (!supportedRoles.has(roleKey)) {
+        window.location.href = fallbackInstructionsUrl;
+        return false;
+      }
+
+      if (!(tutorialFlags && tutorialFlags.master) || !tutorialEnabledForRole) {
+        alert('Guided tutorial is currently disabled by settings.');
+        return false;
+      }
+
+      startTutorialFromBeginning();
+      return false;
+    };
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const params = new URLSearchParams(window.location.search);
+      const isTutorialRequest = params.get('tutorial') === '1';
+      const requestedRole = (params.get('tutorial_role') || roleKey).toLowerCase();
+      const requestedStep = parseInt(params.get('tutorial_step') || '0', 10);
+
+      if (isTutorialRequest && supportedRoles.has(roleKey) && requestedRole === roleKey && tutorialEnabledForRole) {
+        steps = buildStepsForRole(roleKey);
+        navigateToStep(Number.isFinite(requestedStep) ? requestedStep : 0);
+        return;
+      }
+
+      if (autoWelcome && supportedRoles.has(roleKey) && tutorialEnabledForRole) {
+        showWelcomeDialog();
+      }
+    });
+  })();
+  </script>
+  {% else %}
+  <script>
+    window.startFooterTutorial = function(event) {
+      if (event) event.preventDefault();
+      window.location.href = '{{ url_for("instructions_page") }}';
+      return false;
+    };
+  </script>
+  {% endif %}
   {% block scripts %}{% endblock %}
 </body>
 </html>

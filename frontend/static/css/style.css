@@ -211,6 +211,54 @@ a:hover { color: var(--accent); }
 .user-details { display: flex; flex-direction: column; }
 .user-name { font-size: .85rem; font-weight: 600; color: var(--text-strong); }
 .user-role { font-size: .7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+.user-scope {
+  margin-top: 2px;
+  font-size: .68rem;
+  color: var(--text-muted);
+  line-height: 1.2;
+  max-width: 190px;
+  word-break: break-word;
+}
+.user-department-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+  max-width: 210px;
+}
+.user-department-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: .66rem;
+  font-weight: 700;
+  letter-spacing: .35px;
+}
+.user-department-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.user-department-chip.is-active {
+  background: rgba(37, 211, 102, .14);
+  color: var(--success);
+  border-color: rgba(37, 211, 102, .28);
+}
+.user-department-chip.is-active .user-department-dot {
+  background: var(--success);
+}
+.user-department-chip.is-disabled {
+  background: rgba(239, 68, 68, .14);
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, .3);
+}
+.user-department-chip.is-disabled .user-department-dot {
+  background: var(--danger);
+}
 .logout-btn {
   display: block; text-align: center; padding: 9px;
   border-radius: var(--radius-sm);
@@ -476,17 +524,84 @@ a:hover { color: var(--accent); }
 .form-control:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(102,126,234,.15); }
 .form-control::placeholder { color: var(--text-muted); }
 
+/* Keep browser autofill colors aligned with active theme (dark/light). */
+input.form-control:-webkit-autofill,
+input.form-control:-webkit-autofill:hover,
+input.form-control:-webkit-autofill:focus,
+textarea.form-control:-webkit-autofill,
+select.form-control:-webkit-autofill {
+  -webkit-text-fill-color: var(--text) !important;
+  caret-color: var(--text);
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  border: 1px solid var(--border) !important;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+input.form-control:-moz-autofill,
+textarea.form-control:-moz-autofill,
+select.form-control:-moz-autofill {
+  box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  -moz-text-fill-color: var(--text) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+
 select.form-control { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; }
 select.form-control option { background: #1a1f2e; color: var(--text); }
 body.light-theme select.form-control option { background: #ffffff; color: #0f172a; }
 
 textarea.form-control { resize: vertical; min-height: 80px; }
 
-.form-check { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.form-check { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .form-check input[type="checkbox"] {
-  width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(148, 163, 184, 0.25);
+  position: relative;
+  cursor: pointer;
+  transition: background-color .2s ease, border-color .2s ease, opacity .2s ease;
+  flex-shrink: 0;
+}
+.form-check input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  top: 2px;
+  left: 2px;
+  box-shadow: 0 2px 5px rgba(15, 23, 42, 0.35);
+  transition: transform .2s ease;
+}
+.form-check input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  border-color: transparent;
+}
+.form-check input[type="checkbox"]:checked::after {
+  transform: translateX(20px);
+}
+.form-check input[type="checkbox"]:disabled {
+  opacity: .55;
+  cursor: not-allowed;
 }
 .form-check label { font-size: .88rem; color: var(--text); cursor: pointer; }
+
+.tutorial-toggle-group {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: rgba(102,126,234,.04);
+}
+
+.tutorial-toggle-group.is-disabled {
+  opacity: .55;
+}
 
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
@@ -504,6 +619,50 @@ textarea.form-control { resize: vertical; min-height: 80px; }
 .file-input-wrapper i { font-size: 2rem; color: var(--primary); margin-bottom: 8px; display: block; }
 .file-input-wrapper .file-text { font-size: .85rem; color: var(--text-dim); }
 .file-input-wrapper .file-name { margin-top: 6px; font-size: .82rem; color: var(--success); font-weight: 600; display: none; }
+
+.scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.scope-item {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+
+.scope-item-title {
+  font-size: .78rem;
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: 6px;
+}
+
+.scope-year-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: .72rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.scope-chip input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
 
 /* ============================================================
    BUTTONS
@@ -800,6 +959,128 @@ body.light-theme .login-banner-wrap {
 .modal-header h3 { font-size: 1.1rem; font-weight: 700; color: var(--text-strong); }
 .modal-close { background: none; border: none; color: var(--text-dim); font-size: 1.2rem; cursor: pointer; }
 .modal-close:hover { color: var(--text-strong); }
+
+/* ============================================================
+   GUIDED TUTORIAL
+   ============================================================ */
+.tutorial-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2600;
+  display: none;
+}
+
+.tutorial-overlay.open {
+  display: block;
+}
+
+.tutorial-overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(7, 11, 20, 0.68);
+}
+
+.tutorial-overlay.spotlight-active .tutorial-overlay-backdrop {
+  background: transparent;
+}
+
+.tutorial-highlight {
+  position: fixed;
+  border-radius: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 9999px rgba(6, 10, 18, 0.78);
+  pointer-events: none;
+  z-index: 2601;
+  display: none;
+}
+
+body.light-theme .tutorial-highlight {
+  box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.42);
+}
+
+.tutorial-spotlight-target {
+  position: relative !important;
+  z-index: 2603 !important;
+  opacity: 1 !important;
+  filter: none !important;
+  pointer-events: none !important;
+}
+
+.tutorial-card {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: min(420px, calc(100vw - 30px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+  z-index: 2602;
+  padding: 16px;
+}
+
+.tutorial-overlay.welcome-mode .tutorial-card {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  width: min(680px, calc(100vw - 40px));
+  bottom: 24px;
+  padding: 22px 24px;
+}
+
+.tutorial-overlay.welcome-mode .tutorial-card-title {
+  font-size: 1.22rem;
+}
+
+.tutorial-overlay.welcome-mode .tutorial-card-text {
+  font-size: .96rem;
+  line-height: 1.65;
+}
+
+.tutorial-card-title {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.tutorial-card-text {
+  margin: 10px 0;
+  font-size: .86rem;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.tutorial-card-meta {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: .78rem;
+}
+
+.tutorial-actions {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .tutorial-card {
+    right: 10px;
+    left: 10px;
+    width: auto;
+    bottom: 12px;
+  }
+
+  .tutorial-overlay.welcome-mode .tutorial-card {
+    left: 10px;
+    right: 10px;
+    transform: none;
+    width: auto;
+    bottom: 12px;
+    padding: 18px;
+  }
+}
 
 /* ============================================================
    STUDENT TABLE (Counselor)
