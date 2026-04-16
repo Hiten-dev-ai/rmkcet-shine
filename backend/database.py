@@ -338,6 +338,20 @@ def authenticate_user(identifier: str, password: str):
     return None
 
 
+def get_user_by_identifier(identifier: str):
+    """Return user by email or exact name (case-insensitive)."""
+    ident = str(identifier or "").strip()
+    if not ident:
+        return None
+
+    conn = get_conn()
+    user = conn.execute("SELECT * FROM users WHERE email=?", (ident,)).fetchone()
+    if not user:
+        user = conn.execute("SELECT * FROM users WHERE LOWER(name)=LOWER(?)", (ident,)).fetchone()
+    conn.close()
+    return dict(user) if user else None
+
+
 def get_user(email: str):
     conn = get_conn()
     row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
@@ -402,11 +416,14 @@ def set_chief_admin_scopes(chief_admin_email, scopes):
 
 
 def get_scoped_users_for_admin(actor_email, actor_role):
-    """System admin sees all users; HOD/DEO see counselors+DEOs in allowed dept/year and HODs with matching scopes."""
+    """Return users visible to actor based on role scope policy."""
     if is_system_admin(actor_role):
         return get_all_users()
 
     role_norm = str(actor_role or "").strip().lower()
+    if role_norm == "principal":
+        return get_all_users()
+
     if role_norm not in {"chief_admin", "hod", "deo"}:
         return []
 
@@ -427,7 +444,16 @@ def get_scoped_users_for_admin(actor_email, actor_role):
             filtered.append(d)
             continue
         
-        # Include counselors/DEOs in allowed scopes
+        # DEO can only see counselor accounts in assigned scopes.
+        if role_norm == "deo":
+            if d.get("role") != "counselor":
+                continue
+            key = (str(d.get("department") or "").strip().upper(), int(d.get("year_level") or 1))
+            if key in allowed:
+                filtered.append(d)
+            continue
+
+        # HOD can see counselors/DEOs in allowed scopes.
         if d.get("role") in {"counselor", "deo"}:
             key = (str(d.get("department") or "").strip().upper(), int(d.get("year_level") or 1))
             if key in allowed:
@@ -1015,6 +1041,10 @@ def get_app_config():
         "tutorial_hod_enabled": "true",
         "tutorial_deo_enabled": "true",
         "tutorial_principal_enabled": "true",
+
+        # OTP Security
+        "require_otp_on_password_reset": "false",
+        "require_otp_on_login": "false",
         
         # Theme Colors - Primary
         "color_primary": "#667eea",

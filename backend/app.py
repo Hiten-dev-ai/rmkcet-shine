@@ -11,7 +11,7 @@ import hashlib
 import shutil
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from urllib.parse import urlparse, parse_qs
 import re
@@ -25,9 +25,11 @@ from fpdf import FPDF
 import database as db
 from config import (
     SECRET_KEY, APP_NAME, APP_VERSION, DATA_DIR, DATABASE_FILE,
-    MESSAGE_TEMPLATE, COUNTRY_CODE, DEPT_REG_PATTERNS
+    MESSAGE_TEMPLATE, COUNTRY_CODE, DEPT_REG_PATTERNS, OTP_EXPIRY_SECONDS
 )
 from models.test_metadata import normalize_test_name
+from utils.email_helper import send_email
+from utils.otp_helper import generate_otp
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -125,6 +127,10 @@ def _is_principal(role):
     return str(role or "").strip().lower() == "principal"
 
 
+def _is_counselor(role):
+    return str(role or "").strip().lower() == "counselor"
+
+
 def _is_admin_portal_user(role):
     return _is_system_admin(role) or _is_hod(role) or _is_deo(role) or _is_principal(role)
 
@@ -140,11 +146,11 @@ def _allowed_tabs_for_role(role):
     if _is_system_admin(role):
         return {"users", "departments", "reports", "activity", "monitoring", "messages", "config", "database"}
     if _is_hod(role):
-        return {"reports", "activity", "messages"}
+        return {"dashboard", "reports", "activity", "messages"}
     if _is_deo(role):
-        return {"reports", "activity", "messages"}
+        return {"reports", "activity", "users", "messages"}
     if _is_principal(role):
-        return {"dashboard", "reports", "activity", "database"}
+        return {"dashboard", "reports", "activity", "users", "database"}
     return set()
 
 
@@ -153,9 +159,58 @@ def _default_tab_for_role(role):
         return "reports"
     if _is_principal(role):
         return "dashboard"
-    if _is_hod(role) or _is_deo(role):
+    if _is_hod(role):
+        return "dashboard"
+    if _is_deo(role):
         return "reports"
     return "recent-tests"
+
+
+def _mask_email(email):
+    value = str(email or "").strip()
+    if "@" not in value:
+        return value
+    local, domain = value.split("@", 1)
+    if len(local) <= 2:
+        local_masked = local[0] + "*" if local else "*"
+    else:
+        local_masked = local[0] + ("*" * (len(local) - 2)) + local[-1]
+    return f"{local_masked}@{domain}"
+
+
+def _is_truthy(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_security_config_flags():
+    cfg = db.get_app_config() or {}
+    return {
+        "require_otp_on_password_reset": _is_truthy(cfg.get("require_otp_on_password_reset", "false")),
+        "require_otp_on_login": _is_truthy(cfg.get("require_otp_on_login", "false")),
+    }
+
+
+def _is_login_otp_required_for_role(role):
+    flags = _get_security_config_flags()
+    return bool(flags.get("require_otp_on_login") and not _is_system_admin(role))
+
+
+def _is_password_reset_otp_required_for_role(role):
+    flags = _get_security_config_flags()
+    return bool(flags.get("require_otp_on_password_reset") and not _is_system_admin(role))
+
+
+def _send_otp_email(target_email, otp_code, purpose):
+    subject = f"RMKCET SHINE - {purpose} OTP"
+    body = (
+        f"<h3>{purpose} verification</h3>"
+        f"<p>Your one-time password is:</p>"
+        f"<h2 style='letter-spacing:4px;color:#2563eb'>{otp_code}</h2>"
+        f"<p>This OTP is valid for {max(1, int(OTP_EXPIRY_SECONDS // 60))} minutes.</p>"
+        f"<p>If you did not initiate this request, you can ignore this mail.</p>"
+        f"<p>RMKCET SHINE</p>"
+    )
+    return send_email(target_email, subject, body, html=True)
 
 
 def _panel_endpoint_for_role(role):
@@ -343,6 +398,16 @@ def _can_chief_admin_touch_user(actor_email, target_user):
     return False
 
 
+def _can_deo_touch_user(actor_email, target_user):
+    if not target_user:
+        return False
+    if str(target_user.get("role") or "").strip().lower() != "counselor":
+        return False
+    scopes = _get_actor_scope_pairs(actor_email, "deo") or set()
+    key = (str(target_user.get("department") or "").upper(), int(target_user.get("year_level") or 1))
+    return key in scopes
+
+
 def _get_allowed_counselor_emails_for_actor(actor_email, actor_role, forced_scope_pairs=None):
     if _is_system_admin(actor_role):
         return None
@@ -460,6 +525,242 @@ def _resolve_asset_file(filename):
     return None
 
 
+def _parse_mark_as_float(value):
+    sval = str(value or "").strip()
+    if not sval:
+        return None
+    up = sval.upper()
+    if up in {"ABSENT", "AB", "A", "-", "NA", "N/A"}:
+        return None
+    try:
+        num = float(sval)
+    except (TypeError, ValueError):
+        return None
+    if num < 0 or num > 100:
+        return None
+    return num
+
+
+def _build_admin_dashboard_data(actor_email, actor_role, activity_rows, departments):
+    scope_pairs = _get_actor_scope_pairs(actor_email, actor_role)
+    allowed_dep_year = set(scope_pairs or []) if scope_pairs is not None else None
+    allowed_departments = (
+        sorted({dep for dep, _ in allowed_dep_year})
+        if allowed_dep_year is not None
+        else sorted({str(d.get("code") or "").strip().upper() for d in (departments or []) if d.get("code")})
+    )
+
+    # 1) Counselor completion across department + year
+    completion_by_scope = {}
+    completion_by_department = {}
+    total_students = 0
+    total_reached = 0
+    for row in (activity_rows or []):
+        dep = str(row.get("department") or "").strip().upper()
+        user = db.get_user(row.get("email")) or {}
+        year_level = int(user.get("year_level") or 1)
+        if allowed_dep_year is not None and (dep, year_level) not in allowed_dep_year:
+            continue
+
+        students = int(row.get("student_count") or 0)
+        reached = int(row.get("unique_students_messaged") or 0)
+        pct = (reached / max(1, students)) * 100 if students else 0
+
+        scope_label = f"{dep} Y{year_level}" if dep else f"Y{year_level}"
+        completion_by_scope.setdefault(scope_label, []).append(pct)
+        completion_by_department.setdefault(dep or "N/A", {"students": 0, "reached": 0})
+        completion_by_department[dep or "N/A"]["students"] += students
+        completion_by_department[dep or "N/A"]["reached"] += reached
+
+        total_students += students
+        total_reached += reached
+
+    scope_labels = sorted(completion_by_scope.keys())
+    scope_values = [round(sum(completion_by_scope[k]) / max(1, len(completion_by_scope[k])), 1) for k in scope_labels]
+
+    dept_completion_labels = sorted(completion_by_department.keys())
+    dept_completion_values = []
+    for dep in dept_completion_labels:
+        dep_students = completion_by_department[dep]["students"]
+        dep_reached = completion_by_department[dep]["reached"]
+        dept_completion_values.append(round((dep_reached / max(1, dep_students)) * 100 if dep_students else 0, 1))
+
+    overall_completion = round((total_reached / max(1, total_students)) * 100 if total_students else 0, 1)
+
+    # 2) GPA/marks average and 3) test histogram with upload-factor adjustment
+    conn = db.get_conn()
+    rows = conn.execute(
+        """
+        SELECT
+            UPPER(COALESCE(tm.department, '')) AS department,
+            COALESCE(tm.year_level, 1) AS year_level,
+            CAST(COALESCE(tm.semester, 0) AS INTEGER) AS semester,
+            UPPER(COALESCE(tm.test_name, '')) AS test_name,
+            sm.marks AS marks
+        FROM test_metadata tm
+        JOIN student_marks sm ON sm.test_id = tm.test_id
+        """
+    ).fetchall()
+    conn.close()
+
+    gpa_buckets = {}
+    hist_buckets = {}
+    for r in rows:
+        dep = str(r["department"] or "").strip().upper()
+        yr = int(r["year_level"] or 1)
+        if allowed_dep_year is not None and (dep, yr) not in allowed_dep_year:
+            continue
+        mark_val = _parse_mark_as_float(r["marks"])
+        if mark_val is None:
+            continue
+
+        gpa_key = (dep or "N/A", yr)
+        gpa_buckets.setdefault(gpa_key, {"sum": 0.0, "count": 0})
+        gpa_buckets[gpa_key]["sum"] += mark_val
+        gpa_buckets[gpa_key]["count"] += 1
+
+        sem = int(r["semester"] or 0)
+        tname = str(r["test_name"] or "").strip().upper()
+        if sem not in (1, 2) or tname not in ALLOWED_TEST_NAMES:
+            continue
+        hist_key = (sem, tname)
+        hist_buckets.setdefault(hist_key, {"sum": 0.0, "count": 0, "departments": set()})
+        hist_buckets[hist_key]["sum"] += mark_val
+        hist_buckets[hist_key]["count"] += 1
+        if dep:
+            hist_buckets[hist_key]["departments"].add(dep)
+
+    gpa_labels = []
+    gpa_values = []
+    for (dep, yr) in sorted(gpa_buckets.keys(), key=lambda x: (x[0], x[1])):
+        item = gpa_buckets[(dep, yr)]
+        avg_val = item["sum"] / max(1, item["count"])
+        gpa_labels.append(f"{dep} Y{yr}")
+        gpa_values.append(round(avg_val, 1))
+
+    matrix_labels = []
+    matrix_values = []
+    matrix_raw_values = []
+    matrix_coverage = []
+    target_departments = max(1, len(allowed_departments))
+    for sem in (1, 2):
+        for tname in ("IAT 1", "IAT 2", "MODEL EXAM"):
+            key = (sem, tname)
+            item = hist_buckets.get(key, {"sum": 0.0, "count": 0, "departments": set()})
+            raw_avg = (item["sum"] / max(1, item["count"])) if item["count"] else 0.0
+            coverage = len(item["departments"]) / target_departments
+            adjusted = raw_avg * coverage
+
+            matrix_labels.append(f"Sem {sem} - {tname}")
+            matrix_raw_values.append(round(raw_avg, 1))
+            matrix_values.append(round(adjusted, 1))
+            matrix_coverage.append(round(coverage * 100, 1))
+
+    return {
+        "counselor_activity": {"labels": scope_labels, "values": scope_values},
+        "department_gpa": {"labels": gpa_labels, "values": gpa_values},
+        "test_histogram": {
+            "labels": matrix_labels,
+            "values": matrix_values,
+            "raw_values": matrix_raw_values,
+            "coverage": matrix_coverage,
+        },
+        "completion_overview": {
+            "overall": overall_completion,
+            "department_labels": dept_completion_labels,
+            "department_values": dept_completion_values,
+        },
+    }
+
+
+def _build_counselor_dashboard_data(counselor_email):
+    conn = db.get_conn()
+    rows = conn.execute(
+        """
+        SELECT
+            cs.reg_no,
+            cs.student_name,
+            CAST(COALESCE(tm.semester, 0) AS INTEGER) AS semester,
+            UPPER(COALESCE(tm.test_name, '')) AS test_name,
+            sm.marks AS marks
+        FROM counselor_students cs
+        LEFT JOIN student_marks sm ON sm.reg_no = cs.reg_no
+        LEFT JOIN test_metadata tm ON tm.test_id = sm.test_id
+        WHERE cs.counselor_email = ?
+        """,
+        (counselor_email,),
+    ).fetchall()
+    conn.close()
+
+    student_totals = {}
+    matrix = {}
+    all_students = set()
+    for r in rows:
+        reg = str(r["reg_no"] or "").strip()
+        name = str(r["student_name"] or reg).strip()
+        if not reg:
+            continue
+        all_students.add(reg)
+        student_totals.setdefault(reg, {"name": name, "sum": 0.0, "count": 0})
+
+        mark_val = _parse_mark_as_float(r["marks"])
+        if mark_val is None:
+            continue
+
+        student_totals[reg]["sum"] += mark_val
+        student_totals[reg]["count"] += 1
+
+        sem = int(r["semester"] or 0)
+        tname = str(r["test_name"] or "").strip().upper()
+        if sem not in (1, 2) or tname not in ALLOWED_TEST_NAMES:
+            continue
+        key = (sem, tname)
+        matrix.setdefault(key, {"sum": 0.0, "count": 0, "students": set()})
+        matrix[key]["sum"] += mark_val
+        matrix[key]["count"] += 1
+        matrix[key]["students"].add(reg)
+
+    student_labels = []
+    student_values = []
+    for reg, item in sorted(student_totals.items(), key=lambda x: (x[1]["name"], x[0])):
+        if item["count"] <= 0:
+            continue
+        student_labels.append(item["name"][:24])
+        student_values.append(round(item["sum"] / max(1, item["count"]), 1))
+
+    # Keep mobile-friendly chart payload.
+    if len(student_labels) > 25:
+        student_labels = student_labels[:25]
+        student_values = student_values[:25]
+
+    matrix_labels = []
+    matrix_values = []
+    matrix_raw_values = []
+    matrix_coverage = []
+    total_students = max(1, len(all_students))
+    for sem in (1, 2):
+        for tname in ("IAT 1", "IAT 2", "MODEL EXAM"):
+            key = (sem, tname)
+            item = matrix.get(key, {"sum": 0.0, "count": 0, "students": set()})
+            raw_avg = (item["sum"] / max(1, item["count"])) if item["count"] else 0.0
+            coverage = len(item["students"]) / total_students
+            adjusted = raw_avg * coverage
+            matrix_labels.append(f"Sem {sem} - {tname}")
+            matrix_raw_values.append(round(raw_avg, 1))
+            matrix_values.append(round(adjusted, 1))
+            matrix_coverage.append(round(coverage * 100, 1))
+
+    return {
+        "student_activity": {"labels": student_labels, "values": student_values},
+        "test_histogram": {
+            "labels": matrix_labels,
+            "values": matrix_values,
+            "raw_values": matrix_raw_values,
+            "coverage": matrix_coverage,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Context processor – inject common vars into every template
 # ---------------------------------------------------------------------------
@@ -468,12 +769,13 @@ def inject_globals():
     current_email = session.get("user_email")
     current_role = session.get("role")
     assigned_departments = _build_assigned_department_badges(current_email, current_role) if current_email else []
-    app_config = db.get_app_config() if current_email else {}
+    app_config = db.get_app_config()
     tutorial_flags = _tutorial_flags_from_config(app_config)
     tutorial_role_key = _tutorial_role_key(current_role)
     tutorial_enabled_for_current_role = bool(
         tutorial_flags.get("master") and tutorial_flags.get(tutorial_role_key, False)
     )
+    security_flags = _get_security_config_flags()
 
     return {
         "app_name": APP_NAME,
@@ -488,6 +790,9 @@ def inject_globals():
         "tutorial_role_key": tutorial_role_key,
         "tutorial_enabled_for_current_role": tutorial_enabled_for_current_role,
         "tutorial_auto_welcome": request.args.get("tutorial_welcome") == "1",
+        "app_config": app_config,
+        "require_otp_on_password_reset": bool(security_flags.get("require_otp_on_password_reset")),
+        "require_otp_on_login": bool(security_flags.get("require_otp_on_login")),
         "now": datetime.now(),
     }
 
@@ -722,6 +1027,54 @@ def index():
     return redirect(url_for("login"))
 
 
+def _parse_iso_datetime(value):
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _is_pending_otp_valid(payload):
+    expires_at = _parse_iso_datetime((payload or {}).get("expires_at"))
+    return bool(expires_at and datetime.now() <= expires_at)
+
+
+def _otp_hash(value):
+    return hashlib.sha256(str(value or "").strip().encode("utf-8")).hexdigest()
+
+
+def _complete_login_for_user(user):
+    sid = str(uuid.uuid4())
+    ok, msg = db.register_session(sid, user["email"], request.remote_addr, request.user_agent.string)
+    if not ok:
+        flash(msg, "error")
+        return render_template("login.html")
+
+    session["user_email"] = user["email"]
+    session["user_name"] = user["name"]
+    session["role"] = user["role"]
+    session["session_id"] = sid
+    session["department"] = user.get("department", "")
+
+    show_tutorial_welcome = (not user.get("last_login")) and _is_tutorial_enabled_for_role(user.get("role"))
+    redirect_params = {"tutorial_welcome": "1"} if show_tutorial_welcome else {}
+
+    if _is_admin_portal_user(user["role"]):
+        return redirect(url_for(_panel_endpoint_for_role(user["role"]), **redirect_params))
+    return redirect(url_for("counselor_page", **redirect_params))
+
+
+def _render_login_otp_challenge(extra_context=None):
+    pending = session.get("pending_login_otp") or {}
+    ctx = {
+        "otp_challenge": True,
+        "otp_email_masked": _mask_email(pending.get("email", "")),
+    }
+    if isinstance(extra_context, dict):
+        ctx.update(extra_context)
+    return render_template("login.html", **ctx)
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -755,27 +1108,210 @@ def login():
         if force_logout:
             db.force_logout_by_email(email, "new_device_login")
 
-        sid = str(uuid.uuid4())
-        ok, msg = db.register_session(sid, email, request.remote_addr, request.user_agent.string)
-        if not ok:
-            flash(msg, "error")
-            return render_template("login.html")
+        if _is_login_otp_required_for_role(user.get("role")):
+            otp_code = generate_otp(6)
+            if not _send_otp_email(email, otp_code, "Login"):
+                flash("OTP delivery failed. Verify SMTP settings and try again.", "error")
+                return render_template("login.html")
 
-        session["user_email"] = email
-        session["user_name"] = user["name"]
-        session["role"] = user["role"]
-        session["session_id"] = sid
-        session["department"] = user.get("department", "")
+            session["pending_login_otp"] = {
+                "email": email,
+                "otp_hash": _otp_hash(otp_code),
+                "expires_at": (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).isoformat(),
+                "requested_at": datetime.now().isoformat(),
+            }
+            session.modified = True
+            flash(f"Login OTP sent to {_mask_email(email)}.", "info")
+            return _render_login_otp_challenge()
 
-        show_tutorial_welcome = (not user.get("last_login")) and _is_tutorial_enabled_for_role(user.get("role"))
+        return _complete_login_for_user(user)
 
-        redirect_params = {"tutorial_welcome": "1"} if show_tutorial_welcome else {}
-
-        if _is_admin_portal_user(user["role"]):
-            return redirect(url_for(_panel_endpoint_for_role(user["role"]), **redirect_params))
-        return redirect(url_for("counselor_page", **redirect_params))
+    pending_login = session.get("pending_login_otp")
+    if pending_login:
+        if _is_pending_otp_valid(pending_login):
+            return _render_login_otp_challenge()
+        session.pop("pending_login_otp", None)
+        flash("Previous login OTP has expired. Please sign in again.", "warning")
 
     return render_template("login.html")
+
+
+@app.route("/login/otp", methods=["POST"])
+def verify_login_otp():
+    pending = session.get("pending_login_otp") or {}
+    code = str(request.form.get("otp_code") or "").strip()
+    if not pending:
+        flash("No pending OTP challenge. Please login again.", "error")
+        return redirect(url_for("login"))
+
+    if not _is_pending_otp_valid(pending):
+        session.pop("pending_login_otp", None)
+        flash("OTP expired. Please login again.", "error")
+        return redirect(url_for("login"))
+
+    if not code or _otp_hash(code) != str(pending.get("otp_hash") or ""):
+        flash("Invalid OTP. Please try again.", "error")
+        return _render_login_otp_challenge()
+
+    email = str(pending.get("email") or "").strip()
+    user = db.get_user(email)
+    if not user:
+        session.pop("pending_login_otp", None)
+        flash("User not found. Please login again.", "error")
+        return redirect(url_for("login"))
+
+    allowed, msg = db.check_user_access(email)
+    if not allowed:
+        session.pop("pending_login_otp", None)
+        flash(msg, "error")
+        return redirect(url_for("login"))
+
+    session.pop("pending_login_otp", None)
+    return _complete_login_for_user(user)
+
+
+@app.route("/login/otp/resend", methods=["POST"])
+def resend_login_otp():
+    pending = session.get("pending_login_otp") or {}
+    if not pending:
+        flash("No pending OTP challenge. Please login again.", "error")
+        return redirect(url_for("login"))
+
+    last_requested = _parse_iso_datetime(pending.get("requested_at"))
+    if last_requested and (datetime.now() - last_requested).total_seconds() < 30:
+        flash("Please wait 30 seconds before requesting another OTP.", "warning")
+        return _render_login_otp_challenge()
+
+    email = str(pending.get("email") or "").strip()
+    user = db.get_user(email)
+    if not user:
+        session.pop("pending_login_otp", None)
+        flash("User not found. Please login again.", "error")
+        return redirect(url_for("login"))
+
+    otp_code = generate_otp(6)
+    if not _send_otp_email(email, otp_code, "Login"):
+        flash("Unable to resend OTP. Please try login again.", "error")
+        return _render_login_otp_challenge()
+
+    pending["otp_hash"] = _otp_hash(otp_code)
+    pending["expires_at"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).isoformat()
+    pending["requested_at"] = datetime.now().isoformat()
+    session["pending_login_otp"] = pending
+    session.modified = True
+    flash(f"A new OTP was sent to {_mask_email(email)}.", "info")
+    return _render_login_otp_challenge()
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    pending = session.get("pending_password_reset") or {}
+
+    if request.method == "POST":
+        action = str(request.form.get("action") or "request").strip().lower()
+
+        if action == "request":
+            identifier = str(request.form.get("identifier") or "").strip()
+            user = db.get_user_by_identifier(identifier)
+            if not user:
+                flash("No account found for the provided email/name.", "error")
+                return render_template("forgot_password.html", stage="request")
+
+            email = str(user.get("email") or "").strip()
+            if not email:
+                flash("Account email is not configured. Contact system admin.", "error")
+                return render_template("forgot_password.html", stage="request")
+
+            otp_required = _is_password_reset_otp_required_for_role(user.get("role"))
+            reset_payload = {
+                "email": email,
+                "verified": False,
+                "expires_at": (datetime.now() + timedelta(minutes=15)).isoformat(),
+            }
+
+            if otp_required:
+                otp_code = generate_otp(6)
+                if not _send_otp_email(email, otp_code, "Password Reset"):
+                    flash("Unable to send OTP. Please try again later.", "error")
+                    return render_template("forgot_password.html", stage="request")
+                reset_payload["otp_hash"] = _otp_hash(otp_code)
+                reset_payload["otp_expires_at"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).isoformat()
+                flash(f"Password reset OTP sent to {_mask_email(email)}.", "info")
+            else:
+                reset_payload["verified"] = True
+
+            session["pending_password_reset"] = reset_payload
+            session.modified = True
+            return redirect(url_for("forgot_password"))
+
+        if action == "verify":
+            if not pending:
+                flash("Start password reset again.", "error")
+                return redirect(url_for("forgot_password"))
+
+            otp_code = str(request.form.get("otp_code") or "").strip()
+            otp_expires = _parse_iso_datetime(pending.get("otp_expires_at"))
+            if not otp_expires or datetime.now() > otp_expires:
+                session.pop("pending_password_reset", None)
+                flash("OTP expired. Request a new password reset.", "error")
+                return redirect(url_for("forgot_password"))
+
+            if not otp_code or _otp_hash(otp_code) != str(pending.get("otp_hash") or ""):
+                flash("Invalid OTP.", "error")
+                return render_template("forgot_password.html", stage="verify", masked_email=_mask_email(pending.get("email")))
+
+            pending["verified"] = True
+            pending.pop("otp_hash", None)
+            pending.pop("otp_expires_at", None)
+            session["pending_password_reset"] = pending
+            session.modified = True
+            flash("OTP verified. Set your new password.", "success")
+            return redirect(url_for("forgot_password"))
+
+        if action == "reset":
+            if not pending:
+                flash("Start password reset again.", "error")
+                return redirect(url_for("forgot_password"))
+
+            expires_at = _parse_iso_datetime(pending.get("expires_at"))
+            if not expires_at or datetime.now() > expires_at:
+                session.pop("pending_password_reset", None)
+                flash("Reset session expired. Start again.", "error")
+                return redirect(url_for("forgot_password"))
+
+            if not bool(pending.get("verified")):
+                flash("Verify OTP before resetting password.", "error")
+                return redirect(url_for("forgot_password"))
+
+            new_password = str(request.form.get("new_password") or "").strip()
+            confirm_password = str(request.form.get("confirm_password") or "").strip()
+            if len(new_password) < 6:
+                flash("Password must be at least 6 characters.", "error")
+                return render_template("forgot_password.html", stage="reset", masked_email=_mask_email(pending.get("email")))
+            if new_password != confirm_password:
+                flash("Password and confirm password do not match.", "error")
+                return render_template("forgot_password.html", stage="reset", masked_email=_mask_email(pending.get("email")))
+
+            target_email = str(pending.get("email") or "").strip()
+            user = db.get_user(target_email)
+            if not user:
+                session.pop("pending_password_reset", None)
+                flash("User not found.", "error")
+                return redirect(url_for("forgot_password"))
+
+            db.update_user(target_email, password=new_password)
+            db.force_logout_user(target_email, "self_password_reset")
+            session.pop("pending_password_reset", None)
+            flash("Password reset successful. Please login with the new password.", "success")
+            return redirect(url_for("login"))
+
+    if pending:
+        if bool(pending.get("verified")):
+            return render_template("forgot_password.html", stage="reset", masked_email=_mask_email(pending.get("email")))
+        if pending.get("otp_hash"):
+            return render_template("forgot_password.html", stage="verify", masked_email=_mask_email(pending.get("email")))
+
+    return render_template("forgot_password.html", stage="request")
 
 
 @app.route("/logout")
@@ -857,7 +1393,7 @@ def admin_test_mode_preview(preview_role):
     if role_norm == "principal":
         return redirect(url_for("principal_panel", tab=request.args.get("tab") or "dashboard"))
     if role_norm == "hod":
-        return redirect(url_for("hod_panel", tab=request.args.get("tab") or "reports"))
+        return redirect(url_for("hod_panel", tab=request.args.get("tab") or "dashboard"))
     if role_norm == "deo":
         return redirect(url_for("deo_panel", tab=request.args.get("tab") or "reports"))
     if role_norm == "counselor":
@@ -883,7 +1419,7 @@ def _render_admin_panel(actor_email, actor_role, preview_mode=False, forced_scop
 
     allowed_tabs = _allowed_tabs_for_role(actor_role)
     if current_tab not in allowed_tabs:
-        fallback = "dashboard" if _is_principal(actor_role) else "reports"
+        fallback = "dashboard" if (_is_principal(actor_role) or _is_hod(actor_role)) else "reports"
         if requested_tab:
             flash("Access denied for this section.", "warning")
         return redirect(url_for(_panel_endpoint_for_role(actor_role), tab=fallback))
@@ -1073,6 +1609,7 @@ def _render_admin_panel(actor_email, actor_role, preview_mode=False, forced_scop
         ]
 
     counselors = [u for u in users if u["role"] == "counselor"]
+    dashboard_data = _build_admin_dashboard_data(actor_email, actor_role, activity, departments)
     leaderboard = sorted(
         [a for a in activity if int(a.get("student_count") or 0) > 0],
         key=lambda r: (float((int(r.get("unique_students_messaged") or 0) / max(1, int(r.get("student_count") or 1))) * 100), int(r.get("week_messages") or 0)),
@@ -1120,6 +1657,7 @@ def _render_admin_panel(actor_email, actor_role, preview_mode=False, forced_scop
         session_log_ok=session_log_ok,
         session_log_message=session_log_message,
         students_map=students_map,
+        dashboard_data=dashboard_data,
         leaderboard=leaderboard,
         activity_selection_ready=activity_selection_ready,
         activity_test_result=activity_test_result,
@@ -1535,6 +2073,10 @@ def counselor_page():
             sent_count=0,
             can_upload_students=True,
             report_tab=(request.args.get("tab") or "recent-tests"),
+            counselor_dashboard_data={
+                "student_activity": {"labels": [], "values": []},
+                "test_histogram": {"labels": [], "values": [], "raw_values": [], "coverage": []},
+            },
             current_role_override="counselor",
             preview_mode=True,
         )
@@ -1563,6 +2105,7 @@ def counselor_page():
     selected_test_meta = db.get_test_metadata(selected_test_id) if selected_test_id else None
     pending_students = db.get_pending_students_for_test(email, selected_test_id) if selected_test_id else students
     sent_reg_nos = db.get_sent_reg_nos_for_test(email, selected_test_id) if selected_test_id else set()
+    counselor_dashboard_data = _build_counselor_dashboard_data(email)
 
     return render_template(
         "counselor.html",
@@ -1581,6 +2124,7 @@ def counselor_page():
         sent_count=(len(sent_reg_nos) if selected_test_id else 0),
         can_upload_students=bool(user.get("can_upload_students", 1)),
         report_tab=(request.args.get("tab") or "recent-tests"),
+        counselor_dashboard_data=counselor_dashboard_data,
         current_role_override="",
         preview_mode=False,
     )
@@ -1590,13 +2134,186 @@ def counselor_page():
 
 # ---------- Users -----------------------------------------------------------
 
+def _resolve_department_from_branch(branch_value, department_codes):
+    raw = str(branch_value or "").strip().upper()
+    if not raw:
+        return ""
+    normalized = re.sub(r"\s+", "", raw)
+    for code in department_codes:
+        c = str(code or "").strip().upper()
+        if not c:
+            continue
+        c_norm = re.sub(r"\s+", "", c)
+        if c in raw or c_norm in normalized:
+            return c
+
+    token = re.split(r"[^A-Z0-9()]+", raw)[0].strip()
+    return token
+
+
+def _parse_bulk_counselor_excel(file_obj, department_codes):
+    import pandas as pd
+
+    xl = pd.ExcelFile(file_obj)
+    parsed_rows = []
+    for sheet_name in xl.sheet_names:
+        df = pd.read_excel(xl, sheet_name=sheet_name)
+        if df is None or df.empty:
+            continue
+
+        # Normalize columns for resilient matching across template variations.
+        col_map = {}
+        for c in df.columns:
+            key = re.sub(r"[^a-z0-9]", "", str(c or "").strip().lower())
+            col_map[key] = c
+
+        branch_col = next((col_map[k] for k in col_map if "branch" in k or "department" in k), None)
+        name_col = next((col_map[k] for k in col_map if k in {"name", "counselorname"} or "name" in k), None)
+        email_col = next((col_map[k] for k in col_map if "mailid" in k or k == "email" or "email" in k), None)
+        password_col = next((col_map[k] for k in col_map if "password" in k), None)
+
+        if not branch_col or not name_col or not email_col:
+            continue
+
+        for _, row in df.iterrows():
+            name = str(row.get(name_col) or "").strip()
+            email = str(row.get(email_col) or "").strip().lower()
+            branch = str(row.get(branch_col) or "").strip()
+            password = str(row.get(password_col) or "").strip() if password_col else ""
+
+            if not name or not email or "@" not in email or not branch:
+                continue
+
+            dep = _resolve_department_from_branch(branch, department_codes)
+            if not dep:
+                continue
+
+            parsed_rows.append(
+                {
+                    "name": name,
+                    "email": email,
+                    "department": dep,
+                    "password": password,
+                    "branch": branch,
+                }
+            )
+
+    # Keep deterministic order and unique email rows (first occurrence wins).
+    seen = set()
+    unique_rows = []
+    for row in parsed_rows:
+        email = row.get("email")
+        if email in seen:
+            continue
+        seen.add(email)
+        unique_rows.append(row)
+    return unique_rows
+
+
+@app.route("/api/users/bulk-counselors", methods=["POST"])
+@login_required
+@admin_required
+def api_bulk_create_counselors():
+    system_only = _ensure_system_admin("users")
+    if system_only:
+        return system_only
+
+    upload = request.files.get("counsellor_file")
+    if not upload or not upload.filename:
+        flash("Select a counsellor Excel file to upload.", "error")
+        return _redirect_admin_back("users")
+
+    year_level = request.form.get("year_level", type=int) or 1
+    if year_level not in (1, 2, 3, 4):
+        flash("Year must be between 1 and 4.", "error")
+        return _redirect_admin_back("users")
+
+    override_password = str(request.form.get("override_password") or "").strip()
+    if override_password and len(override_password) < 6:
+        flash("Override password must be at least 6 characters.", "error")
+        return _redirect_admin_back("users")
+
+    departments = db.get_departments(active_only=False)
+    department_codes = [str(d.get("code") or "").strip().upper() for d in departments if d.get("code")]
+
+    try:
+        rows = _parse_bulk_counselor_excel(upload, department_codes)
+    except Exception as e:
+        flash(f"Could not parse counsellor file: {e}", "error")
+        return _redirect_admin_back("users")
+
+    if not rows:
+        flash("No valid counselor rows found in the uploaded file.", "warning")
+        return _redirect_admin_back("users")
+
+    created = 0
+    updated = 0
+    skipped = 0
+    skipped_emails = []
+
+    for row in rows:
+        email = row["email"]
+        role_password = override_password or row.get("password") or ""
+        if not role_password:
+            skipped += 1
+            skipped_emails.append(email)
+            continue
+
+        if len(role_password) < 6:
+            skipped += 1
+            skipped_emails.append(email)
+            continue
+
+        existing = db.get_user(email)
+        if not existing:
+            ok, _ = db.create_user(
+                email=email,
+                password=role_password,
+                name=row["name"],
+                role="counselor",
+                department=row["department"],
+                max_students=30,
+                can_upload_students=True,
+                year_level=year_level,
+            )
+            if ok:
+                created += 1
+            else:
+                skipped += 1
+                skipped_emails.append(email)
+            continue
+
+        existing_role = str(existing.get("role") or "").strip().lower()
+        if existing_role not in {"counselor"}:
+            skipped += 1
+            skipped_emails.append(email)
+            continue
+
+        db.update_user(
+            email,
+            name=row["name"],
+            role="counselor",
+            department=row["department"],
+            year_level=year_level,
+            can_upload_students=1,
+            max_students=30,
+            password=role_password,
+        )
+        updated += 1
+
+    msg = f"Bulk counselor sync completed. Created: {created}, Updated: {updated}, Skipped: {skipped}."
+    if skipped_emails:
+        msg += f" Skipped emails: {', '.join(skipped_emails[:8])}"
+    flash(msg, "success" if (created or updated) else "warning")
+    return _redirect_admin_back("users")
+
 @app.route("/api/users", methods=["POST"])
 @login_required
 @admin_required
 def api_create_user():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     email = request.form.get("email", "").strip()
@@ -1611,6 +2328,10 @@ def api_create_user():
 
     if _is_hod(actor_role) and role not in {"counselor", "deo"}:
         flash("HOD can create only counselor or DEO accounts.", "error")
+        return _redirect_admin_back("users")
+
+    if _is_deo(actor_role) and role != "counselor":
+        flash("DEO can create only counselor accounts.", "error")
         return _redirect_admin_back("users")
 
     if role == "admin" and not _is_system_admin(actor_role):
@@ -1694,6 +2415,12 @@ def api_create_user():
             flash("You can only create users inside your assigned department/year scope.", "error")
             return _redirect_admin_back("users")
 
+    if _is_deo(actor_role) and role == "counselor":
+        scopes = _get_actor_scope_pairs(actor_email, actor_role) or set()
+        if (str(department or "").upper(), int(year_level or 1)) not in scopes:
+            flash("You can only create counselors inside your assigned department/year scope.", "error")
+            return _redirect_admin_back("users")
+
     ok, msg = db.create_user(
         email, password, name, role, department, max_students, can_upload, year_level
     )
@@ -1727,7 +2454,7 @@ def api_create_user():
 def api_update_user(email):
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     target = db.get_user(email)
@@ -1754,6 +2481,11 @@ def api_update_user(email):
         requested_key = (requested_dep, requested_year)
         if requested_key not in actor_scopes:
             flash("Update rejected: target department/year is outside your authorized assignments.", "error")
+            return _redirect_admin_back("users")
+
+    if _is_deo(actor_role):
+        if not _can_deo_touch_user(actor_email, target):
+            flash("You can modify only counselors in your assigned scope.", "error")
             return _redirect_admin_back("users")
 
     updates = {}
@@ -1882,7 +2614,7 @@ def api_update_user(email):
 def api_delete_user(email):
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     target = db.get_user(email)
@@ -1890,6 +2622,9 @@ def api_delete_user(email):
         flash("User not found.", "error")
         return _redirect_admin_back("users")
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can delete only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, target):
         flash("You can delete only counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
     db.delete_user(email)
@@ -1903,11 +2638,14 @@ def api_delete_user(email):
 def api_lock_user(email):
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     target = db.get_user(email)
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can lock only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, target):
         flash("You can lock only counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
     db.lock_user(email, request.form.get("reason", "Locked by admin"))
@@ -1921,11 +2659,14 @@ def api_lock_user(email):
 def api_unlock_user(email):
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     target = db.get_user(email)
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can unlock only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, target):
         flash("You can unlock only counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
     db.unlock_user(email)
@@ -1938,6 +2679,7 @@ def api_unlock_user(email):
 def api_update_password():
     """Update password for logged in user."""
     user_email = session.get("user_email")
+    role = session.get("role")
     if not user_email:
         flash("Session expired. Please login again.", "error")
         return redirect(url_for("login"))
@@ -1945,10 +2687,11 @@ def api_update_password():
     current_password = request.form.get("current_password", "").strip()
     new_password = request.form.get("new_password", "").strip()
     confirm_password = request.form.get("confirm_password", "").strip()
+    otp_code = request.form.get("otp_code", "").strip()
     
     # Validate inputs
-    if not current_password or not new_password or not confirm_password:
-        flash("All password fields are required.", "error")
+    if not new_password or not confirm_password:
+        flash("New password and confirm password are required.", "error")
         return redirect(request.referrer or url_for(_panel_endpoint_for_role(session.get("role"))))
     
     if len(new_password) < 6:
@@ -1958,14 +2701,34 @@ def api_update_password():
     if new_password != confirm_password:
         flash("Passwords do not match.", "error")
         return redirect(request.referrer or url_for(_panel_endpoint_for_role(session.get("role"))))
-    
-    # Verify current password
-    user = db.get_user(user_email) or {}
-    stored_hash = user.get("password_hash")
 
-    if not db.verify_password(current_password, stored_hash):
-        flash("Current password is incorrect.", "error")
-        return redirect(request.referrer or url_for(_panel_endpoint_for_role(session.get("role"))))
+    user = db.get_user(user_email) or {}
+
+    if _is_password_reset_otp_required_for_role(role):
+        pending = session.get("self_reset_otp") or {}
+        expected_email = str(pending.get("email") or "").strip().lower()
+        expires_at = _parse_iso_datetime(pending.get("expires_at"))
+        if expected_email != str(user_email).strip().lower():
+            flash("Request OTP first before updating password.", "error")
+            return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+        if not expires_at or datetime.now() > expires_at:
+            session.pop("self_reset_otp", None)
+            flash("OTP expired. Request a new OTP.", "error")
+            return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+        if not otp_code or _otp_hash(otp_code) != str(pending.get("otp_hash") or ""):
+            flash("Invalid OTP.", "error")
+            return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+        session.pop("self_reset_otp", None)
+    else:
+        # Keep current-password verification mandatory for system admin.
+        if _is_system_admin(role):
+            if not current_password:
+                flash("Current password is required.", "error")
+                return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+            stored_hash = user.get("password_hash")
+            if not db.verify_password(current_password, stored_hash):
+                flash("Current password is incorrect.", "error")
+                return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
 
     # Update password
     db.update_user(user_email, password=new_password)
@@ -1974,17 +2737,55 @@ def api_update_password():
     return redirect(request.referrer or url_for(_panel_endpoint_for_role(session.get("role"))))
 
 
+@app.route("/api/password-reset/send-otp", methods=["POST"])
+@login_required
+def api_send_password_reset_otp():
+    user_email = session.get("user_email")
+    role = session.get("role")
+    if not user_email:
+        flash("Session expired. Please login again.", "error")
+        return redirect(url_for("login"))
+
+    if not _is_password_reset_otp_required_for_role(role):
+        flash("OTP is not required for your role at this time.", "info")
+        return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+
+    pending = session.get("self_reset_otp") or {}
+    last_requested = _parse_iso_datetime(pending.get("requested_at"))
+    if last_requested and (datetime.now() - last_requested).total_seconds() < 30:
+        flash("Please wait 30 seconds before requesting another OTP.", "warning")
+        return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+
+    otp_code = generate_otp(6)
+    if not _send_otp_email(user_email, otp_code, "Password Reset"):
+        flash("Unable to send OTP. Check mail configuration.", "error")
+        return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+
+    session["self_reset_otp"] = {
+        "email": user_email,
+        "otp_hash": _otp_hash(otp_code),
+        "expires_at": (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).isoformat(),
+        "requested_at": datetime.now().isoformat(),
+    }
+    session.modified = True
+    flash(f"OTP sent to {_mask_email(user_email)}.", "success")
+    return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
+
+
 @app.route("/api/users/<path:email>/upload-students", methods=["POST"])
 @login_required
 @admin_required
 def api_upload_students_for_counselor(email):
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     target = db.get_user(email)
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can upload students only for counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, target):
         flash("You can upload students only for counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
     f = request.files.get("student_file")
@@ -2010,11 +2811,14 @@ def api_upload_students_for_counselor(email):
 def api_force_logout(email):
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     target = db.get_user(email)
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can force logout only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, target):
         flash("You can force logout only counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
     db.force_logout_user(email, "admin_action")
@@ -2155,7 +2959,7 @@ def api_chief_admin_get_scoped_counselors():
 def api_admin_save_student():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     counselor_email = request.form.get("counselor_email", "").strip()
@@ -2174,6 +2978,9 @@ def api_admin_save_student():
         return _redirect_admin_back("users")
 
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, counselor):
+        flash("You can manage students only for counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, counselor):
         flash("You can manage students only for counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
 
@@ -2203,7 +3010,7 @@ def api_admin_save_student():
 def api_admin_delete_student():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     counselor_email = request.form.get("counselor_email", "").strip()
@@ -2219,6 +3026,9 @@ def api_admin_delete_student():
         return _redirect_admin_back("users")
 
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, counselor):
+        flash("You can manage students only for counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, counselor):
         flash("You can manage students only for counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
 
@@ -2237,7 +3047,7 @@ def api_admin_delete_student():
 def api_admin_delete_all_students():
     actor_email = session.get("user_email")
     actor_role = session.get("role")
-    if _is_deo(actor_role) or _is_principal(actor_role):
+    if _is_principal(actor_role):
         flash("You do not have permission to manage users.", "error")
         return _redirect_admin_back("reports")
     counselor_email = request.form.get("counselor_email", "").strip()
@@ -2251,6 +3061,9 @@ def api_admin_delete_all_students():
         return _redirect_admin_back("users")
 
     if _is_hod(actor_role) and not _can_chief_admin_touch_user(actor_email, counselor):
+        flash("You can manage students only for counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
+    if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, counselor):
         flash("You can manage students only for counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
 
@@ -2412,6 +3225,10 @@ def api_update_config():
     for field in tutorial_fields:
         field_value = request.form.get(field)
         settings[field] = "true" if (tutorial_master == "on" and field_value == "on") else "false"
+
+    # OTP security toggles
+    settings["require_otp_on_password_reset"] = "true" if request.form.get("require_otp_on_password_reset") == "on" else "false"
+    settings["require_otp_on_login"] = "true" if request.form.get("require_otp_on_login") == "on" else "false"
     
     if settings:
         db.update_app_config_bulk(settings)

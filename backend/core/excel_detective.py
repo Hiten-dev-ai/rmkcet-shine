@@ -120,14 +120,19 @@ def find_header_row(df_raw: pd.DataFrame, max_rows: int = 15) -> int:
     Find the row that looks like a header (contains keywords like 'Name', 'Reg', 'S.No').
     Returns 0-based row index.
     """
-    keywords = ["name", "reg", "reg.", "register", "s.no", "sno", "sl", "roll", "student", "attendance", "gpa"]
+    keywords = [
+        "name", "reg", "reg.", "register", "s.no", "sno", "sl", "roll", "roll no",
+        "student", "attendance", "gpa", "whatsapp", "phone", "mail", "email"
+    ]
     for i in range(min(max_rows, len(df_raw))):
         row_vals = [str(v).strip().lower() for v in df_raw.iloc[i].values if pd.notna(v)]
         if not row_vals:
             continue
         matches = sum(1 for kw in keywords if any(kw in val for val in row_vals))
         has_marks_labels = any(val in {"maths", "chem", "attendance", "gpa"} for val in row_vals)
-        if matches >= 2 and has_marks_labels:
+        has_reg_like = any(("reg" in val) or ("roll" in val) for val in row_vals)
+        has_name_like = any(("name" in val) or ("student" in val) for val in row_vals)
+        if matches >= 2 and (has_marks_labels or (has_reg_like and has_name_like)):
             return i
     return 0
 

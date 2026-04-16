@@ -111,7 +111,7 @@
     <nav class="sidebar-nav">
       {% if effective_role in ['admin', 'hod', 'chief_admin', 'deo', 'principal'] %}
       {% set active_admin_tab = request.args.get('tab', default_tab or 'reports') %}
-      {% if effective_role == 'principal' %}
+      {% if effective_role in ['principal', 'hod', 'chief_admin'] %}
       <a href="{{ url_for(panel_endpoint, tab='dashboard') }}" class="nav-link tab-nav {% if active_admin_tab == 'dashboard' %}active{% endif %}" data-tab="dashboard">
         <i class="fas fa-gauge"></i><span>Dashboard</span>
       </a>
@@ -127,7 +127,7 @@
       <a href="{{ url_for(panel_endpoint, tab='activity') }}" class="nav-link tab-nav {% if active_admin_tab == 'activity' %}active{% endif %}" data-tab="activity">
         <i class="fas fa-chart-line"></i><span>Counsellor Activity</span>
       </a>
-      {% if effective_role == 'admin' %}
+      {% if effective_role in ['admin', 'principal', 'deo'] %}
       <a href="{{ url_for(panel_endpoint, tab='users') }}" class="nav-link tab-nav {% if active_admin_tab == 'users' %}active{% endif %}" data-tab="users">
         <i class="fas fa-users"></i><span>Users</span>
       </a>
@@ -204,10 +204,10 @@
             <i class="fas fa-cog"></i>
             <span>Settings</span>
           </a>
-          {% elif effective_role in ['hod', 'chief_admin'] %}
-          <button class="btn btn-outline btn-sm icon-btn" onclick="openPasswordResetModal()" type="button" title="Credential Reset">
+          {% elif effective_role in ['hod', 'chief_admin', 'deo', 'principal', 'counselor'] %}
+          <button class="btn btn-outline btn-sm icon-btn" onclick="openPasswordResetModal()" type="button" title="Password Reset">
             <i class="fas fa-key"></i>
-            <span>Credential Reset</span>
+            <span>Password Reset</span>
           </button>
           {% endif %}
         </div>
@@ -276,7 +276,15 @@
         <h3><i class="fas fa-key"></i> Change Password</h3>
         <button class="modal-close" onclick="closeModal('password-reset')">&times;</button>
       </div>
+      {% set otp_reset_required = require_otp_on_password_reset and (current_role != 'admin') %}
+      {% if otp_reset_required %}
+      <form method="POST" action="{{ url_for('api_send_password_reset_otp') }}" style="margin-bottom:10px;">
+        <button type="submit" class="btn btn-outline" style="width:100%;"><i class="fas fa-paper-plane"></i> Send OTP To My Email</button>
+      </form>
+      <p style="font-size:.78rem;color:var(--text-dim);margin-bottom:10px;">OTP verification is enabled for password reset. Enter the OTP from your mailbox before submitting the new password.</p>
+      {% endif %}
       <form method="POST" action="{{ url_for('api_update_password') }}">
+        {% if current_role == 'admin' %}
         <div class="form-group">
           <label class="form-label">Current Password</label>
           <div class="d-flex align-center" style="gap:8px;">
@@ -286,6 +294,13 @@
             </button>
           </div>
         </div>
+        {% endif %}
+        {% if otp_reset_required %}
+        <div class="form-group">
+          <label class="form-label">OTP</label>
+          <input type="text" class="form-control" name="otp_code" placeholder="Enter 6-digit OTP" minlength="6" maxlength="6" required>
+        </div>
+        {% endif %}
         <div class="form-group">
           <label class="form-label">New Password</label>
           <div class="d-flex align-center" style="gap:8px;">

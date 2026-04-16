@@ -281,21 +281,9 @@ function initializeUserTableState() {
   filterUserTable();
 }
 
-// Chief admin password reset modal
+// Top-ribbon password reset always updates current logged-in user password.
 function openPasswordResetModal() {
-  // Determine if user is chief admin or system admin based on visible button
-  const headerActions = document.querySelector('.header-actions');
-  const isCorePasswordBtn = headerActions?.querySelector('a[href*="tab=config"]') !== null;
-  const isChiefCredentialBtn = headerActions?.querySelector('button[onclick*="openPasswordResetModal"]') !== null;
-  
-  if (isChiefCredentialBtn && !isCorePasswordBtn) {
-    // Chief admin role - open credential reset for counselors
-    openModal('chief-credential-reset');
-    initializeChiefResetCounselors();
-  } else {
-    // Regular user role - open own password change
-    openModal('password-reset');
-  }
+  openModal('password-reset');
 }
 
 // Show/hide password input
