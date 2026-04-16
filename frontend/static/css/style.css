@@ -346,6 +346,23 @@ a:hover { color: var(--accent); }
   white-space: nowrap;
 }
 
+.smtp-status-btn.smtp-ready {
+  border-color: rgba(34,197,94,.45);
+  color: #22c55e;
+}
+
+.smtp-status-btn.smtp-error,
+.smtp-status-btn.smtp-missing {
+  border-color: rgba(239,68,68,.45);
+  color: #f87171;
+}
+
+.smtp-status-btn.smtp-test,
+.smtp-status-btn.smtp-unknown {
+  border-color: rgba(59,130,246,.45);
+  color: #60a5fa;
+}
+
 /* Search suggestions dropdown */
 .search-suggestions {
   position: absolute; top: 100%; left: 0; right: 0;
@@ -935,7 +952,11 @@ body.light-theme .login-banner-wrap {
 .modal-overlay {
   display: none; position: fixed; inset: 0;
   background: rgba(0,0,0,.6); backdrop-filter: blur(4px);
-  z-index: 2000; place-items: center;
+  z-index: 2000;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 20px;
+  overflow-y: auto;
 }
 .modal-overlay.open { display: grid; }
 .modal {
@@ -968,16 +989,31 @@ body.light-theme .login-banner-wrap {
   inset: 0;
   z-index: 2600;
   display: none;
+  pointer-events: none;
 }
 
 .tutorial-overlay.open {
   display: block;
+  touch-action: manipulation;
+}
+
+.tutorial-overlay.welcome-mode {
+  pointer-events: auto;
 }
 
 .tutorial-overlay-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(7, 11, 20, 0.68);
+  background: radial-gradient(circle at 20% 15%, rgba(37, 99, 235, 0.24), rgba(2, 6, 23, 0.78));
+  pointer-events: none;
+}
+
+.tutorial-overlay.welcome-mode .tutorial-overlay-backdrop {
+  pointer-events: auto;
+}
+
+body.light-theme .tutorial-overlay-backdrop {
+  background: radial-gradient(circle at 20% 15%, rgba(59, 130, 246, 0.2), rgba(15, 23, 42, 0.5));
 }
 
 .tutorial-overlay.spotlight-active .tutorial-overlay-backdrop {
@@ -987,15 +1023,15 @@ body.light-theme .login-banner-wrap {
 .tutorial-highlight {
   position: fixed;
   border-radius: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.95);
-  box-shadow: 0 0 0 9999px rgba(6, 10, 18, 0.78);
+  border: 2px solid rgba(96, 165, 250, 0.98);
+  box-shadow: 0 0 0 9999px rgba(8, 14, 28, 0.78), 0 0 0 4px rgba(191, 219, 254, 0.2);
   pointer-events: none;
   z-index: 2601;
   display: none;
 }
 
 body.light-theme .tutorial-highlight {
-  box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.42);
+  box-shadow: 0 0 0 9999px rgba(30, 58, 138, 0.2), 0 0 0 4px rgba(37, 99, 235, 0.2);
 }
 
 .tutorial-spotlight-target {
@@ -1003,7 +1039,17 @@ body.light-theme .tutorial-highlight {
   z-index: 2603 !important;
   opacity: 1 !important;
   filter: none !important;
-  pointer-events: none !important;
+  pointer-events: auto !important;
+}
+
+.tutorial-spotlight-target.tutorial-clickable {
+  animation: tutorialPulse 1.3s ease-in-out infinite;
+}
+
+@keyframes tutorialPulse {
+  0% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.35); }
+  70% { box-shadow: 0 0 0 10px rgba(96, 165, 250, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0); }
 }
 
 .tutorial-card {
@@ -1011,12 +1057,24 @@ body.light-theme .tutorial-highlight {
   right: 20px;
   bottom: 20px;
   width: min(420px, calc(100vw - 30px));
-  border: 1px solid var(--border);
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid rgba(148, 163, 184, 0.45);
   border-radius: var(--radius);
-  background: var(--bg-secondary);
-  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+  background: linear-gradient(165deg, rgba(15, 23, 42, 0.97), rgba(30, 58, 138, 0.93));
+  box-shadow: 0 26px 54px rgba(2, 6, 23, 0.62), inset 0 0 0 1px rgba(191, 219, 254, 0.16);
+  backdrop-filter: blur(6px);
   z-index: 2602;
+  pointer-events: auto;
   padding: 16px;
+}
+
+body.light-theme .tutorial-card {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.98), rgba(239, 246, 255, 0.97));
+  box-shadow: 0 22px 46px rgba(15, 23, 42, 0.24), inset 0 0 0 1px rgba(96, 165, 250, 0.28);
 }
 
 .tutorial-overlay.welcome-mode .tutorial-card {
@@ -1039,7 +1097,7 @@ body.light-theme .tutorial-highlight {
 
 .tutorial-card-title {
   margin: 0;
-  color: var(--text-strong);
+  color: #f8fafc;
   font-size: 1rem;
   font-weight: 700;
 }
@@ -1047,14 +1105,27 @@ body.light-theme .tutorial-highlight {
 .tutorial-card-text {
   margin: 10px 0;
   font-size: .86rem;
-  color: var(--text);
+  color: #e2e8f0;
   line-height: 1.55;
 }
 
 .tutorial-card-meta {
   margin: 0;
-  color: var(--text-dim);
+  color: #bfdbfe;
   font-size: .78rem;
+}
+
+body.light-theme .tutorial-card-title {
+  color: #0f172a;
+}
+
+body.light-theme .tutorial-card-text {
+  color: #1e293b;
+}
+
+body.light-theme .tutorial-card-meta {
+  color: #1d4ed8;
+  font-weight: 600;
 }
 
 .tutorial-actions {
@@ -1064,12 +1135,21 @@ body.light-theme .tutorial-highlight {
   gap: 8px;
 }
 
+.tutorial-actions .btn {
+  flex: 1 1 120px;
+}
+
 @media (max-width: 768px) {
   .tutorial-card {
     right: 10px;
     left: 10px;
     width: auto;
-    bottom: 12px;
+    top: calc(var(--header-h) + env(safe-area-inset-top, 0px) + 8px);
+    bottom: auto;
+    max-height: calc(100dvh - var(--header-h) - env(safe-area-inset-top, 0px) - 22px);
+    overflow: auto;
+    border-radius: 14px;
+    padding: 14px;
   }
 
   .tutorial-overlay.welcome-mode .tutorial-card {
@@ -1077,8 +1157,36 @@ body.light-theme .tutorial-highlight {
     right: 10px;
     transform: none;
     width: auto;
-    bottom: 12px;
+    top: calc(var(--header-h) + env(safe-area-inset-top, 0px) + 8px);
+    bottom: auto;
     padding: 18px;
+  }
+
+  .tutorial-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .tutorial-actions .btn {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .tutorial-highlight {
+    border-radius: 10px;
+  }
+}
+
+@media (max-width: 480px) {
+  .tutorial-card {
+    top: calc(var(--header-h) + env(safe-area-inset-top, 0px) + 6px);
+    bottom: auto;
+    max-height: calc(100dvh - var(--header-h) - env(safe-area-inset-top, 0px) - 14px);
+  }
+
+  .tutorial-actions {
+    grid-template-columns: 1fr;
   }
 }
 

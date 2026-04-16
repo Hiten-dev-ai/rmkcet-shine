@@ -82,6 +82,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('click', (e) => {
     if (!sidebar || window.innerWidth > 768) return;
+    if (document.body.classList.contains('tutorial-mobile-sidebar-lock')) return;
     const clickedInsideSidebar = sidebar.contains(e.target);
     const clickedToggle = mToggle && mToggle.contains(e.target);
     if (sidebar.classList.contains('open') && !clickedInsideSidebar && !clickedToggle) {
@@ -116,7 +117,17 @@ document.addEventListener('DOMContentLoaded', () => {
 // ---------- Modals ----------
 function openModal(id) {
   const overlay = document.getElementById('modal-' + id);
-  if (overlay) overlay.classList.add('open');
+  if (!overlay) return;
+
+  // Keep modal overlays at document root so they are never clipped by table wrappers.
+  if (overlay.parentElement !== document.body) {
+    document.body.appendChild(overlay);
+  }
+
+  overlay.classList.add('open');
+  overlay.scrollTop = 0;
+  const modal = overlay.querySelector('.modal');
+  if (modal) modal.scrollTop = 0;
 }
 
 function closeModal(id) {

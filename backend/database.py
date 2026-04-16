@@ -504,13 +504,25 @@ def update_user(email, **kwargs):
 
 
 def delete_user(email):
+    """Delete a user and all dependent rows that have FK references to users(email)."""
     conn = get_conn()
-    conn.execute("DELETE FROM counselor_students WHERE counselor_email=?", (email,))
-    conn.execute("DELETE FROM active_sessions WHERE user_email=?", (email,))
-    conn.execute("DELETE FROM sent_messages WHERE counselor_email=?", (email,))
-    conn.execute("DELETE FROM users WHERE email=?", (email,))
-    conn.commit()
-    conn.close()
+    try:
+        # Remove scoped-admin mappings first (HOD/DEO accounts).
+        conn.execute("DELETE FROM chief_admin_scopes WHERE chief_admin_email=?", (email,))
+
+        # Remove counselor-linked entities.
+        conn.execute("DELETE FROM counselor_mark_overrides WHERE counselor_email=?", (email,))
+        conn.execute("DELETE FROM counselor_students WHERE counselor_email=?", (email,))
+        conn.execute("DELETE FROM sent_messages WHERE counselor_email=?", (email,))
+
+        # Remove user security/session entities.
+        conn.execute("DELETE FROM password_reset_tokens WHERE user_email=?", (email,))
+        conn.execute("DELETE FROM active_sessions WHERE user_email=?", (email,))
+
+        conn.execute("DELETE FROM users WHERE email=?", (email,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def lock_user(email, reason="Locked by admin"):
@@ -1045,6 +1057,7 @@ def get_app_config():
         # OTP Security
         "require_otp_on_password_reset": "false",
         "require_otp_on_login": "false",
+        "disable_default_admin_on_new_system_admin": "false",
         
         # Theme Colors - Primary
         "color_primary": "#667eea",

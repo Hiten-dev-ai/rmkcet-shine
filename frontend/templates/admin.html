@@ -70,8 +70,48 @@
       <div class="metric-icon"><i class="fas fa-paper-plane"></i></div>
     </div>
   </div>
+  {% if is_system_admin %}
+  <div class="card mb-3" style="margin-top:18px;">
+    <div class="card-title"><i class="fas fa-file-import"></i> Bulk Counselor Upload</div>
+    <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:12px;">
+      Upload counselors from template. Student list link column is ignored. Existing counselor accounts are updated; missing accounts are created.
+    </p>
+    <form method="POST" action="{{ url_for('api_bulk_create_counselors') }}" enctype="multipart/form-data" autocomplete="off">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Counsellor Excel</label>
+          <div class="file-input-wrapper">
+            <i class="fas fa-file-excel"></i>
+            <div class="file-text">Upload counsellor_list.xlsx template</div>
+            <div class="file-name" id="bulkCounsellorFileLabel"></div>
+            <input type="file" name="counsellor_file" accept=".xlsx,.xls" required onchange="showFileName(this, 'bulkCounsellorFileLabel')">
+          </div>
+          <a class="btn btn-outline btn-sm" style="margin-top:8px;" href="{{ url_for('static', filename='assets/counsellor_list.xlsx') }}" download>
+            <i class="fas fa-download"></i> Download Template
+          </a>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Assign Year</label>
+          <select class="form-control" name="year_level">
+            <option value="1" selected>1st Year</option>
+            <option value="2">2nd Year</option>
+            <option value="3">3rd Year</option>
+            <option value="4">4th Year</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="max-width:340px;">
+        <label class="form-label">Override Password (Optional)</label>
+        <input type="password" class="form-control" name="override_password" minlength="6" placeholder="Leave blank to use file password">
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Run Bulk Upload</button>
+    </form>
+  </div>
+  {% endif %}
+
   <!-- Create User -->
-  <div class="card mb-3" id="registerUserCard" style="margin-top:18px;">
+  {% if not is_principal %}
+  <div class="card mb-3" id="registerUserCard">
     <div class="card-title"><i class="fas fa-user-plus"></i> Register New User</div>
     <form method="POST" action="{{ url_for('api_create_user') }}" enctype="multipart/form-data" autocomplete="off">
       <div class="form-row">
@@ -109,12 +149,14 @@
           <label class="form-label">Role</label>
           <select class="form-control" name="role" id="createUserRole" onchange="toggleCreateUserFields()">
             <option value="counselor">Counselor</option>
-            <option value="hod">HOD</option>
-            <option value="deo">DEO</option>
             {% if is_system_admin %}
-            <option value="principal">Principal</option>
+            <option value="hod">HOD</option>
+            {% endif %}
+            {% if is_system_admin or is_chief_admin %}
+            <option value="deo">DEO</option>
             {% endif %}
             {% if is_system_admin %}
+            <option value="principal">Principal</option>
             <option value="admin">System Admin</option>
             {% endif %}
           </select>
@@ -181,9 +223,10 @@
       <button type="submit" class="btn btn-primary"><i class="fas fa-user-plus"></i> Create User</button>
     </form>
   </div>
+  {% endif %}
 
   <!-- User list -->
-  <h3 class="section-title"><i class="fas fa-list"></i> All Users ({{ users|length }})</h3>
+  <h3 class="section-title"><i class="fas fa-list"></i> {% if is_principal %}Users Directory{% elif is_deo %}Counselors In Scope{% else %}All Users{% endif %} ({{ users|length }})</h3>
   
   <!-- Global Action Bar -->
   <div class="card mb-3">
@@ -218,10 +261,12 @@
       </select>
       <select class="form-control" id="filterRole" onchange="filterUserTable()" style="max-width:160px;">
         <option value="">All Account Types</option>
+        {% if not is_deo %}
         <option value="admin">System Admin</option>
         <option value="hod">HOD</option>
         <option value="deo">DEO</option>
         <option value="principal">Principal</option>
+        {% endif %}
         <option value="counselor">Counselor</option>
       </select>
       <select class="form-control" id="filterStatus" onchange="filterUserTable()" style="max-width:140px;">
@@ -274,8 +319,12 @@
             {% endif %}
           {% endfor %}
         {% endif %}
-        {% set can_edit_user = (u.role != 'principal') and (is_system_admin or (is_chief_admin and ((u.role == 'counselor' and scope_key in chief_scope_keys) or (u.role == 'deo' and scoped_role_has_overlap) or (u.role in ['chief_admin', 'hod'] and chief_admin_has_overlap)))) %}
-        {% set can_manage_user = (is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or (is_chief_admin and can_edit_user) %}
+        {% set is_target_counselor = (u.role == 'counselor') %}
+        {% set can_hod_manage_user = is_chief_admin and ((u.role == 'counselor' and scope_key in chief_scope_keys) or (u.role == 'deo' and scoped_role_has_overlap) or (u.role in ['chief_admin', 'hod'] and chief_admin_has_overlap)) %}
+        {% set can_deo_manage_user = is_deo and is_target_counselor and (scope_key in chief_scope_keys) %}
+        {% set can_edit_user = (not is_principal) and (u.role != 'principal') and (is_system_admin or can_hod_manage_user or can_deo_manage_user) %}
+        {% set can_manage_user = (not is_principal) and ((is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or can_hod_manage_user or can_deo_manage_user) %}
+        {% set can_principal_view_students = is_principal and is_target_counselor %}
         <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{% if u.is_active and not u.is_locked %}active{% else %}inactive{% endif %}" data-user-created="{{ u.created_at or '' }}">
           <td>
             <strong>{{ u.name }}</strong>
@@ -304,7 +353,13 @@
           </td>
           <td style="text-align:right;">
             <div class="btn-group" style="justify-content:flex-end;">
-              {% if can_edit_user %}
+              {% if can_principal_view_students %}
+              <button class="btn btn-outline btn-sm" onclick="openModal('principal-view-students-{{ loop.index }}')" title="View counselor students">
+                <i class="fas fa-users"></i> View Students
+              </button>
+              {% elif is_principal %}
+              <span class="badge badge-info">View Only</span>
+              {% elif can_edit_user %}
               <button class="btn btn-outline btn-sm" onclick="openModal('edit-{{ loop.index }}')" title="Edit Registration Fields">
                 <i class="fas fa-edit"></i> Edit
               </button>
@@ -619,6 +674,36 @@
               {% endfor %}
               {% if not students_map.get(u.email, []) %}
               <tr><td colspan="4" class="text-center text-muted" style="padding:16px;">No students assigned yet.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if is_principal and u.role == 'counselor' %}
+    <div class="modal-overlay" id="modal-principal-view-students-{{ loop.index }}">
+      <div class="modal" style="max-width:860px;max-height:88vh;overflow:auto;">
+        <div class="modal-header">
+          <h3><i class="fas fa-users"></i> Counselor Students - {{ u.name }}</h3>
+          <button class="modal-close" onclick="closeModal('principal-view-students-{{ loop.index }}')">&times;</button>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr><th>Reg No</th><th>Name</th><th>WhatsApp No</th></tr>
+            </thead>
+            <tbody>
+              {% for st in students_map.get(u.email, []) %}
+              <tr>
+                <td><strong>{{ st.reg_no }}</strong></td>
+                <td>{{ st.student_name }}</td>
+                <td>{{ st.parent_phone or '—' }}</td>
+              </tr>
+              {% endfor %}
+              {% if not students_map.get(u.email, []) %}
+              <tr><td colspan="3" class="text-center text-muted" style="padding:16px;">No students assigned for this counselor.</td></tr>
               {% endif %}
             </tbody>
           </table>
@@ -993,7 +1078,10 @@
 
 <!-- ==================== DASHBOARD TAB ==================== -->
 <div class="tab-panel {% if current_tab == 'dashboard' %}active{% endif %}" id="tab-dashboard">
-  <h3 class="section-title"><i class="fas fa-gauge"></i> Principal Dashboard</h3>
+  {% set dash_title = 'Principal Dashboard' if is_principal else 'HOD Dashboard' %}
+  {% set dash_completion = dashboard_data.get('completion_overview', {}) if dashboard_data else {} %}
+  {% set overall_completion_pct = dash_completion.get('overall', 0) %}
+  <h3 class="section-title"><i class="fas fa-gauge"></i> {{ dash_title }}</h3>
   <div class="metrics-grid mb-3">
     <div class="metric-card">
       <div class="metric-label">Departments Covered</div>
@@ -1004,10 +1092,38 @@
       <div class="metric-value">{{ report_tests|length }}</div>
     </div>
     <div class="metric-card">
+      <div class="metric-label">Overall Completion</div>
+      <div class="metric-value">{{ overall_completion_pct }}%</div>
+    </div>
+    <div class="metric-card">
       <div class="metric-label">Total Messages</div>
       <div class="metric-value">{{ msg_stats.total }}</div>
     </div>
   </div>
+
+  <div class="card mb-3" id="adminDashboardData" data-dashboard='{{ (dashboard_data or {})|tojson|forceescape }}' style="display:none;"></div>
+
+  <div class="form-row mb-3">
+    <div class="card" style="padding:14px;">
+      <div class="card-title"><i class="fas fa-building"></i> Department Completion %</div>
+      <canvas id="departmentCompletionChart" height="120"></canvas>
+    </div>
+    <div class="card" style="padding:14px;">
+      <div class="card-title"><i class="fas fa-users-between-lines"></i> Counselor Completion By Scope</div>
+      <canvas id="scopeCompletionChart" height="120"></canvas>
+    </div>
+  </div>
+
+  <div class="card mb-3" style="padding:14px;">
+    <div class="card-title"><i class="fas fa-chart-bar"></i> Department Average Marks</div>
+    <canvas id="departmentGpaChart" height="110"></canvas>
+  </div>
+
+  <div class="card mb-3" style="padding:14px;">
+    <div class="card-title"><i class="fas fa-table-cells-large"></i> Semester-Test Adjusted Performance Matrix</div>
+    <canvas id="testMatrixChart" height="110"></canvas>
+  </div>
+
   <div class="card">
     <div class="card-title"><i class="fas fa-trophy"></i> Top Counselors (Completion)</div>
     <div class="table-wrapper">
@@ -1031,6 +1147,11 @@
         </tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card" style="padding:12px;max-width:300px;margin:14px auto 0;">
+    <div class="card-title" style="font-size:.9rem;"><i class="fas fa-circle-nodes"></i> Overall Completion Split</div>
+    <canvas id="overallCompletionChart" height="78"></canvas>
   </div>
 </div>
 
@@ -1350,6 +1471,24 @@
     {% endif %}
   </div>
   {% endif %}
+
+  <div class="card mb-3" id="smtpStatusCard" data-smtp-state="{{ smtp_status.state }}">
+    <div class="card-title"><i class="fas fa-envelope-circle-check"></i> SMTP Status</div>
+    <p style="font-size:.84rem;color:var(--text-dim);margin-bottom:10px;">
+      Current status: <strong id="smtpStatusLabel">{{ smtp_status.label }}</strong>
+    </p>
+    <p id="smtpStatusDetail" style="font-size:.8rem;color:var(--text-dim);margin-bottom:14px;word-break:break-word;">
+      {{ smtp_status.detail }}
+    </p>
+    <div class="btn-group" style="display:flex;gap:10px;flex-wrap:wrap;">
+      <form method="POST" action="{{ url_for('api_config_smtp_refresh') }}" style="margin:0;">
+        <button type="submit" class="btn btn-outline btn-sm"><i class="fas fa-rotate"></i> Refresh SMTP Status</button>
+      </form>
+      <form method="POST" action="{{ url_for('api_config_smtp_test') }}" style="margin:0;">
+        <button type="submit" class="btn btn-primary btn-sm"><i class="fas fa-paper-plane"></i> Send Test Email</button>
+      </form>
+    </div>
+  </div>
   
   <form method="POST" action="{{ url_for('api_update_config') }}">
     <!-- Session Settings -->
@@ -1392,6 +1531,12 @@
         <input type="number" class="form-control" name="max_concurrent_sessions" 
                value="{{ app_config.max_concurrent_sessions }}" min="1" max="5" style="max-width:120px;">
       </div>
+
+      <div class="form-check" style="margin-top:10px;">
+        <input type="checkbox" name="disable_default_admin_on_new_system_admin" id="disableDefaultAdminOnNewSystemAdmin"
+               {% if app_config.disable_default_admin_on_new_system_admin == 'true' %}checked{% endif %}>
+        <label for="disableDefaultAdminOnNewSystemAdmin">Auto-disable default system admin after creating another system admin</label>
+      </div>
     </div>
 
     <div class="card mb-3" id="tutorialSettingsCard">
@@ -1429,6 +1574,31 @@
           <label for="tutorialPrincipalEnabled">Principal Tutorial</label>
         </div>
       </div>
+    </div>
+
+    <div class="card mb-3" id="otpPolicySettingsCard">
+      <div class="card-title"><i class="fas fa-user-shield"></i> OTP Security Policy</div>
+      <p style="font-size:.84rem;color:var(--text-dim);margin-bottom:12px;">
+        Configure OTP requirements globally. Only the default admin account is exempt; created system admins follow OTP rules.
+      </p>
+
+      <div id="otpPolicyToggleGroup" class="tutorial-toggle-group">
+        <div class="form-check" style="margin-bottom:10px;">
+          <input type="checkbox" name="require_otp_on_password_reset" id="requireOtpOnPasswordReset"
+                 {% if app_config.require_otp_on_password_reset == 'true' %}checked{% endif %}>
+          <label for="requireOtpOnPasswordReset">Require OTP for password reset (except default admin)</label>
+        </div>
+
+        <div class="form-check">
+          <input type="checkbox" name="require_otp_on_login" id="requireOtpOnLogin"
+                 {% if app_config.require_otp_on_login == 'true' %}checked{% endif %}>
+          <label for="requireOtpOnLogin">Require OTP for login (except default admin)</label>
+        </div>
+      </div>
+
+      <p id="otpPolicySmtpNote" style="font-size:.78rem;color:var(--warning);margin-top:10px;display:none;">
+        OTP options are locked because SMTP is not ready.
+      </p>
     </div>
     
     <div class="card mb-3">
@@ -1649,8 +1819,10 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 const TEST_VIEW_CACHE = {};
+const DASHBOARD_CHARTS = [];
 const ADMIN_TEST_VIEW_IGNORED_KEYS = new Set([
   'regno', 'registernumber', 'name', 'studentname', 'department', 'section', 'batch', 'semester',
   'test', 'total', 'overall', 'percentage', 'grade', 'result', 'status', 'parentphone', 'phone',
@@ -1660,6 +1832,140 @@ const ADMIN_TEST_VIEW_IGNORED_KEYS = new Set([
 
 function clearFilters() {
   window.location.href = '{{ url_for(panel_endpoint) }}?tab=reports';
+}
+
+function clearAdminDashboardCharts() {
+  while (DASHBOARD_CHARTS.length) {
+    const chart = DASHBOARD_CHARTS.pop();
+    if (chart && typeof chart.destroy === 'function') {
+      chart.destroy();
+    }
+  }
+}
+
+function parseAdminDashboardData() {
+  const holder = document.getElementById('adminDashboardData');
+  if (!holder) return null;
+  const raw = holder.getAttribute('data-dashboard') || '{}';
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function createChart(id, config) {
+  const canvas = document.getElementById(id);
+  if (!canvas || typeof Chart === 'undefined') return;
+  DASHBOARD_CHARTS.push(new Chart(canvas, config));
+}
+
+function renderAdminDashboardCharts() {
+  const dashboardTab = document.getElementById('tab-dashboard');
+  if (!dashboardTab) return;
+  if (getCurrentAdminTab() !== 'dashboard') return;
+
+  clearAdminDashboardCharts();
+
+  const payload = parseAdminDashboardData() || {};
+  const completion = payload.completion_overview || {};
+  const counselorActivity = payload.counselor_activity || {};
+  const departmentGpa = payload.department_gpa || {};
+  const matrix = payload.test_histogram || {};
+
+  const overall = Number(completion.overall || 0);
+  const pending = Math.max(0, 100 - overall);
+
+  createChart('overallCompletionChart', {
+    type: 'doughnut',
+    data: {
+      labels: ['Completed', 'Pending'],
+      datasets: [{
+        data: [overall, pending],
+        backgroundColor: ['rgba(34,197,94,.8)', 'rgba(59,130,246,.35)'],
+        borderColor: ['rgba(34,197,94,1)', 'rgba(59,130,246,1)'],
+        borderWidth: 1,
+        radius: '82%',
+        cutout: '72%',
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10 } } },
+    },
+  });
+
+  createChart('departmentCompletionChart', {
+    type: 'bar',
+    data: {
+      labels: completion.department_labels || [],
+      datasets: [{
+        label: 'Completion %',
+        data: completion.department_values || [],
+        backgroundColor: 'rgba(59,130,246,.55)',
+        borderColor: 'rgba(59,130,246,1)',
+        borderWidth: 1,
+      }],
+    },
+    options: { scales: { y: { beginAtZero: true, max: 100 } } },
+  });
+
+  createChart('scopeCompletionChart', {
+    type: 'line',
+    data: {
+      labels: counselorActivity.labels || [],
+      datasets: [{
+        label: 'Scope Completion %',
+        data: counselorActivity.values || [],
+        borderColor: 'rgba(14,165,233,1)',
+        backgroundColor: 'rgba(14,165,233,.18)',
+        fill: true,
+        tension: 0.28,
+      }],
+    },
+    options: { scales: { y: { beginAtZero: true, max: 100 } } },
+  });
+
+  createChart('departmentGpaChart', {
+    type: 'bar',
+    data: {
+      labels: departmentGpa.labels || [],
+      datasets: [{
+        label: 'Average Marks',
+        data: departmentGpa.values || [],
+        backgroundColor: 'rgba(99,102,241,.52)',
+        borderColor: 'rgba(99,102,241,1)',
+        borderWidth: 1,
+      }],
+    },
+    options: { scales: { y: { beginAtZero: true, max: 100 } } },
+  });
+
+  createChart('testMatrixChart', {
+    type: 'bar',
+    data: {
+      labels: matrix.labels || [],
+      datasets: [{
+        label: 'Adjusted Marks',
+        data: matrix.values || [],
+        backgroundColor: 'rgba(37,99,235,.58)',
+        borderColor: 'rgba(37,99,235,1)',
+        borderWidth: 1,
+      }, {
+        label: 'Raw Avg Marks',
+        data: matrix.raw_values || [],
+        backgroundColor: 'rgba(148,163,184,.34)',
+        borderColor: 'rgba(148,163,184,.9)',
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'bottom' } },
+      scales: { y: { beginAtZero: true, max: 100 } },
+    },
+  });
 }
 
 function toggleSelectAllMessages(checked) {
@@ -2219,6 +2525,19 @@ function syncTutorialRoleToggleState() {
   });
 }
 
+function syncOtpPolicyAvailability(smtpState) {
+  const group = document.getElementById('otpPolicyToggleGroup');
+  const note = document.getElementById('otpPolicySmtpNote');
+  if (!group) return;
+
+  const normalized = String(smtpState || '').toLowerCase();
+  const smtpReady = normalized === 'ready' || normalized === 'test';
+
+  group.classList.toggle('is-disabled', !smtpReady);
+  group.style.pointerEvents = smtpReady ? '' : 'none';
+  if (note) note.style.display = smtpReady ? 'none' : 'block';
+}
+
 function syncAdminPostFormsWithTab() {
   const currentTab = adminScriptData ? (adminScriptData.getAttribute('data-current-tab') || 'reports') : 'reports';
   document.querySelectorAll('form[method="POST"], form[method="post"]').forEach((form) => {
@@ -2236,13 +2555,8 @@ function syncAdminPostFormsWithTab() {
 }
 
 function moveRegisterFormBelowUserList() {
-  const usersPanel = document.getElementById('tab-users');
-  const registerCard = document.getElementById('registerUserCard');
-  const userTableWrap = usersPanel ? usersPanel.querySelector('.table-wrapper') : null;
-  if (!usersPanel || !registerCard || !userTableWrap) return;
-  if (registerCard.compareDocumentPosition(userTableWrap) & Node.DOCUMENT_POSITION_FOLLOWING) {
-    userTableWrap.insertAdjacentElement('afterend', registerCard);
-  }
+  // Kept as no-op intentionally so Register User stays above the users list.
+  return;
 }
 
 function bindActivityAutoFilter() {
@@ -2397,11 +2711,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (idx) toggleEditUserFields(idx);
   });
   syncTutorialRoleToggleState();
+  const smtpStateFromCard = document.getElementById('smtpStatusCard')?.getAttribute('data-smtp-state') || '';
+  syncOtpPolicyAvailability(smtpStateFromCard);
   applyActivityProgressWidths();
   syncAdminPostFormsWithTab();
-  moveRegisterFormBelowUserList();
   bindActivityAutoFilter();
+  renderAdminDashboardCharts();
   reopenRequestedManageModal();
+});
+
+document.addEventListener('smtp-status-updated', (event) => {
+  const state = event?.detail?.state || '';
+  syncOtpPolicyAvailability(state);
 });
 </script>
 {% endblock %}

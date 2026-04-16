@@ -38,6 +38,33 @@
     </form>
   </div>
   {% else %}
+  {% if otp_challenge %}
+  <form method="POST" action="{{ url_for('verify_login_otp') }}" autocomplete="off">
+    <div class="form-group">
+      <label class="form-label" for="otp_code">Login OTP</label>
+      <input type="text" class="form-control" id="otp_code" name="otp_code"
+             placeholder="Enter 6-digit OTP" required minlength="6" maxlength="6" autofocus>
+      <small style="color:var(--text-dim);font-size:.75rem;margin-top:4px;display:block;">
+        OTP sent to {{ otp_email_masked or 'your email' }}
+      </small>
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="margin-top:8px;">
+      <i class="fas fa-shield-check"></i> Verify OTP
+    </button>
+  </form>
+
+  <div class="d-flex" style="gap:10px;margin-top:10px;">
+    <form method="POST" action="{{ url_for('resend_login_otp') }}" style="margin:0;flex:1;">
+      <button type="submit" class="btn btn-outline" style="width:100%;">
+        <i class="fas fa-paper-plane"></i> Resend OTP
+      </button>
+    </form>
+    <a href="{{ url_for('login') }}" class="btn btn-outline" style="flex:1;display:flex;align-items:center;justify-content:center;">
+      <i class="fas fa-arrow-left"></i>&nbsp;Back
+    </a>
+  </div>
+  {% else %}
   <form method="POST" action="{{ url_for('login') }}" autocomplete="on">
     <div class="form-group">
       <label class="form-label" for="identifier">Email or Name</label>
@@ -65,6 +92,15 @@
       <i class="fas fa-sign-in-alt"></i> Sign In
     </button>
   </form>
+
+  {% if require_otp_on_password_reset %}
+  <div style="margin-top:10px;text-align:center;">
+    <a href="{{ url_for('forgot_password') }}" class="btn btn-outline" style="width:100%;">
+      <i class="fas fa-key"></i> Forgot Password
+    </a>
+  </div>
+  {% endif %}
+  {% endif %}
   {% endif %}
 
   <div style="margin-top:24px;text-align:center;">

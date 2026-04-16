@@ -43,9 +43,23 @@
   </div>
 </div>
 
+<div id="counselorDashboardData" data-dashboard='{{ (counselor_dashboard_data or {})|tojson|forceescape }}' style="display:none;"></div>
+
 {% set current_tab = request.args.get('tab', 'recent-tests') %}
 <div class="tab-panel {% if current_tab == 'recent-tests' %}active{% endif %}" id="tab-recent-tests">
   <h3 class="section-title"><i class="fas fa-gauge"></i> Dashboard - Recent Tests</h3>
+
+  <div class="form-row mb-3">
+    <div class="card" style="padding:14px;">
+      <div class="card-title"><i class="fas fa-user-graduate"></i> Student Average Performance</div>
+      <canvas id="counselorStudentChart" height="120"></canvas>
+    </div>
+    <div class="card" style="padding:14px;">
+      <div class="card-title"><i class="fas fa-layer-group"></i> Semester-Test Adjusted Performance</div>
+      <canvas id="counselorMatrixChart" height="120"></canvas>
+    </div>
+  </div>
+
   <div class="table-wrapper">
     <table>
       <thead>
@@ -249,6 +263,94 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
+const COUNSELOR_CHARTS = [];
+
+function clearCounselorCharts() {
+  while (COUNSELOR_CHARTS.length) {
+    const chart = COUNSELOR_CHARTS.pop();
+    if (chart && typeof chart.destroy === 'function') {
+      chart.destroy();
+    }
+  }
+}
+
+function getCounselorDashboardData() {
+  const holder = document.getElementById('counselorDashboardData');
+  if (!holder) return null;
+  const raw = holder.getAttribute('data-dashboard') || '{}';
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function renderCounselorDashboardCharts() {
+  if (typeof Chart === 'undefined') return;
+  const params = new URLSearchParams(window.location.search);
+  const activeTab = params.get('tab') || 'recent-tests';
+  if (activeTab !== 'recent-tests') return;
+  clearCounselorCharts();
+
+  const payload = getCounselorDashboardData() || {};
+  const studentActivity = payload.student_activity || {};
+  const matrix = payload.test_histogram || {};
+
+  const studentCanvas = document.getElementById('counselorStudentChart');
+  if (studentCanvas) {
+    COUNSELOR_CHARTS.push(new Chart(studentCanvas, {
+      type: 'bar',
+      data: {
+        labels: studentActivity.labels || [],
+        datasets: [{
+          label: 'Average Marks',
+          data: studentActivity.values || [],
+          backgroundColor: 'rgba(59,130,246,.56)',
+          borderColor: 'rgba(59,130,246,1)',
+          borderWidth: 1,
+        }],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, max: 100 } },
+      },
+    }));
+  }
+
+  const matrixCanvas = document.getElementById('counselorMatrixChart');
+  if (matrixCanvas) {
+    COUNSELOR_CHARTS.push(new Chart(matrixCanvas, {
+      type: 'line',
+      data: {
+        labels: matrix.labels || [],
+        datasets: [{
+          label: 'Adjusted Marks',
+          data: matrix.values || [],
+          borderColor: 'rgba(37,99,235,1)',
+          backgroundColor: 'rgba(37,99,235,.16)',
+          fill: true,
+          tension: 0.22,
+        }, {
+          label: 'Coverage %',
+          data: matrix.coverage || [],
+          borderColor: 'rgba(34,197,94,1)',
+          backgroundColor: 'rgba(34,197,94,.06)',
+          fill: false,
+          tension: 0.2,
+        }],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'bottom' } },
+        scales: { y: { beginAtZero: true, max: 100 } },
+      },
+    }));
+  }
+}
+
+document.addEventListener('DOMContentLoaded', renderCounselorDashboardCharts);
 </script>
 {% endblock %}

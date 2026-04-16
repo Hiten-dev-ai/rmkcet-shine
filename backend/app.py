@@ -10,6 +10,7 @@ import json
 import hashlib
 import shutil
 import sqlite3
+import smtplib
 import uuid
 from datetime import datetime, timedelta
 from functools import wraps
@@ -25,7 +26,9 @@ from fpdf import FPDF
 import database as db
 from config import (
     SECRET_KEY, APP_NAME, APP_VERSION, DATA_DIR, DATABASE_FILE,
-    MESSAGE_TEMPLATE, COUNTRY_CODE, DEPT_REG_PATTERNS, OTP_EXPIRY_SECONDS
+    MESSAGE_TEMPLATE, COUNTRY_CODE, DEPT_REG_PATTERNS, OTP_EXPIRY_SECONDS,
+    SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, TEST_MODE,
+    DEFAULT_ADMIN
 )
 from models.test_metadata import normalize_test_name
 from utils.email_helper import send_email
@@ -49,6 +52,7 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
 db.init_database()
 
 ALLOWED_TEST_NAMES = {"IAT 1", "IAT 2", "MODEL EXAM"}
+_SMTP_STATUS_CACHE = {"checked_at": None, "result": None}
 
 
 # ---------------------------------------------------------------------------
@@ -187,17 +191,28 @@ def _get_security_config_flags():
     return {
         "require_otp_on_password_reset": _is_truthy(cfg.get("require_otp_on_password_reset", "false")),
         "require_otp_on_login": _is_truthy(cfg.get("require_otp_on_login", "false")),
+        "disable_default_admin_on_new_system_admin": _is_truthy(cfg.get("disable_default_admin_on_new_system_admin", "false")),
     }
 
 
-def _is_login_otp_required_for_role(role):
-    flags = _get_security_config_flags()
-    return bool(flags.get("require_otp_on_login") and not _is_system_admin(role))
+def _get_default_admin_email():
+    return str((DEFAULT_ADMIN or {}).get("email") or "").strip().lower()
 
 
-def _is_password_reset_otp_required_for_role(role):
+def _is_default_admin_user(email, role=None):
+    if role is not None and not _is_system_admin(role):
+        return False
+    return str(email or "").strip().lower() == _get_default_admin_email()
+
+
+def _is_login_otp_required_for_user(role, email):
     flags = _get_security_config_flags()
-    return bool(flags.get("require_otp_on_password_reset") and not _is_system_admin(role))
+    return bool(flags.get("require_otp_on_login") and not _is_default_admin_user(email, role))
+
+
+def _is_password_reset_otp_required_for_user(role, email):
+    flags = _get_security_config_flags()
+    return bool(flags.get("require_otp_on_password_reset") and not _is_default_admin_user(email, role))
 
 
 def _send_otp_email(target_email, otp_code, purpose):
@@ -211,6 +226,83 @@ def _send_otp_email(target_email, otp_code, purpose):
         f"<p>RMKCET SHINE</p>"
     )
     return send_email(target_email, subject, body, html=True)
+
+
+def _resolve_smtp_status(force_refresh=False):
+    now = datetime.now()
+    cached_at = _SMTP_STATUS_CACHE.get("checked_at")
+    if (
+        not force_refresh
+        and cached_at is not None
+        and (now - cached_at).total_seconds() < 180
+        and _SMTP_STATUS_CACHE.get("result")
+    ):
+        return dict(_SMTP_STATUS_CACHE["result"])
+
+    if TEST_MODE:
+        result = {
+            "state": "test",
+            "label": "SMTP Test Mode",
+            "icon": "fa-flask",
+            "detail": "TEST_MODE is enabled. SMTP delivery is bypassed.",
+        }
+    elif not SMTP_USERNAME or not SMTP_PASSWORD:
+        result = {
+            "state": "missing",
+            "label": "SMTP Missing",
+            "icon": "fa-triangle-exclamation",
+            "detail": "SMTP username/password are not configured.",
+        }
+    else:
+        try:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=6) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            result = {
+                "state": "ready",
+                "label": "SMTP Ready",
+                "icon": "fa-circle-check",
+                "detail": f"Connected to {SMTP_SERVER}:{SMTP_PORT} as {SMTP_USERNAME}",
+            }
+        except Exception as exc:
+            result = {
+                "state": "error",
+                "label": "SMTP Error",
+                "icon": "fa-circle-xmark",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
+    _SMTP_STATUS_CACHE["checked_at"] = now
+    _SMTP_STATUS_CACHE["result"] = dict(result)
+    return result
+
+
+def _get_cached_smtp_status():
+    cached = _SMTP_STATUS_CACHE.get("result")
+    if cached:
+        return dict(cached)
+    if TEST_MODE:
+        return {
+            "state": "test",
+            "label": "SMTP Test Mode",
+            "icon": "fa-flask",
+            "detail": "TEST_MODE is enabled. SMTP delivery is bypassed.",
+        }
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        return {
+            "state": "missing",
+            "label": "SMTP Missing",
+            "icon": "fa-triangle-exclamation",
+            "detail": "SMTP username/password are not configured.",
+        }
+    return {
+        "state": "unknown",
+        "label": "SMTP Pending",
+        "icon": "fa-clock",
+        "detail": "Status check runs in background after login.",
+    }
 
 
 def _panel_endpoint_for_role(role):
@@ -776,6 +868,15 @@ def inject_globals():
         tutorial_flags.get("master") and tutorial_flags.get(tutorial_role_key, False)
     )
     security_flags = _get_security_config_flags()
+    smtp_status = _get_cached_smtp_status() if _is_system_admin(current_role) else {
+        "state": "unknown",
+        "label": "SMTP",
+        "icon": "fa-envelope",
+        "detail": "SMTP status is visible to system admin only.",
+    }
+    password_reset_otp_for_user = _is_password_reset_otp_required_for_user(current_role, current_email)
+    login_otp_for_user = _is_login_otp_required_for_user(current_role, current_email)
+    is_default_admin_user = _is_default_admin_user(current_email, current_role)
 
     return {
         "app_name": APP_NAME,
@@ -793,6 +894,10 @@ def inject_globals():
         "app_config": app_config,
         "require_otp_on_password_reset": bool(security_flags.get("require_otp_on_password_reset")),
         "require_otp_on_login": bool(security_flags.get("require_otp_on_login")),
+        "password_reset_otp_for_user": bool(password_reset_otp_for_user),
+        "login_otp_for_user": bool(login_otp_for_user),
+        "is_default_admin_user": bool(is_default_admin_user),
+        "smtp_status": smtp_status,
         "now": datetime.now(),
     }
 
@@ -1108,7 +1213,7 @@ def login():
         if force_logout:
             db.force_logout_by_email(email, "new_device_login")
 
-        if _is_login_otp_required_for_role(user.get("role")):
+        if _is_login_otp_required_for_user(user.get("role"), email):
             otp_code = generate_otp(6)
             if not _send_otp_email(email, otp_code, "Login"):
                 flash("OTP delivery failed. Verify SMTP settings and try again.", "error")
@@ -1222,7 +1327,7 @@ def forgot_password():
                 flash("Account email is not configured. Contact system admin.", "error")
                 return render_template("forgot_password.html", stage="request")
 
-            otp_required = _is_password_reset_otp_required_for_role(user.get("role"))
+            otp_required = _is_password_reset_otp_required_for_user(user.get("role"), email)
             reset_payload = {
                 "email": email,
                 "verified": False,
@@ -2425,6 +2530,23 @@ def api_create_user():
         email, password, name, role, department, max_students, can_upload, year_level
     )
 
+    if ok and role == "admin":
+        flags = _get_security_config_flags()
+        should_disable_default = bool(flags.get("disable_default_admin_on_new_system_admin"))
+        default_admin_email = _get_default_admin_email()
+        created_email = str(email or "").strip().lower()
+        if should_disable_default and default_admin_email and created_email != default_admin_email:
+            default_admin = db.get_user(default_admin_email)
+            if default_admin:
+                db.update_user(
+                    default_admin_email,
+                    is_active=0,
+                    is_locked=1,
+                    lock_reason="Disabled automatically after another system admin was created",
+                )
+                db.force_logout_user(default_admin_email, "default_admin_auto_disabled")
+                flash("Default system admin was disabled by policy.", "warning")
+
     if ok and role in {"hod", "deo"}:
         db.set_chief_admin_scopes(email, scope_pairs or [(department, year_level)])
 
@@ -2627,7 +2749,15 @@ def api_delete_user(email):
     if _is_deo(actor_role) and not _can_deo_touch_user(actor_email, target):
         flash("You can delete only counselors in your assigned scope.", "error")
         return _redirect_admin_back("users")
-    db.delete_user(email)
+    try:
+        db.delete_user(email)
+    except sqlite3.IntegrityError as exc:
+        flash(f"User delete blocked by related records: {exc}", "error")
+        return _redirect_admin_back("users")
+    except Exception as exc:
+        flash(f"Unable to delete user right now: {exc}", "error")
+        return _redirect_admin_back("users")
+
     flash("User deleted.", "success")
     return _redirect_admin_back("users")
 
@@ -2704,7 +2834,7 @@ def api_update_password():
 
     user = db.get_user(user_email) or {}
 
-    if _is_password_reset_otp_required_for_role(role):
+    if _is_password_reset_otp_required_for_user(role, user_email):
         pending = session.get("self_reset_otp") or {}
         expected_email = str(pending.get("email") or "").strip().lower()
         expires_at = _parse_iso_datetime(pending.get("expires_at"))
@@ -2746,7 +2876,7 @@ def api_send_password_reset_otp():
         flash("Session expired. Please login again.", "error")
         return redirect(url_for("login"))
 
-    if not _is_password_reset_otp_required_for_role(role):
+    if not _is_password_reset_otp_required_for_user(role, user_email):
         flash("OTP is not required for your role at this time.", "info")
         return redirect(request.referrer or url_for(_panel_endpoint_for_role(role)))
 
@@ -3226,14 +3356,94 @@ def api_update_config():
         field_value = request.form.get(field)
         settings[field] = "true" if (tutorial_master == "on" and field_value == "on") else "false"
 
+    # System-admin lifecycle policy.
+    settings["disable_default_admin_on_new_system_admin"] = "true" if request.form.get("disable_default_admin_on_new_system_admin") == "on" else "false"
+
     # OTP security toggles
-    settings["require_otp_on_password_reset"] = "true" if request.form.get("require_otp_on_password_reset") == "on" else "false"
-    settings["require_otp_on_login"] = "true" if request.form.get("require_otp_on_login") == "on" else "false"
+    request_reset_otp = request.form.get("require_otp_on_password_reset") == "on"
+    request_login_otp = request.form.get("require_otp_on_login") == "on"
+    if request_reset_otp or request_login_otp:
+        smtp_state = _resolve_smtp_status(force_refresh=True).get("state")
+        smtp_ready = smtp_state in {"ready", "test"}
+        if not smtp_ready:
+            settings["require_otp_on_password_reset"] = "false"
+            settings["require_otp_on_login"] = "false"
+            flash("OTP options were turned off because SMTP is not ready.", "warning")
+        else:
+            settings["require_otp_on_password_reset"] = "true" if request_reset_otp else "false"
+            settings["require_otp_on_login"] = "true" if request_login_otp else "false"
+    else:
+        settings["require_otp_on_password_reset"] = "false"
+        settings["require_otp_on_login"] = "false"
     
     if settings:
         db.update_app_config_bulk(settings)
         flash("Configuration updated successfully.", "success")
     
+    return _redirect_admin_back("config")
+
+
+@app.route("/api/config/smtp-refresh", methods=["POST"])
+@login_required
+@admin_required
+def api_config_smtp_refresh():
+    system_only = _ensure_system_admin("config")
+    if system_only:
+        return system_only
+
+    status = _resolve_smtp_status(force_refresh=True)
+    if status.get("state") in {"ready", "test"}:
+        flash(f"{status.get('label')}: {status.get('detail')}", "success")
+    elif status.get("state") == "missing":
+        flash(status.get("detail") or "SMTP credentials are missing.", "warning")
+    else:
+        flash(status.get("detail") or "SMTP check failed.", "error")
+    return _redirect_admin_back("config")
+
+
+@app.route("/api/config/smtp-status", methods=["GET"])
+@login_required
+@admin_required
+def api_config_smtp_status():
+    system_only = _ensure_system_admin("config")
+    if system_only:
+        return jsonify({"success": False, "message": "System admin access required."}), 403
+
+    force_refresh = str(request.args.get("refresh") or "").strip() in {"1", "true", "yes"}
+    status = _resolve_smtp_status(force_refresh=force_refresh)
+    return jsonify({"success": True, "status": status})
+
+
+@app.route("/api/config/smtp-test", methods=["POST"])
+@login_required
+@admin_required
+def api_config_smtp_test():
+    system_only = _ensure_system_admin("config")
+    if system_only:
+        return system_only
+
+    status = _resolve_smtp_status(force_refresh=True)
+    if status.get("state") not in {"ready", "test"}:
+        flash("SMTP is not ready. Refresh SMTP status and fix configuration first.", "error")
+        return _redirect_admin_back("config")
+
+    target_email = session.get("user_email") or ""
+    if not target_email:
+        flash("Unable to resolve your account email for test message.", "error")
+        return _redirect_admin_back("config")
+
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject = "RMKCET SHINE SMTP Test"
+    body = (
+        "<h3>SMTP Test Successful</h3>"
+        f"<p>Timestamp: {stamp}</p>"
+        f"<p>Server: {SMTP_SERVER}:{SMTP_PORT}</p>"
+        "<p>This is a verification mail from RMKCET SHINE.</p>"
+    )
+    if send_email(target_email, subject, body, html=True):
+        flash(f"SMTP test email sent to {_mask_email(target_email)}.", "success")
+    else:
+        flash("SMTP test email failed. Check credentials and provider security settings.", "error")
     return _redirect_admin_back("config")
 
 

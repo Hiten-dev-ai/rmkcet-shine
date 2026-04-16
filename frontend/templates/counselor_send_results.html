@@ -451,6 +451,60 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForBrowserReturnAfterWhatsApp() {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let pageWasHidden = document.visibilityState === 'hidden';
+
+    const cleanup = () => {
+      if (resolved) return;
+      resolved = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onWindowFocus);
+      clearTimeout(fallbackNoHideTimer);
+      clearTimeout(safetyTimer);
+      resolve();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        pageWasHidden = true;
+        return;
+      }
+      if (pageWasHidden && document.visibilityState === 'visible') {
+        cleanup();
+      }
+    };
+
+    const onWindowFocus = () => {
+      if (pageWasHidden) {
+        cleanup();
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange, { passive: true });
+    window.addEventListener('focus', onWindowFocus, { passive: true });
+
+    // Desktop/simulator fallback: if page never hides, continue quickly.
+    const fallbackNoHideTimer = setTimeout(() => {
+      if (!pageWasHidden) cleanup();
+    }, 2000);
+
+    // Safety timeout so batch never gets stuck forever.
+    const safetyTimer = setTimeout(() => {
+      cleanup();
+    }, 120000);
+  });
+}
+
+function isMobileBatchFlow() {
+  const ua = String(navigator.userAgent || '');
+  const mobileUa = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
+  const narrowViewport = !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
+  const coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  return mobileUa || (narrowViewport && coarsePointer);
+}
+
 async function startBatchSendConfirmed() {
   if (batchSendInProgress) return;
   if (batchNoticeSecondsLeft > 0) return;
@@ -466,6 +520,7 @@ async function startBatchSendConfirmed() {
   const includeGenerated = shouldIncludeGeneratedInBatch();
   const modeLabel = includeGenerated ? 'all students from beginning' : 'pending students only';
   const delaySeconds = getEffectiveBatchDelaySeconds();
+  const mobileBatchFlow = isMobileBatchFlow();
   const total = targetButtons.length;
   let successCount = 0;
   let failedCount = 0;
@@ -524,6 +579,13 @@ async function startBatchSendConfirmed() {
         }
         if (waLink) {
           openWhatsAppAppDirect(waLink);
+          if (mobileBatchFlow) {
+            setBatchRunStatus(
+              `Opened WhatsApp for ${context.regNo}. Send the message, then return to this page to continue (${index + 1}/${total}).`,
+              'warning'
+            );
+            await waitForBrowserReturnAfterWhatsApp();
+          }
         }
         markRowGeneratedForButton(btn);
         successCount += 1;
