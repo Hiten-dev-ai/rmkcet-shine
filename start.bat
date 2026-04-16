@@ -21,6 +21,7 @@ set "RUNTIME_ROOT=%CD%\.runtime"
 set "EMBED_VERSION=3.11.9"
 set "PY_HOME=%RUNTIME_ROOT%\python-embed"
 set "PY_EXE=%PY_HOME%\python.exe"
+set "LOCAL_PY_EXE="
 
 echo.
 echo  ============================================
@@ -29,8 +30,13 @@ echo   Starting server...
 echo  ============================================
 echo.
 
-call :ensure_embedded_python
-if errorlevel 1 goto :startup_failed
+call :resolve_python
+if not defined LOCAL_PY_EXE (
+    call :ensure_embedded_python
+    if errorlevel 1 goto :startup_failed
+) else (
+    set "PY_EXE=%LOCAL_PY_EXE%"
+)
 
 call :ensure_dependencies
 if errorlevel 1 goto :startup_failed
@@ -50,7 +56,7 @@ echo  ============================================
 echo.
 
 if /I not "%AUTORUN%"=="true" start "" http://localhost:5000
-"%PY_EXE%" -c "import runpy,sys; sys.path.insert(0, r'%CD%\\backend'); runpy.run_path(r'%CD%\\backend\\app.py', run_name='__main__')"
+"%PY_EXE%" backend\app.py
 
 echo.
 echo  Server has stopped.
@@ -62,6 +68,29 @@ echo.
 echo  [ERROR] Launcher failed.
 if /I not "%AUTORUN%"=="true" pause
 exit /b 1
+
+:resolve_python
+if exist "%CD%\venv\Scripts\python.exe" (
+    set "LOCAL_PY_EXE=%CD%\venv\Scripts\python.exe"
+    echo  [INFO] Using virtual environment: venv
+    exit /b 0
+)
+
+if exist "%CD%\.venv\Scripts\python.exe" (
+    set "LOCAL_PY_EXE=%CD%\.venv\Scripts\python.exe"
+    echo  [INFO] Using virtual environment: .venv
+    exit /b 0
+)
+
+where python >nul 2>&1
+if not errorlevel 1 (
+    set "LOCAL_PY_EXE=python"
+    echo  [INFO] Using system Python from PATH.
+    exit /b 0
+)
+
+echo  [INFO] No local Python interpreter found. Falling back to embedded runtime.
+exit /b 0
 
 :read_config
 set "SHELL_STARTUP_ENABLED=false"
