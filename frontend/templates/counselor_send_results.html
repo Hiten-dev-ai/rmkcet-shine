@@ -1,0 +1,1109 @@
+{% extends "base.html" %}
+{% block title %}Send Results - {{ app_name }}{% endblock %}
+{% block page_title %}Send Results{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-between align-center mb-2" style="gap:12px;">
+  <a href="{{ url_for('counselor_page', tab='test-database') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back To Reports</a>
+  <span class="badge badge-info">{{ test_meta.test_name or 'Selected Test' }}</span>
+</div>
+
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-sliders"></i> Common Variables</div>
+  <div class="form-row">
+    <div class="form-group">
+      <label class="form-label">Test</label>
+      <input id="varTestName" class="form-control" value="{{ test_meta.test_name or '' }}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Semester</label>
+      <input id="varSemester" class="form-control" value="{{ test_meta.semester or '' }}">
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label class="form-label">Batch</label>
+      <input id="varBatch" class="form-control" value="{{ test_meta.batch_name or '' }}">
+    </div>
+    <div class="form-group"></div>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Message Template</label>
+    <textarea id="varTemplate" class="form-control" rows="8">Dear Parent , The Following is the {test_name} Marks Secured in each Course by your son/daughter
+
+REGISTER NUMBER :  {reg_no}
+NAME : {student_name}
+
+{subjects_table}
+
+Regards
+PRINCIPAL
+RMKCET</textarea>
+  </div>
+
+  <div class="form-group" style="margin-top:14px;">
+    <label class="form-label">Subject/Metric Order for Message</label>
+    <div id="fieldOrderHint" class="text-muted" style="font-size:.82rem;margin-bottom:8px;">
+      Select a student to arrange subject order and metrics (Attendance, Failed Subjects, GPA).
+    </div>
+    <div id="fieldOrderList" class="field-order-list"></div>
+    <div class="btn-group mt-1">
+      <button type="button" class="btn btn-outline btn-sm" onclick="resetFieldOrderToDefault()">
+        <i class="fas fa-rotate-left"></i> Reset Default Order
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="table-wrapper">
+  <table>
+    <thead>
+      <tr>
+        <th>Reg No</th>
+        <th>Name</th>
+        <th>Phone</th>
+        <th>Status</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr data-reg-no="{{ r.reg_no }}" data-send-status="{{ 'generated' if r.status == 'Generated' else 'pending' }}">
+        <td><strong>{{ r.reg_no }}</strong></td>
+        <td>{{ r.student_name }}</td>
+        <td>{{ r.parent_phone or '—' }}</td>
+        <td>
+          {% if r.status == 'Generated' %}
+          <span class="badge badge-success" data-status-badge>Generated</span>
+          {% else %}
+          <span class="badge badge-warning" data-status-badge>Pending</span>
+          {% endif %}
+        </td>
+        <td>
+          <button
+            class="btn btn-primary btn-sm"
+            onclick="openSendPreview(this)"
+            data-test-id="{{ test_id }}"
+            data-reg-no="{{ r.reg_no }}"
+            data-student-name="{{ r.student_name }}"
+            data-parent-phone="{{ r.parent_phone or '' }}"
+            data-department="{{ r.department or '' }}"
+            data-marks='{{ r.marks|tojson|e }}'>
+            <i class="fab fa-whatsapp"></i> Send to WhatsApp
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not rows %}
+      <tr><td colspan="5" class="text-center text-muted" style="padding:18px;">No students available for this test.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card mb-3 send-batch-card">
+  <div class="card-title"><i class="fas fa-flask"></i> Experimental</div>
+  <div class="experimental-notice-box">
+    <strong>Batch Send</strong>
+    <p style="margin:8px 0 0;">
+      By default, this iterates through <strong>Pending students</strong>, auto-opens WhatsApp compose links one by one, and marks each student as <strong>Generated</strong> after successful logging.
+    </p>
+    <p style="margin:8px 0 0;">
+      Important: Once you press <strong>Start Batch Send</strong> and confirm, this flow is designed to continue until every selected student is processed. Do not close the tab or refresh during the run.
+    </p>
+  </div>
+
+  <div class="form-check" style="margin-top:12px;">
+    <input type="checkbox" id="batchIncludeGenerated">
+    <label for="batchIncludeGenerated">Send from beginning (include already Generated students)</label>
+  </div>
+
+  <div class="form-row" style="margin-top:12px;">
+    <div class="form-group">
+      <label class="form-label">Delay Between Auto-Opens</label>
+      <select id="batchDelayPreset" class="form-control" onchange="handleBatchDelayPresetChange()">
+        <option value="5">5 seconds</option>
+        <option value="10" selected>10 seconds (Default)</option>
+        <option value="15">15 seconds</option>
+        <option value="20">20 seconds</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="form-group" id="batchDelayCustomWrap" style="display:none;">
+      <label class="form-label">Custom Delay (Seconds)</label>
+      <input id="batchDelayCustom" class="form-control" type="number" min="1" max="60" step="1" value="10" oninput="clampBatchCustomDelay()">
+      <div class="text-muted" style="font-size:.8rem;margin-top:6px;">Allowed range: 1 to 60 seconds</div>
+    </div>
+  </div>
+
+  <div class="batch-meta-row" id="batchMetaRow">
+    <span class="badge badge-info">Total: <span id="batchTotalCount">0</span></span>
+    <span class="badge badge-warning">Pending: <span id="batchPendingCount">0</span></span>
+    <span class="badge badge-success">Generated: <span id="batchGeneratedCount">0</span></span>
+  </div>
+
+  <div class="btn-group mt-2">
+    <button type="button" id="batchSendStartBtn" class="btn btn-primary" onclick="openBatchSendNotice()">
+      <i class="fab fa-whatsapp"></i> Start Batch Send
+    </button>
+  </div>
+
+  <div id="batchRunStatus" class="text-muted" style="font-size:.85rem;margin-top:10px;">
+    Batch send is idle.
+  </div>
+  <div class="text-muted" style="font-size:.8rem;margin-top:8px;">
+    Recommendation: Keep this tab active until completion and verify the final generated count.
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-batch-send-confirm">
+  <div class="modal" style="max-width:760px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-triangle-exclamation"></i> Confirm Batch Send</h3>
+      <button class="modal-close" onclick="cancelBatchSendNotice()">&times;</button>
+    </div>
+
+    <div class="batch-confirm-box">
+      <p><strong>Please read before proceeding:</strong></p>
+      <ul class="batch-confirm-list">
+        <li>This will auto-open WhatsApp for each pending student in sequence.</li>
+        <li>Each student will be marked as Generated after successful backend logging.</li>
+        <li>There is no in-page stop control once execution begins.</li>
+        <li>Do not refresh or close the tab while this operation is running.</li>
+      </ul>
+      <p style="margin:10px 0 0;">
+        A mandatory 5-second hold is enforced to reduce accidental bulk sending.
+      </p>
+    </div>
+
+    <div id="batchConfirmSummary" class="batch-confirm-summary"></div>
+
+    <div class="btn-group mt-2">
+      <button type="button" class="btn btn-outline" onclick="cancelBatchSendNotice()">Cancel</button>
+      <button type="button" class="btn btn-success" id="batchSendProceedBtn" onclick="startBatchSendConfirmed()" disabled>
+        Proceed (5)
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-send-preview">
+  <div class="modal" style="max-width:720px;">
+    <div class="modal-header">
+      <h3><i class="fab fa-whatsapp"></i> WhatsApp Preview</h3>
+      <button class="modal-close" onclick="closeModal('send-preview')">&times;</button>
+    </div>
+    <div class="wa-preview">
+      <div class="wa-chat-header">Message Preview</div>
+      <textarea id="previewText" class="form-control" rows="12" readonly></textarea>
+    </div>
+
+    <form method="POST" action="{{ url_for('api_send_single_report') }}" id="sendPreviewForm" class="mt-2">
+      <input type="hidden" name="test_id" id="formTestId">
+      <input type="hidden" name="reg_no" id="formRegNo">
+      <input type="hidden" id="formParentPhone">
+      <input type="hidden" name="test_name" id="formTestName">
+      <input type="hidden" name="semester" id="formSemester">
+      <input type="hidden" name="batch_name" id="formBatchName">
+      <input type="hidden" name="department" id="formDepartment">
+      <input type="hidden" name="message_template" id="formTemplate">
+      <input type="hidden" name="ordered_fields" id="formOrderedFields">
+      <div class="btn-group mt-2">
+        <button type="submit" name="action" value="cancel" class="btn btn-outline" formtarget="_self">Cancel (Keep Pending)</button>
+        <button type="button" class="btn btn-success" onclick="sendToWhatsAppDirect()">Send to WhatsApp</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let activeSendButton = null;
+let activeStudentContext = null;
+let orderList = [];
+let defaultOrderList = [];
+const SELECTED_TEST_ID = '{{ test_id or "" }}';
+let batchSendInProgress = false;
+let batchNoticeCountdownTimer = null;
+let batchNoticeSecondsLeft = 0;
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function getStudentContextFromButton(btn) {
+  if (!btn) return null;
+  return {
+    testId: btn.dataset.testId || '',
+    regNo: btn.dataset.regNo || '',
+    studentName: btn.dataset.studentName || '',
+    parentPhone: btn.dataset.parentPhone || '',
+    department: btn.dataset.department || '',
+    marks: safeJsonParse(btn.dataset.marks || '{}')
+  };
+}
+
+function getSendRows() {
+  return Array.from(document.querySelectorAll('tr[data-reg-no][data-send-status]'));
+}
+
+function shouldIncludeGeneratedInBatch() {
+  const toggle = document.getElementById('batchIncludeGenerated');
+  return !!(toggle && toggle.checked);
+}
+
+function getBatchTargetButtons() {
+  const includeGenerated = shouldIncludeGeneratedInBatch();
+  return getSendRows()
+    .filter((row) => includeGenerated || String(row.dataset.sendStatus || '').toLowerCase() !== 'generated')
+    .map((row) => row.querySelector('button[data-test-id][data-reg-no][data-marks]'))
+    .filter(Boolean);
+}
+
+function updateBatchStats() {
+  const rows = getSendRows();
+  const total = rows.length;
+  const generated = rows.filter((row) => String(row.dataset.sendStatus || '').toLowerCase() === 'generated').length;
+  const pending = Math.max(0, total - generated);
+
+  const totalEl = document.getElementById('batchTotalCount');
+  const pendingEl = document.getElementById('batchPendingCount');
+  const generatedEl = document.getElementById('batchGeneratedCount');
+
+  if (totalEl) totalEl.textContent = String(total);
+  if (pendingEl) pendingEl.textContent = String(pending);
+  if (generatedEl) generatedEl.textContent = String(generated);
+}
+
+function setBatchRunStatus(message, tone) {
+  const el = document.getElementById('batchRunStatus');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('batch-run-status-success', 'batch-run-status-warning', 'batch-run-status-error');
+  if (tone === 'success') el.classList.add('batch-run-status-success');
+  if (tone === 'warning') el.classList.add('batch-run-status-warning');
+  if (tone === 'error') el.classList.add('batch-run-status-error');
+}
+
+function markRowGeneratedForButton(btn) {
+  const row = btn ? btn.closest('tr[data-reg-no][data-send-status]') : null;
+  if (!row) return;
+
+  row.dataset.sendStatus = 'generated';
+  const badge = row.querySelector('[data-status-badge]');
+  if (badge) {
+    badge.className = 'badge badge-success';
+    badge.textContent = 'Generated';
+  }
+  updateBatchStats();
+}
+
+function getCurrentCommonVars() {
+  return {
+    test_name: document.getElementById('varTestName').value || '',
+    semester: document.getElementById('varSemester').value || '',
+    batch_name: document.getElementById('varBatch').value || '',
+    template: document.getElementById('varTemplate').value || ''
+  };
+}
+
+function buildMessageFromContext(context, commonVars) {
+  const vars = {
+    test_name: commonVars.test_name || '',
+    semester: commonVars.semester || '',
+    department: context.department || '{{ test_meta.department or "" }}',
+    batch_name: commonVars.batch_name || '',
+    student_name: context.studentName || '',
+    reg_no: context.regNo || '',
+    subjects_table: buildSubjectsTableFromOrder(orderList, context.marks || {})
+  };
+
+  return {
+    vars,
+    message: applyTemplate(commonVars.template || '', vars)
+  };
+}
+
+function handleBatchDelayPresetChange() {
+  const preset = document.getElementById('batchDelayPreset');
+  const wrap = document.getElementById('batchDelayCustomWrap');
+  if (!preset || !wrap) return;
+  wrap.style.display = preset.value === 'custom' ? '' : 'none';
+}
+
+function clampBatchCustomDelay() {
+  const input = document.getElementById('batchDelayCustom');
+  if (!input) return;
+  const raw = parseInt(input.value || '10', 10);
+  if (!Number.isFinite(raw)) {
+    input.value = '10';
+    return;
+  }
+  const clamped = Math.max(1, Math.min(60, raw));
+  input.value = String(clamped);
+}
+
+function getEffectiveBatchDelaySeconds() {
+  const preset = document.getElementById('batchDelayPreset');
+  if (!preset) return 10;
+
+  if (preset.value !== 'custom') {
+    const parsed = parseInt(preset.value || '10', 10);
+    return Number.isFinite(parsed) ? parsed : 10;
+  }
+
+  clampBatchCustomDelay();
+  const custom = document.getElementById('batchDelayCustom');
+  const parsedCustom = parseInt((custom && custom.value) || '10', 10);
+  if (!Number.isFinite(parsedCustom)) return 10;
+  return Math.max(1, Math.min(60, parsedCustom));
+}
+
+function resetBatchNoticeCountdown() {
+  if (batchNoticeCountdownTimer) {
+    clearInterval(batchNoticeCountdownTimer);
+    batchNoticeCountdownTimer = null;
+  }
+  batchNoticeSecondsLeft = 0;
+}
+
+function renderBatchProceedButton() {
+  const proceedBtn = document.getElementById('batchSendProceedBtn');
+  if (!proceedBtn) return;
+
+  if (batchNoticeSecondsLeft > 0) {
+    proceedBtn.disabled = true;
+    proceedBtn.textContent = `Proceed (${batchNoticeSecondsLeft})`;
+  } else {
+    proceedBtn.disabled = false;
+    proceedBtn.textContent = 'Proceed';
+  }
+}
+
+function startBatchNoticeCountdown() {
+  resetBatchNoticeCountdown();
+  batchNoticeSecondsLeft = 5;
+  renderBatchProceedButton();
+
+  batchNoticeCountdownTimer = setInterval(() => {
+    batchNoticeSecondsLeft -= 1;
+    if (batchNoticeSecondsLeft <= 0) {
+      batchNoticeSecondsLeft = 0;
+      resetBatchNoticeCountdown();
+    }
+    renderBatchProceedButton();
+  }, 1000);
+}
+
+function openBatchSendNotice() {
+  if (batchSendInProgress) {
+    alert('Batch send is already running.');
+    return;
+  }
+
+  const targetButtons = getBatchTargetButtons();
+  if (!targetButtons.length) {
+    alert('No students found for batch send with the current mode.');
+    return;
+  }
+
+  const delaySeconds = getEffectiveBatchDelaySeconds();
+  const includeGenerated = shouldIncludeGeneratedInBatch();
+  const modeLabel = includeGenerated ? 'All students (from beginning)' : 'Pending students only';
+  const summary = document.getElementById('batchConfirmSummary');
+  if (summary) {
+    summary.innerHTML = `
+      <strong>Batch Summary</strong><br>
+      Mode: <strong>${modeLabel}</strong><br>
+      Students to Process: <strong>${targetButtons.length}</strong><br>
+      Delay Between Opens: <strong>${delaySeconds} second(s)</strong><br>
+      Reason for 5-second wait: <strong>prevents accidental bulk sending</strong>.
+    `;
+  }
+
+  openModal('batch-send-confirm');
+  startBatchNoticeCountdown();
+}
+
+function cancelBatchSendNotice() {
+  resetBatchNoticeCountdown();
+  closeModal('batch-send-confirm');
+}
+
+function setBatchControlsDisabled(disabled) {
+  const startBtn = document.getElementById('batchSendStartBtn');
+  const preset = document.getElementById('batchDelayPreset');
+  const custom = document.getElementById('batchDelayCustom');
+  const includeGenerated = document.getElementById('batchIncludeGenerated');
+
+  if (startBtn) startBtn.disabled = !!disabled;
+  if (preset) preset.disabled = !!disabled;
+  if (custom) custom.disabled = !!disabled;
+  if (includeGenerated) includeGenerated.disabled = !!disabled;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForBrowserReturnAfterWhatsApp() {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let pageWasHidden = document.visibilityState === 'hidden';
+
+    const cleanup = () => {
+      if (resolved) return;
+      resolved = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onWindowFocus);
+      clearTimeout(fallbackNoHideTimer);
+      clearTimeout(safetyTimer);
+      resolve();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        pageWasHidden = true;
+        return;
+      }
+      if (pageWasHidden && document.visibilityState === 'visible') {
+        cleanup();
+      }
+    };
+
+    const onWindowFocus = () => {
+      if (pageWasHidden) {
+        cleanup();
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange, { passive: true });
+    window.addEventListener('focus', onWindowFocus, { passive: true });
+
+    // Desktop/simulator fallback: if page never hides, continue quickly.
+    const fallbackNoHideTimer = setTimeout(() => {
+      if (!pageWasHidden) cleanup();
+    }, 2000);
+
+    // Safety timeout so batch never gets stuck forever.
+    const safetyTimer = setTimeout(() => {
+      cleanup();
+    }, 120000);
+  });
+}
+
+function isMobileBatchFlow() {
+  const ua = String(navigator.userAgent || '');
+  const mobileUa = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
+  const narrowViewport = !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
+  const coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  return mobileUa || (narrowViewport && coarsePointer);
+}
+
+async function startBatchSendConfirmed() {
+  if (batchSendInProgress) return;
+  if (batchNoticeSecondsLeft > 0) return;
+
+  cancelBatchSendNotice();
+
+  const targetButtons = getBatchTargetButtons();
+  if (!targetButtons.length) {
+    alert('No students found for batch send with the current mode.');
+    return;
+  }
+
+  const includeGenerated = shouldIncludeGeneratedInBatch();
+  const modeLabel = includeGenerated ? 'all students from beginning' : 'pending students only';
+  const delaySeconds = getEffectiveBatchDelaySeconds();
+  const mobileBatchFlow = isMobileBatchFlow();
+  const total = targetButtons.length;
+  let successCount = 0;
+  let failedCount = 0;
+  const failedRegs = [];
+
+  batchSendInProgress = true;
+  setBatchControlsDisabled(true);
+  setBatchRunStatus(`Batch started (${modeLabel}). Processing ${total} students with ${delaySeconds}s delay.`, 'warning');
+
+  try {
+    for (let index = 0; index < targetButtons.length; index += 1) {
+      const btn = targetButtons[index];
+      const context = getStudentContextFromButton(btn);
+      if (!context || !context.testId || !context.regNo) {
+        failedCount += 1;
+        continue;
+      }
+
+      const commonVars = getCurrentCommonVars();
+      const composed = buildMessageFromContext(context, commonVars);
+      const formData = new FormData();
+      formData.set('test_id', context.testId);
+      formData.set('reg_no', context.regNo);
+      formData.set('action', 'send');
+      formData.set('ajax', '1');
+      formData.set('message_template', commonVars.template || '');
+      formData.set('test_name', commonVars.test_name || '');
+      formData.set('semester', commonVars.semester || '');
+      formData.set('batch_name', commonVars.batch_name || '');
+      formData.set('department', composed.vars.department || '');
+      formData.set('ordered_fields', JSON.stringify(getOrderedFieldPayload()));
+
+      setBatchRunStatus(`Processing ${index + 1}/${total}: ${context.regNo}`, 'warning');
+
+      let waLink = '';
+      let success = false;
+
+      try {
+        const response = await fetch('{{ url_for("api_send_single_report") }}', {
+          method: 'POST',
+          body: formData,
+          credentials: 'same-origin'
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.ok && payload.success) {
+          success = true;
+          waLink = String(payload.wa_link || '').trim();
+        }
+      } catch (error) {
+        success = false;
+      }
+
+      if (success) {
+        if (!waLink) {
+          waLink = buildWhatsAppLink(context.parentPhone, composed.message);
+        }
+        if (waLink) {
+          openWhatsAppAppDirect(waLink);
+          if (mobileBatchFlow) {
+            setBatchRunStatus(
+              `Opened WhatsApp for ${context.regNo}. Send the message, then return to this page to continue (${index + 1}/${total}).`,
+              'warning'
+            );
+            await waitForBrowserReturnAfterWhatsApp();
+          }
+        }
+        markRowGeneratedForButton(btn);
+        successCount += 1;
+      } else {
+        failedCount += 1;
+        failedRegs.push(context.regNo);
+      }
+
+      if (index < targetButtons.length - 1) {
+        await sleep(delaySeconds * 1000);
+      }
+    }
+
+    if (failedCount > 0) {
+      const preview = failedRegs.slice(0, 5).join(', ');
+      const extra = failedRegs.length > 5 ? ` and ${failedRegs.length - 5} more` : '';
+      setBatchRunStatus(`Batch completed with warnings. Generated: ${successCount}, Failed: ${failedCount}.`, 'warning');
+      alert(`Batch send completed. Generated: ${successCount}, Failed: ${failedCount}. Failed Reg Nos: ${preview}${extra}.`);
+    } else {
+      setBatchRunStatus(`Batch completed successfully. Generated: ${successCount}/${total}.`, 'success');
+      alert(`Batch send completed successfully for ${successCount} students.`);
+    }
+  } finally {
+    batchSendInProgress = false;
+    setBatchControlsDisabled(false);
+    updateBatchStats();
+  }
+}
+
+const ATTENDANCE_KEYS = new Set(['attendance', 'att']);
+const GPA_KEYS = new Set(['gpa', 'cgpa']);
+const FAILED_KEYS = new Set(['noofsubjectsfailed', 'failedsubjects', 'failedcount', 'nooffailedsubjects']);
+const IGNORED_KEYS = new Set([
+  'regno', 'registernumber', 'name', 'studentname', 'department', 'section', 'batch', 'semester',
+  'test', 'total', 'overall', 'percentage', 'grade', 'result', 'status', 'parentphone', 'phone',
+  'parentemail', 'email', 'sno', 'slno', 'serialno', 'serialnumber', 'rollno',
+  'absentees', 'absentee', 'absentstudents'
+]);
+
+const METRIC_LABELS = {
+  attendance: 'Attendance',
+  failed_subjects: 'Failed Subjects',
+  gpa: 'GPA'
+};
+
+const STATIC_METRICS = [
+  { type: 'metric', metricKey: 'attendance', label: METRIC_LABELS.attendance },
+  { type: 'metric', metricKey: 'failed_subjects', label: METRIC_LABELS.failed_subjects },
+  { type: 'metric', metricKey: 'gpa', label: METRIC_LABELS.gpa }
+];
+
+function getCommonVarsStorageKey() {
+  return `send_common_vars_{{ test_id }}`;
+}
+
+function saveCommonVarsToStorage() {
+  const payload = {
+    test_name: document.getElementById('varTestName').value || '',
+    semester: document.getElementById('varSemester').value || '',
+    batch_name: document.getElementById('varBatch').value || '',
+    template: document.getElementById('varTemplate').value || '',
+  };
+  localStorage.setItem(getCommonVarsStorageKey(), JSON.stringify(payload));
+}
+
+function loadCommonVarsFromStorage() {
+  const raw = localStorage.getItem(getCommonVarsStorageKey());
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed.test_name !== undefined) document.getElementById('varTestName').value = parsed.test_name;
+    if (parsed.semester !== undefined) document.getElementById('varSemester').value = parsed.semester;
+    if (parsed.batch_name !== undefined) document.getElementById('varBatch').value = parsed.batch_name;
+    if (parsed.template !== undefined) document.getElementById('varTemplate').value = parsed.template;
+  } catch (e) {
+    // Ignore malformed local storage payloads.
+  }
+}
+
+function bindCommonVarsAutoSave() {
+  ['varTestName', 'varSemester', 'varBatch', 'varTemplate'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', saveCommonVarsToStorage);
+    el.addEventListener('change', saveCommonVarsToStorage);
+  });
+}
+
+function collectSubjectsFromTest() {
+  const seen = new Set();
+  const subjects = [];
+  const buttons = Array.from(document.querySelectorAll('button[data-test-id][data-marks]'));
+
+  buttons.forEach((btn) => {
+    let marks = {};
+    try {
+      marks = JSON.parse(btn.dataset.marks || '{}');
+    } catch (e) {
+      marks = {};
+    }
+
+    if (!marks || typeof marks !== 'object') return;
+    Object.entries(marks).forEach(([rawKey]) => {
+      const normalized = normalizeMetricKey(rawKey);
+      if (!normalized || IGNORED_KEYS.has(normalized)) return;
+      if (isUnknownMetricField(rawKey, normalized)) return;
+      if (ATTENDANCE_KEYS.has(normalized) || FAILED_KEYS.has(normalized) || GPA_KEYS.has(normalized)) return;
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      subjects.push({
+        type: 'subject',
+        label: String(rawKey).trim(),
+        rawKey: String(rawKey).trim(),
+        normalizedKey: normalized
+      });
+    });
+  });
+
+  return subjects;
+}
+
+function buildDefaultOrderList() {
+  const subjects = collectSubjectsFromTest();
+  const metrics = STATIC_METRICS.map((metric) => ({ ...metric }));
+  return [...subjects, ...metrics];
+}
+
+function getMetricValue(metricKey, marks) {
+  if (!marks || typeof marks !== 'object') return '';
+  const normalizedToValue = {};
+  Object.entries(marks).forEach(([rawKey, rawVal]) => {
+    normalizedToValue[normalizeMetricKey(rawKey)] = String(rawVal ?? '').trim();
+  });
+
+  if (metricKey === 'attendance') {
+    const k = Array.from(ATTENDANCE_KEYS).find((key) => normalizedToValue[key] !== undefined);
+    return k ? normalizedToValue[k] : '';
+  }
+  if (metricKey === 'failed_subjects') {
+    const k = Array.from(FAILED_KEYS).find((key) => normalizedToValue[key] !== undefined);
+    return k ? normalizedToValue[k] : '';
+  }
+  if (metricKey === 'gpa') {
+    const k = Array.from(GPA_KEYS).find((key) => normalizedToValue[key] !== undefined);
+    return k ? normalizedToValue[k] : '';
+  }
+  return '';
+}
+
+function getSubjectValue(orderItem, marks) {
+  if (!orderItem || !marks || typeof marks !== 'object') return '';
+
+  if (Object.prototype.hasOwnProperty.call(marks, orderItem.rawKey)) {
+    return String(marks[orderItem.rawKey] ?? '').trim();
+  }
+
+  const entry = Object.entries(marks).find(([k]) => normalizeMetricKey(k) === orderItem.normalizedKey);
+  return entry ? String(entry[1] ?? '').trim() : '';
+}
+
+function buildSubjectsTableFromOrder(orderEntries, marks) {
+  if (!Array.isArray(orderEntries)) return '';
+  const lines = [];
+  orderEntries.forEach((entry) => {
+    if (!entry) return;
+
+    const label = entry.type === 'subject'
+      ? (entry.label || entry.rawKey || 'Subject')
+      : (METRIC_LABELS[entry.metricKey] || entry.label || 'Metric');
+
+    const value = entry.type === 'subject'
+      ? getSubjectValue(entry, marks)
+      : getMetricValue(entry.metricKey, marks);
+
+    if (!String(value || '').trim()) return;
+    lines.push(`${label} : ${value}`.trim());
+  });
+  return lines.join('\n').trim();
+}
+
+function getOrderedFieldPayload() {
+  return (orderList || []).map((entry) => {
+    if (entry.type === 'subject') {
+      return {
+        type: 'subject',
+        raw_key: entry.rawKey,
+        normalized_key: entry.normalizedKey
+      };
+    }
+    return {
+      type: 'metric',
+      key: entry.metricKey,
+      normalized_key: entry.metricKey
+    };
+  });
+}
+
+function renderOrderListTabs() {
+  const host = document.getElementById('fieldOrderList');
+  const hint = document.getElementById('fieldOrderHint');
+  if (!host || !hint) return;
+
+  if (!SELECTED_TEST_ID) {
+    host.innerHTML = '<div class="field-order-empty">Select a test to arrange order.</div>';
+    hint.textContent = 'Select a test to arrange order.';
+    return;
+  }
+
+  if (!orderList.length) {
+    host.innerHTML = '';
+    hint.textContent = 'No subjects available in this test yet.';
+    return;
+  }
+
+  hint.textContent = 'Use Up/Down to arrange the exact order in {subjects_table}.';
+
+  host.innerHTML = orderList.map((entry, idx) => {
+    const isFirst = idx === 0;
+    const isLast = idx === orderList.length - 1;
+    const label = entry.type === 'subject' ? entry.label : (METRIC_LABELS[entry.metricKey] || entry.label);
+    return `
+      <div class="field-order-tab">
+        <div class="field-order-tab-label">${label}</div>
+        <div class="field-order-tab-actions">
+          <button type="button" class="btn btn-outline btn-sm" onclick="moveItem(${idx}, -1)" ${isFirst ? 'disabled' : ''} title="Move Up">
+            <i class="fas fa-arrow-up"></i>
+          </button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="moveItem(${idx}, 1)" ${isLast ? 'disabled' : ''} title="Move Down">
+            <i class="fas fa-arrow-down"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function moveItem(index, direction) {
+  const target = index + direction;
+  if (target < 0 || target >= orderList.length) return;
+  const swapped = [...orderList];
+  const temp = swapped[index];
+  swapped[index] = swapped[target];
+  swapped[target] = temp;
+  orderList = swapped;
+  renderOrderListTabs();
+  refreshPreviewFromActiveContext();
+}
+
+function resetFieldOrderToDefault() {
+  orderList = defaultOrderList.map((item) => ({ ...item }));
+  renderOrderListTabs();
+  refreshPreviewFromActiveContext();
+}
+
+function initializeOrderPanelForTest() {
+  defaultOrderList = buildDefaultOrderList();
+  orderList = defaultOrderList.map((item) => ({ ...item }));
+  renderOrderListTabs();
+}
+
+function refreshPreviewFromActiveContext() {
+  if (!activeStudentContext) return;
+
+  const testName = document.getElementById('varTestName').value || '';
+  const semester = document.getElementById('varSemester').value || '';
+  const batch = document.getElementById('varBatch').value || '';
+  const template = document.getElementById('varTemplate').value || '';
+
+  const marksLines = buildSubjectsTableFromOrder(orderList, activeStudentContext.marks || {});
+  const vars = {
+    test_name: testName,
+    semester: semester,
+    department: activeStudentContext.department || '{{ test_meta.department or "" }}',
+    batch_name: batch,
+    student_name: activeStudentContext.studentName,
+    reg_no: activeStudentContext.regNo,
+    subjects_table: marksLines,
+  };
+
+  document.getElementById('previewText').value = applyTemplate(template, vars);
+  document.getElementById('formTestId').value = activeStudentContext.testId;
+  document.getElementById('formRegNo').value = activeStudentContext.regNo;
+  document.getElementById('formParentPhone').value = activeStudentContext.parentPhone;
+  document.getElementById('formTestName').value = testName;
+  document.getElementById('formSemester').value = semester;
+  document.getElementById('formBatchName').value = batch;
+  document.getElementById('formDepartment').value = vars.department;
+  document.getElementById('formTemplate').value = template;
+  document.getElementById('formOrderedFields').value = JSON.stringify(getOrderedFieldPayload());
+}
+
+function applyTemplate(template, vars) {
+  return template
+    .replaceAll('{test_name}', vars.test_name)
+    .replaceAll('{semester}', vars.semester)
+    .replaceAll('{department}', vars.department)
+    .replaceAll('{batch_name}', vars.batch_name)
+    .replaceAll('{student_name}', vars.student_name)
+    .replaceAll('{reg_no}', vars.reg_no)
+    .replaceAll('{subjects_table}', vars.subjects_table)
+    .replaceAll('{counselor_name}', '{{ current_user_name or "Counselor" }}');
+}
+
+function normalizeMetricKey(key) {
+  return String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isUnknownMetricField(rawKey, normalizedKey) {
+  const raw = String(rawKey || '').trim().toLowerCase();
+  if (!raw) return true;
+  if (raw.startsWith('unnamed')) return true;
+  if (/^subject[_\s-]*\d+$/.test(raw)) return true;
+  if (String(normalizedKey || '').startsWith('unnamed')) return true;
+  return false;
+}
+
+function isAbsentMark(value) {
+  const s = String(value || '').trim().toLowerCase();
+  return ['absent', 'ab', 'a', 'na', '-', 'not attended'].includes(s);
+}
+
+function openSendPreview(btn) {
+  activeSendButton = btn;
+  activeStudentContext = getStudentContextFromButton(btn);
+  if (!activeStudentContext) return;
+
+  if (!orderList.length) {
+    initializeOrderPanelForTest();
+  }
+  refreshPreviewFromActiveContext();
+
+  openModal('send-preview');
+}
+
+function buildWhatsAppLink(phone, message) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  const localPhone = digits.length >= 10 ? digits.slice(-10) : '';
+  const cc = String('{{ country_code|default("91") }}').replace(/\D/g, '') || '91';
+  if (!localPhone) return '';
+  return `whatsapp://send?phone=${cc}${localPhone}&text=${encodeURIComponent(message || '')}`;
+}
+
+function openWhatsAppAppDirect(waLink) {
+  // Use same-tab protocol navigation so browsers do not create an extra tab.
+  // This opens the installed WhatsApp handler directly.
+  const link = document.createElement('a');
+  link.href = waLink;
+  link.target = '_self';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function sendToWhatsAppDirect() {
+  const form = document.getElementById('sendPreviewForm');
+  if (!form) return;
+
+  const phone = document.getElementById('formParentPhone').value || '';
+  const msg = document.getElementById('previewText').value || '';
+  const waLink = buildWhatsAppLink(phone, msg);
+
+  const formData = new FormData(form);
+  formData.set('action', 'send');
+  formData.set('ajax', '1');
+
+  try {
+    const response = await fetch(form.getAttribute('action'), {
+      method: 'POST',
+      body: formData,
+      credentials: 'same-origin'
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.success && activeSendButton) {
+      const directLink = String(result.wa_link || '').trim() || waLink;
+      if (!directLink) {
+        alert('Parent phone number is missing or invalid for this student.');
+        return;
+      }
+      openWhatsAppAppDirect(directLink);
+      markRowGeneratedForButton(activeSendButton);
+      setBatchRunStatus('Single send completed and status updated to Generated.', 'success');
+    } else {
+      const err = String(result.error || '').trim() || 'Unable to send this student.';
+      alert(err);
+    }
+  } catch (error) {
+    console.error('Send logging failed:', error);
+    setBatchRunStatus('Single send could not be logged. Status remains Pending.', 'error');
+    alert('Unable to send this student right now. Please try again.');
+  }
+
+  closeModal('send-preview');
+  saveCommonVarsToStorage();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadCommonVarsFromStorage();
+  bindCommonVarsAutoSave();
+  initializeOrderPanelForTest();
+  handleBatchDelayPresetChange();
+  updateBatchStats();
+  ['varTestName', 'varSemester', 'varBatch', 'varTemplate'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', refreshPreviewFromActiveContext);
+    el.addEventListener('change', refreshPreviewFromActiveContext);
+  });
+});
+</script>
+
+<style>
+.field-order-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.field-order-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  min-height: 42px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+  transition: border-color .2s ease, transform .2s ease;
+}
+
+.field-order-tab:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.field-order-tab-label {
+  font-size: .82rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.field-order-tab-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.field-order-empty {
+  font-size: .82rem;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: rgba(255,255,255,.02);
+}
+
+.experimental-notice-box {
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: .86rem;
+  line-height: 1.5;
+}
+
+.send-batch-card {
+  margin-top: 16px;
+}
+
+.batch-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.batch-confirm-box {
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: .86rem;
+}
+
+.batch-confirm-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.batch-confirm-summary {
+  margin-top: 12px;
+  font-size: .85rem;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+#batchRunStatus.batch-run-status-success {
+  color: var(--success);
+}
+
+#batchRunStatus.batch-run-status-warning {
+  color: var(--warning);
+}
+
+#batchRunStatus.batch-run-status-error {
+  color: var(--danger);
+}
+
+@media (max-width: 768px) {
+  .field-order-list {
+    display: grid;
+  }
+
+  .field-order-tab {
+    justify-content: space-between;
+  }
+}
+</style>
+{% endblock %}

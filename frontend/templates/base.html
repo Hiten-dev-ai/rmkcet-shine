@@ -1,0 +1,1774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="preload" as="image" href="{{ url_for('static', filename='assets/shine-logo.png') }}">
+  <link rel="preload" as="image" href="{{ url_for('static', filename='assets/banner.png') }}">
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem('theme') || 'light';
+        if (theme === 'light') {
+          document.documentElement.classList.add('preload-light-theme');
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  
+  <!-- Dynamic Theme Colors from Configuration -->
+  {% if app_config %}
+  <style>
+    :root {
+      --primary: {{ app_config.color_primary|default('#667eea') }};
+      --primary-d: {{ app_config.color_primary_dark|default('#5a6fd6') }};
+      --secondary: {{ app_config.color_secondary|default('#764ba2') }};
+      --accent: {{ app_config.color_accent|default('#a78bfa') }};
+      --success: {{ app_config.color_success|default('#25D366') }};
+      --warning: {{ app_config.color_warning|default('#f59e0b') }};
+      --danger: {{ app_config.color_danger|default('#ef4444') }};
+      --info: {{ app_config.color_info|default('#3b82f6') }};
+      --bg-primary: {{ app_config.color_bg_primary|default('#0a0c14') }};
+      --bg-secondary: {{ app_config.color_bg_secondary|default('#0f1219') }};
+      --bg-card: {{ app_config.color_bg_card|default('rgba(20, 30, 50, 0.65)') }};
+      --text: {{ app_config.color_text|default('#e2e8f0') }};
+      --text-dim: {{ app_config.color_text_dim|default('#94a3b8') }};
+      --text-muted: {{ app_config.color_text_muted|default('#64748b') }};
+      --border: {{ app_config.color_border|default('rgba(102, 126, 234, 0.18)') }};
+    }
+  </style>
+  {% endif %}
+  <style>
+    html.preload-light-theme:root {
+      --bg-primary: #f5f7fb !important;
+      --bg-secondary: #ffffff !important;
+      --bg-card: rgba(255, 255, 255, 0.95) !important;
+      --bg-card-hover: rgba(255, 255, 255, 1) !important;
+      --bg-input: #ffffff !important;
+      --border: rgba(148, 163, 184, 0.35) !important;
+      --border-light: rgba(148, 163, 184, 0.22) !important;
+      --text: #0f172a !important;
+      --text-strong: #020617 !important;
+      --text-dim: #334155 !important;
+      --text-muted: #64748b !important;
+    }
+    html.preload-light-theme body {
+      background: #f5f7fb !important;
+      color: #0f172a !important;
+    }
+    html.preload-light-theme .sidebar {
+      background: linear-gradient(180deg, #ffffff 0%, #eef3fb 100%) !important;
+    }
+    html.preload-light-theme .top-header {
+      background: rgba(255, 255, 255, 0.85) !important;
+    }
+    html.preload-light-theme .global-footer {
+      background: linear-gradient(90deg, rgba(255,255,255,.96), rgba(241,245,249,.96)) !important;
+      border-top-color: rgba(148, 163, 184, 0.35) !important;
+    }
+    html.preload-light-theme .global-footer-text,
+    html.preload-light-theme .global-footer-link {
+      color: #334155 !important;
+    }
+  </style>
+  
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem('theme') || 'light';
+        if (theme === 'light') {
+          document.body.classList.add('light-theme');
+          document.documentElement.classList.add('preload-light-theme');
+        }
+      } catch (e) {}
+    })();
+  </script>
+  {% if current_user_email %}
+  {% set panel_endpoint = panel_endpoint or role_panel_endpoint or 'admin' %}
+  {% set effective_role = current_role_override or current_role %}
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <button class="sidebar-close" id="sidebarClose" type="button" aria-label="Close navigation">
+        <i class="fas fa-xmark"></i>
+      </button>
+      <div class="logo-area">
+        <div class="logo-image" role="img" aria-label="RMKCET SHINE Logo"></div>
+        <div class="logo-text">
+          <span class="logo-subtitle-main">S&H Internal Notification Engine</span>
+        </div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      {% if effective_role in ['admin', 'hod', 'chief_admin', 'deo', 'principal'] %}
+      {% set active_admin_tab = request.args.get('tab', default_tab or 'reports') %}
+      {% if effective_role in ['principal', 'hod', 'chief_admin'] %}
+      <a href="{{ url_for(panel_endpoint, tab='dashboard') }}" class="nav-link tab-nav {% if active_admin_tab == 'dashboard' %}active{% endif %}" data-tab="dashboard">
+        <i class="fas fa-gauge"></i><span>Dashboard</span>
+      </a>
+      {% endif %}
+      <a href="{{ url_for(panel_endpoint, tab='reports') }}" class="nav-link tab-nav {% if active_admin_tab == 'reports' %}active{% endif %}" data-tab="reports">
+        <i class="fas fa-file-lines"></i><span>Reports</span>
+      </a>
+      {% if effective_role == 'admin' %}
+      <a href="{{ url_for(panel_endpoint, tab='departments') }}" class="nav-link tab-nav {% if active_admin_tab == 'departments' %}active{% endif %}" data-tab="departments">
+        <i class="fas fa-building"></i><span>Departments</span>
+      </a>
+      {% endif %}
+      <a href="{{ url_for(panel_endpoint, tab='activity') }}" class="nav-link tab-nav {% if active_admin_tab == 'activity' %}active{% endif %}" data-tab="activity">
+        <i class="fas fa-chart-line"></i><span>Counsellor Activity</span>
+      </a>
+      {% if effective_role in ['admin', 'principal', 'deo'] %}
+      <a href="{{ url_for(panel_endpoint, tab='users') }}" class="nav-link tab-nav {% if active_admin_tab == 'users' %}active{% endif %}" data-tab="users">
+        <i class="fas fa-users"></i><span>Users</span>
+      </a>
+      {% endif %}
+      {% if effective_role in ['admin', 'principal'] %}
+      <a href="{{ url_for(panel_endpoint, tab='database') }}" class="nav-link tab-nav {% if active_admin_tab == 'database' %}active{% endif %}" data-tab="database">
+        <i class="fas fa-database"></i><span>Database</span>
+      </a>
+      {% endif %}
+      {% if effective_role == 'admin' %}
+      <a href="{{ url_for(panel_endpoint, tab='monitoring') }}" class="nav-link tab-nav {% if active_admin_tab == 'monitoring' %}active{% endif %}" data-tab="monitoring">
+        <i class="fas fa-chart-area"></i><span>Session Monitoring</span>
+      </a>
+      {% endif %}
+      {% if effective_role in ['admin', 'hod', 'chief_admin', 'deo'] %}
+      <a href="{{ url_for(panel_endpoint, tab='messages') }}" class="nav-link tab-nav {% if active_admin_tab == 'messages' %}active{% endif %}" data-tab="messages">
+        <i class="fas fa-envelope"></i><span>Message Logs</span>
+      </a>
+      {% endif %}
+      {% else %}
+      {% set active_counselor_tab = request.args.get('tab', 'recent-tests') %}
+      <a href="{{ url_for('counselor_page', tab='recent-tests') }}" class="nav-link tab-nav {% if active_counselor_tab == 'recent-tests' %}active{% endif %}" data-tab="recent-tests">
+        <i class="fas fa-gauge"></i><span>Dashboard</span>
+      </a>
+      <a href="{{ url_for('counselor_page', tab='test-database') }}" class="nav-link tab-nav {% if active_counselor_tab == 'test-database' %}active{% endif %}" data-tab="test-database">
+        <i class="fas fa-file-lines"></i><span>Reports</span>
+      </a>
+      <a href="{{ url_for('counselor_page', tab='message-history') }}" class="nav-link tab-nav {% if active_counselor_tab == 'message-history' %}active{% endif %}" data-tab="message-history">
+        <i class="fas fa-envelope-open-text"></i><span>Message Logs</span>
+      </a>
+      {% endif %}
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar">{{ current_user_name[0] if current_user_name else '?' }}</div>
+        <div class="user-details">
+          <span class="user-name">{{ current_user_name }}</span>
+          <span class="user-role">{% if effective_role in ['chief_admin', 'hod'] %}HoD{% elif effective_role == 'deo' %}DEO{% elif effective_role == 'admin' %}ADMIN{% elif effective_role == 'principal' %}PRINCIPAL{% elif effective_role == 'counselor' %}COUNSELOR{% else %}{{ effective_role|upper }}{% endif %}</span>
+          {% if assigned_departments and effective_role in ['chief_admin', 'hod', 'deo', 'counselor'] %}
+          <div class="user-department-list">
+            {% for dep in assigned_departments %}
+            <span class="user-department-chip {% if dep.is_active %}is-active{% else %}is-disabled{% endif %}">
+              <span class="user-department-dot"></span>{{ dep.code }}
+            </span>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% if preview_mode %}
+      <a href="{{ url_for('admin_test_mode_exit') }}" class="logout-btn" style="margin-bottom:8px;background:rgba(245,158,11,.14);color:var(--warning);">
+        <i class="fas fa-eye-slash"></i> Exit Test Mode
+      </a>
+      {% endif %}
+      <a href="{{ url_for('logout') }}" class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main-content" id="mainContent">
+    <!-- HEADER -->
+    <header class="top-header">
+      <button class="mobile-toggle" id="mobileToggle"><i class="fas fa-bars"></i></button>
+      <h1 class="page-title">{% block page_title %}Panel{% endblock %}</h1>
+      <div class="header-actions">
+        <div class="icon-group">
+          {% if effective_role == 'admin' %}
+          <a id="smtpStatusButton" href="{{ url_for(panel_endpoint, tab='config') }}#smtpStatusCard" class="btn btn-outline btn-sm icon-btn smtp-status-btn smtp-{{ smtp_status.state }}" title="{{ smtp_status.detail }}">
+            <i class="fas {{ smtp_status.icon }}"></i>
+            <span>{{ smtp_status.label }}</span>
+          </a>
+          {% endif %}
+          <button class="btn btn-outline btn-sm icon-btn" id="themeToggle" type="button" title="Toggle theme">
+            <i class="fas fa-sun" id="themeToggleIcon"></i>
+            <span>Theme</span>
+          </button>
+          {% if effective_role == 'admin' %}
+          <a href="{{ url_for(panel_endpoint, tab='config') }}" class="btn btn-outline btn-sm icon-btn" title="Settings">
+            <i class="fas fa-cog"></i>
+            <span>Settings</span>
+          </a>
+          {% elif effective_role in ['hod', 'chief_admin', 'deo', 'principal', 'counselor'] %}
+          <button class="btn btn-outline btn-sm icon-btn" onclick="openPasswordResetModal()" type="button" title="Password Reset">
+            <i class="fas fa-key"></i>
+            <span>Password Reset</span>
+          </button>
+          {% endif %}
+        </div>
+        <span class="header-badge desktop-only"><i class="fas fa-clock"></i> {{ now.strftime('%d %b, %H:%M') }}</span>
+      </div>
+    </header>
+
+    <!-- FLASH MESSAGES -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-container">
+      {% for cat, msg in messages %}
+      <div class="flash flash-{{ cat }}">
+        <i class="fas {% if cat == 'success' %}fa-check-circle{% elif cat == 'error' %}fa-times-circle{% elif cat == 'warning' %}fa-exclamation-triangle{% else %}fa-info-circle{% endif %}"></i>
+        <span>{{ msg }}</span>
+        <button class="flash-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+
+    <!-- PAGE CONTENT -->
+    <div class="content-area">
+      {% block content %}{% endblock %}
+    </div>
+
+    <footer class="global-footer">
+      <div class="global-footer-inner">
+        <div class="global-footer-left">
+          <img src="{{ url_for('static', filename='assets/banner.png') }}" alt="RMKCET Banner" class="global-footer-banner-image">
+          <span class="global-footer-text">Department of Science and Humanities</span>
+        </div>
+        <div class="global-footer-links">
+          <button type="button" class="global-footer-link global-footer-btn" onclick="openModal('support-downloads')">Support</button>
+          <button type="button" class="global-footer-link global-footer-btn" onclick="return startFooterTutorial(event)">Instructions</button>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  {% else %}
+  <!-- NO SIDEBAR – login page -->
+  <main class="login-layout">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-container" style="position:fixed;top:20px;right:20px;z-index:9999;width:380px;">
+      {% for cat, msg in messages %}
+      <div class="flash flash-{{ cat }}">
+        <i class="fas {% if cat == 'success' %}fa-check-circle{% elif cat == 'error' %}fa-times-circle{% else %}fa-info-circle{% endif %}"></i>
+        <span>{{ msg }}</span>
+        <button class="flash-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+    {% block content_login %}{% endblock %}
+  </main>
+  {% endif %}
+
+  <!-- Password Reset Modal -->
+  <div class="modal-overlay" id="modal-password-reset">
+    <div class="modal" style="max-width:480px;">
+      <div class="modal-header">
+        <h3><i class="fas fa-key"></i> Change Password</h3>
+        <button class="modal-close" onclick="closeModal('password-reset')">&times;</button>
+      </div>
+      {% set otp_reset_required = password_reset_otp_for_user %}
+      {% if otp_reset_required %}
+      <form method="POST" action="{{ url_for('api_send_password_reset_otp') }}" style="margin-bottom:10px;">
+        <button type="submit" class="btn btn-outline" style="width:100%;"><i class="fas fa-paper-plane"></i> Send OTP To My Email</button>
+      </form>
+      <p style="font-size:.78rem;color:var(--text-dim);margin-bottom:10px;">OTP verification is enabled for password reset. Enter the OTP from your mailbox before submitting the new password.</p>
+      {% endif %}
+      <form method="POST" action="{{ url_for('api_update_password') }}">
+        {% if current_role == 'admin' %}
+        <div class="form-group">
+          <label class="form-label">Current Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="currentPassword" name="current_password" required>
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('currentPassword', 'iconCurrentPassword')">
+              <i id="iconCurrentPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        {% endif %}
+        {% if otp_reset_required %}
+        <div class="form-group">
+          <label class="form-label">OTP</label>
+          <input type="text" class="form-control" name="otp_code" placeholder="Enter 6-digit OTP" minlength="6" maxlength="6" required>
+        </div>
+        {% endif %}
+        <div class="form-group">
+          <label class="form-label">New Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="newPassword" name="new_password" required minlength="6" placeholder="Min 6 characters">
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('newPassword', 'iconNewPassword')">
+              <i id="iconNewPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm New Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="confirmPassword" name="confirm_password" required minlength="6" placeholder="Re-enter password">
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('confirmPassword', 'iconConfirmPassword')">
+              <i id="iconConfirmPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width:100%;"><i class="fas fa-save"></i> Update Password</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Chief Admin Credential Reset Modal -->
+  <div class="modal-overlay" id="modal-chief-credential-reset">
+    <div class="modal" style="max-width:520px;">
+      <div class="modal-header">
+        <h3><i class="fas fa-key"></i> Reset Counselor Password</h3>
+        <button class="modal-close" onclick="closeModal('chief-credential-reset')">&times;</button>
+      </div>
+      <form method="POST" action="{{ url_for('api_chief_admin_reset_password') }}" id="chiefResetForm" onsubmit="return validateChiefResetSelection()">
+        <div class="form-group">
+          <label class="form-label">Search Counselor</label>
+          <input type="text" class="form-control" id="chiefResetSearch" placeholder="Type counselor name or email" autocomplete="off" oninput="renderChiefResetSuggestions()" onfocus="renderChiefResetSuggestions()">
+          <input type="hidden" id="chiefResetSelectedEmail" name="target_email" required>
+          <div id="chiefResetSuggestions" class="table-wrapper" style="margin-top:8px;max-height:180px;overflow:auto;display:none;"></div>
+          <p id="chiefResetPicked" style="margin-top:8px;font-size:.8rem;color:var(--text-dim);"></p>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">New Password</label>
+            <div class="d-flex align-center" style="gap:8px;">
+              <input type="password" class="form-control" id="chiefResetNewPassword" name="new_password" minlength="6" required>
+              <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('chiefResetNewPassword', 'iconChiefNewPassword')" aria-label="Show or hide new password">
+                <i id="iconChiefNewPassword" class="fas fa-eye"></i>
+              </button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Confirm Password</label>
+            <div class="d-flex align-center" style="gap:8px;">
+              <input type="password" class="form-control" id="chiefResetConfirmPassword" name="confirm_password" minlength="6" required>
+              <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('chiefResetConfirmPassword', 'iconChiefConfirmPassword')" aria-label="Show or hide confirm password">
+                <i id="iconChiefConfirmPassword" class="fas fa-eye"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-check">
+          <input type="checkbox" name="force_logout" id="forceLogoutChiefReset" checked>
+          <label for="forceLogoutChiefReset">Force logout from active sessions after reset</label>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:16px;">
+          <button type="submit" class="btn btn-primary" style="flex:1;"><i class="fas fa-check"></i> Reset Password</button>
+          <button type="button" class="btn btn-outline" onclick="closeModal('chief-credential-reset')" style="flex:1;">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modal-support-downloads">
+    <div class="modal" style="max-width:520px;">
+      <div class="modal-header">
+        <h3><i class="fas fa-circle-info"></i> Support Templates</h3>
+        <button class="modal-close" onclick="closeModal('support-downloads')">&times;</button>
+      </div>
+      <p style="font-size:.86rem;color:var(--text-dim);margin-bottom:14px;">
+        Download standard Excel templates for student list and marksheet uploads.
+      </p>
+      <div class="btn-group" style="display:grid;grid-template-columns:1fr;gap:10px;">
+        <a class="btn btn-outline" href="{{ url_for('download_student_template') }}" download>
+          <i class="fas fa-file-arrow-down"></i> Download Student List Template
+        </a>
+        <a class="btn btn-outline" href="{{ url_for('download_marksheet_template') }}" download>
+          <i class="fas fa-file-arrow-down"></i> Download Marksheet Template
+        </a>
+      </div>
+    </div>
+  </div>
+
+  {% if current_user_email %}
+  <div class="tutorial-overlay" id="tutorialOverlay" aria-hidden="true">
+    <div class="tutorial-overlay-backdrop"></div>
+    <div class="tutorial-highlight" id="tutorialHighlight"></div>
+    <div class="tutorial-card" role="dialog" aria-modal="true" aria-labelledby="tutorialCardTitle">
+      <h3 class="tutorial-card-title" id="tutorialCardTitle"></h3>
+      <p class="tutorial-card-text" id="tutorialCardText"></p>
+      <p class="tutorial-card-meta" id="tutorialCardMeta"></p>
+      <div class="tutorial-actions">
+        <button type="button" class="btn btn-outline btn-sm" id="tutorialBackBtn">Back</button>
+        <button type="button" class="btn btn-primary btn-sm" id="tutorialNextBtn">Next</button>
+        <button type="button" class="btn btn-outline btn-sm" id="tutorialSkipBtn">Skip Tutorial</button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% if current_user_email %}
+  <script>
+  (function() {
+    {% set tutorial_panel_base = url_for(panel_endpoint) if effective_role in ['admin', 'hod', 'chief_admin', 'deo', 'principal'] else url_for('counselor_page') %}
+    const roleRaw = {{ (effective_role or "")|tojson }}.toLowerCase();
+    const roleKey = roleRaw === 'chief_admin' ? 'hod' : roleRaw;
+    const supportedRoles = new Set(['deo', 'hod', 'principal', 'counselor']);
+    const tutorialFlags = {{ tutorial_flags|tojson }};
+    const tutorialEnabledForRole = {{ 'true' if tutorial_enabled_for_current_role else 'false' }};
+    const autoWelcome = {{ 'true' if tutorial_auto_welcome else 'false' }};
+    const userName = {{ (current_user_name or "User")|tojson }};
+    const fallbackInstructionsUrl = {{ url_for("instructions_page")|tojson }};
+    const panelBaseUrl = {{ tutorial_panel_base|tojson }};
+    const counselorBaseUrl = {{ url_for("counselor_page")|tojson }};
+
+    const overlay = document.getElementById('tutorialOverlay');
+    const highlight = document.getElementById('tutorialHighlight');
+    const cardEl = overlay ? overlay.querySelector('.tutorial-card') : null;
+    const titleEl = document.getElementById('tutorialCardTitle');
+    const textEl = document.getElementById('tutorialCardText');
+    const metaEl = document.getElementById('tutorialCardMeta');
+    const backBtn = document.getElementById('tutorialBackBtn');
+    const skipBtn = document.getElementById('tutorialSkipBtn');
+    const nextBtn = document.getElementById('tutorialNextBtn');
+
+    if (!overlay || !highlight || !titleEl || !textEl || !metaEl || !backBtn || !skipBtn || !nextBtn) {
+      window.startFooterTutorial = function(event) {
+        if (event) event.preventDefault();
+        window.location.href = fallbackInstructionsUrl;
+        return false;
+      };
+      return;
+    }
+
+    let steps = [];
+    let currentIndex = 0;
+    let inWelcomeMode = false;
+    let activeHighlightTarget = null;
+    let activeAdvanceHandler = null;
+    let activeAdvanceTarget = null;
+    const tutorialContextStorageKey = `tutorial_context_${roleKey}`;
+    const tutorialPendingStorageKey = `tutorial_pending_step_${roleKey}`;
+
+    function isMobileTutorialViewport() {
+      return window.innerWidth <= 768;
+    }
+
+    function isSidebarTabClickStep(step) {
+      if (!step) return false;
+      const selector = step.selector;
+      const selectors = Array.isArray(selector) ? selector : [selector];
+      const joined = selectors.filter(Boolean).join(' ').toLowerCase();
+      return joined.includes('.sidebar-nav .tab-nav') || joined.includes('.tab-nav[data-tab');
+    }
+
+    function clearMobileTutorialLocks() {
+      document.body.classList.remove('tutorial-mobile-sidebar-lock');
+      document.body.classList.remove('tutorial-mobile-tabs-only');
+    }
+
+    function applyMobileTutorialLocks(step) {
+      const shouldLockTabsOnly = Boolean(
+        roleKey === 'counselor'
+        && isMobileTutorialViewport()
+        && overlay.classList.contains('open')
+        && !inWelcomeMode
+        && shouldAdvanceOnTargetClick(step)
+        && isSidebarTabClickStep(step)
+      );
+
+      document.body.classList.toggle('tutorial-mobile-sidebar-lock', shouldLockTabsOnly);
+      document.body.classList.toggle('tutorial-mobile-tabs-only', shouldLockTabsOnly);
+
+      if (shouldLockTabsOnly) {
+        const sidebar = document.getElementById('sidebar');
+        if (sidebar) {
+          sidebar.classList.add('open');
+        }
+      }
+    }
+
+    function resetMobileTutorialCardPosition() {
+      if (!cardEl) return;
+      cardEl.classList.remove('tutorial-mobile-card-bottom');
+      cardEl.style.removeProperty('top');
+      cardEl.style.removeProperty('bottom');
+      cardEl.style.removeProperty('left');
+      cardEl.style.removeProperty('right');
+      cardEl.style.removeProperty('max-height');
+      cardEl.style.removeProperty('width');
+    }
+
+    function updateMobileTutorialCardPosition(target) {
+      if (!cardEl) return;
+
+      if (!overlay.classList.contains('open') || inWelcomeMode || !isMobileTutorialViewport()) {
+        resetMobileTutorialCardPosition();
+        return;
+      }
+
+      const headerHeight = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h')) || 64;
+      const viewportHeight = Math.max(320, (window.visualViewport ? window.visualViewport.height : window.innerHeight) || window.innerHeight || 640);
+      const topOffsetPx = headerHeight + 8;
+      const cardMaxTopPx = Math.max(220, Math.floor(viewportHeight * 0.56));
+
+      const targetRect = (target && typeof target.getBoundingClientRect === 'function')
+        ? target.getBoundingClientRect()
+        : null;
+
+      cardEl.style.left = '10px';
+      cardEl.style.right = '10px';
+      cardEl.style.width = 'auto';
+
+      let placeBottom = false;
+      if (targetRect) {
+        const estimatedTopCardHeight = Math.min(cardEl.scrollHeight || cardMaxTopPx, cardMaxTopPx);
+        const projectedTopCardBottom = topOffsetPx + estimatedTopCardHeight;
+        const overlapTopPlacement = !(projectedTopCardBottom < (targetRect.top - 10) || topOffsetPx > (targetRect.bottom + 10));
+        placeBottom = overlapTopPlacement;
+      }
+
+      if (placeBottom) {
+        cardEl.classList.add('tutorial-mobile-card-bottom');
+        cardEl.style.top = 'auto';
+        cardEl.style.bottom = 'max(8px, env(safe-area-inset-bottom))';
+        cardEl.style.maxHeight = '44vh';
+      } else {
+        cardEl.classList.remove('tutorial-mobile-card-bottom');
+        cardEl.style.top = 'calc(var(--header-h) + env(safe-area-inset-top, 0px) + 8px)';
+        cardEl.style.bottom = 'auto';
+        cardEl.style.maxHeight = 'calc(100dvh - var(--header-h) - env(safe-area-inset-top, 0px) - 22px)';
+      }
+    }
+
+    function withTab(baseUrl, tab) {
+      const url = new URL(baseUrl, window.location.origin);
+      if (tab) url.searchParams.set('tab', tab);
+      return `${url.pathname}${url.search}`;
+    }
+
+    function getDefaultTutorialLandingUrl() {
+      if (roleKey === 'counselor') {
+        return withTab(counselorBaseUrl, 'recent-tests');
+      }
+      if (roleKey === 'principal' || roleKey === 'hod') {
+        return withTab(panelBaseUrl, 'dashboard');
+      }
+      return withTab(panelBaseUrl, 'reports');
+    }
+
+    function stripTutorialParamsFromCurrentUrl() {
+      const url = new URL(window.location.href);
+      ['tutorial', 'tutorial_step', 'tutorial_role', 'tutorial_direct', 'tutorial_welcome'].forEach((key) => {
+        url.searchParams.delete(key);
+      });
+      const cleaned = `${url.pathname}${url.search}${url.hash}`;
+      window.history.replaceState({}, '', cleaned);
+    }
+
+    function isStepLocationSatisfied(targetInput) {
+      const currentUrl = new URL(window.location.href);
+      const targetUrl = new URL(targetInput, window.location.origin);
+
+      if (currentUrl.pathname !== targetUrl.pathname) {
+        return false;
+      }
+
+      for (const [key, value] of targetUrl.searchParams.entries()) {
+        if (currentUrl.searchParams.get(key) !== value) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    function navTabSelector(tab) {
+      return `.sidebar-nav .tab-nav[data-tab="${tab}"]`;
+    }
+
+    function normalizeHref(href) {
+      if (!href) return '';
+      try {
+        const url = new URL(href, window.location.origin);
+        return `${url.pathname}${url.search}`;
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function getFirstHref(selectors) {
+      const list = Array.isArray(selectors) ? selectors : [selectors];
+      for (const selector of list) {
+        if (!selector) continue;
+        const el = document.querySelector(selector);
+        const href = el && el.getAttribute('href');
+        if (href) return normalizeHref(href);
+      }
+      return '';
+    }
+
+    function readTutorialContext() {
+      try {
+        const raw = sessionStorage.getItem(tutorialContextStorageKey);
+        return raw ? JSON.parse(raw) : {};
+      } catch (error) {
+        return {};
+      }
+    }
+
+    function writeTutorialContext(context) {
+      try {
+        sessionStorage.setItem(tutorialContextStorageKey, JSON.stringify(context || {}));
+      } catch (error) {
+        // Ignore storage failures.
+      }
+    }
+
+    function clearPendingTutorialStep() {
+      try {
+        sessionStorage.removeItem(tutorialPendingStorageKey);
+      } catch (error) {
+        // Ignore storage failures.
+      }
+    }
+
+    function setPendingTutorialStep(stepIndex) {
+      if (!Number.isFinite(stepIndex) || stepIndex < 0) return;
+      try {
+        sessionStorage.setItem(tutorialPendingStorageKey, JSON.stringify({
+          step: Math.floor(stepIndex),
+          role: roleKey,
+          ts: Date.now(),
+        }));
+      } catch (error) {
+        // Ignore storage failures.
+      }
+    }
+
+    function consumePendingTutorialStep() {
+      try {
+        const raw = sessionStorage.getItem(tutorialPendingStorageKey);
+        if (!raw) return null;
+        sessionStorage.removeItem(tutorialPendingStorageKey);
+        const parsed = JSON.parse(raw);
+        if (!parsed || parsed.role !== roleKey) return null;
+        const step = Number(parsed.step);
+        const ageMs = Date.now() - Number(parsed.ts || 0);
+        if (!Number.isFinite(step) || step < 0) return null;
+        if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 5 * 60 * 1000) return null;
+        return step;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function getTutorialContext() {
+      const existing = readTutorialContext();
+      const discovered = {
+        reportsDeptHref: getFirstHref('#tab-reports .metrics-grid .metric-card[href*="report_dept="]'),
+        reportsYearHref: getFirstHref('#tab-reports .btn.btn-outline[href*="report_year="]'),
+        activityDeptHref: getFirstHref('#tab-activity .metrics-grid .metric-card[href*="act_dept="]'),
+        activityYearHref: getFirstHref('#tab-activity .btn.btn-outline[href*="act_year="]'),
+        activityTestHref: getFirstHref([
+          '#tab-activity .btn.btn-primary[href*="act_test="]',
+          '#tab-activity .btn.btn-outline[href*="act_test="]',
+        ]),
+      };
+
+      const merged = { ...existing };
+      Object.keys(discovered).forEach((key) => {
+        if (discovered[key]) merged[key] = discovered[key];
+      });
+      writeTutorialContext(merged);
+      return merged;
+    }
+
+    function readSimpleTutorialValue(key) {
+      try {
+        return sessionStorage.getItem(key) || '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function writeSimpleTutorialValue(key, value) {
+      if (!value) return;
+      try {
+        sessionStorage.setItem(key, value);
+      } catch (error) {
+        // Ignore storage failures.
+      }
+    }
+
+    function getCounselorSendWalkthroughUrl() {
+      const contextKey = 'tutorial_counselor_send_href';
+      const discovered = getFirstHref([
+        '#tab-test-database a[href*="/send"]',
+        '#tab-recent-tests a[href*="/send"]',
+      ]);
+
+      if (discovered) {
+        writeSimpleTutorialValue(contextKey, discovered);
+        return discovered;
+      }
+
+      if (window.location.pathname.includes('/send')) {
+        const currentSendUrl = `${window.location.pathname}${window.location.search}`;
+        writeSimpleTutorialValue(contextKey, currentSendUrl);
+        return currentSendUrl;
+      }
+
+      return readSimpleTutorialValue(contextKey);
+    }
+
+    function buildAdminSteps(role) {
+      const ctx = getTutorialContext();
+      const reportsTabUrl = withTab(panelBaseUrl, 'reports');
+      const reportsDeptUrl = ctx.reportsDeptHref || reportsTabUrl;
+      const reportsYearUrl = ctx.reportsYearHref || reportsDeptUrl;
+
+      const activityTabUrl = withTab(panelBaseUrl, 'activity');
+      const activityDeptUrl = ctx.activityDeptHref || activityTabUrl;
+      const activityYearUrl = ctx.activityYearHref || activityDeptUrl;
+      const activityTestUrl = ctx.activityTestHref || activityYearUrl;
+
+      const sharedActivitySteps = [
+        {
+          url: activityTabUrl,
+          title: 'Activity - Department Selection',
+          text: 'Start here by selecting one department card. This defines the counselor activity scope for everything that follows.',
+          selectors: ['#tab-activity .metrics-grid .metric-card', '#tab-activity .section-title', '#tab-activity .card'],
+        },
+        {
+          url: activityDeptUrl,
+          title: 'Activity - Year Selection',
+          text: 'Choose the year level for the selected department. This narrows activity to the exact student cohort.',
+          selectors: ['#tab-activity .card .btn.btn-outline[href*="act_year="]', '#tab-activity .card .card-title', '#tab-activity .card'],
+        },
+        {
+          url: activityYearUrl,
+          title: 'Activity - Semester and Test Selection',
+          text: 'Select semester and test buttons to open one concrete checkpoint (for example IAT 1 or Model Exam) before analysis.',
+          selectors: [
+            '#tab-activity .card .btn.btn-primary[href*="act_test="]',
+            '#tab-activity .card .btn.btn-outline[href*="act_test="]',
+            '#tab-activity .card .card-title',
+            '#tab-activity .card',
+          ],
+        },
+        {
+          url: activityTestUrl,
+          title: 'Activity - KPI Summary Cards',
+          text: 'These cards summarize Total Counselors, Complete, Pending and Average Completion. Use this as the quick status snapshot.',
+          selectors: [
+            '#tab-activity .metrics-grid .metric-card',
+            '#tab-activity .metrics-grid',
+            '#tab-activity .card',
+          ],
+        },
+        {
+          url: activityTestUrl,
+          title: 'Activity - Search, Sort and Export',
+          text: 'Use counselor search, sorting (Pending/A-Z/Z-A) and PDF export in this toolbar. Apply these controls before final review.',
+          selectors: [
+            '#tab-activity #activityResultForm',
+            '#tab-activity #activitySearchInput',
+            '#tab-activity #activitySortSelect',
+            '#tab-activity #activityPdfLink',
+            '#tab-activity .card',
+          ],
+        },
+        {
+          url: activityTestUrl,
+          title: 'Activity - Counselor Results Table',
+          text: 'Review each counselor row in detail: student count, reached, pending, completion percentage, status and last login for accountability.',
+          selectors: [
+            '#tab-activity #activityResultForm',
+            '#tab-activity .table-wrapper',
+            '#tab-activity .card .card-title',
+            '#tab-activity .card',
+          ],
+        },
+      ];
+
+      const tabConfig = {
+        principal: [
+          {
+            tab: 'dashboard',
+            navTitle: 'Open Dashboard',
+            navText: 'Use this tab to access institution-wide progress and completion signals.',
+            sectionSteps: [
+              {
+                title: 'Dashboard Overview',
+                text: 'Review KPI cards and blue analytics charts to track overall completion, department completion and semester-test trends.',
+                selectors: ['#tab-dashboard .metrics-grid', '#tab-dashboard canvas', '#tab-dashboard .table-wrapper'],
+              },
+            ],
+          },
+          {
+            tab: 'reports',
+            navTitle: 'Open Reports',
+            navText: 'Use Reports to move through department, year and final result/test actions in a guided sequence.',
+            sectionSteps: [
+              {
+                url: reportsTabUrl,
+                title: 'Reports - Department Selection',
+                text: 'Start by selecting a department card to enter that department\'s report context.',
+                selectors: [
+                  '#tab-reports .metrics-grid .metric-card',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsDeptUrl,
+                title: 'Reports - Year Selection',
+                text: 'Choose the academic year to load semester-wise test/result tables for that department.',
+                selectors: [
+                  '#tab-reports .card .btn.btn-outline[href*="report_year="]',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsYearUrl,
+                title: 'Reports - Result and Test Actions',
+                text: 'Review semester tables, confirm Test Name and Year columns, then use the view action button to inspect detailed results.',
+                selectors: [
+                  '#tab-reports .card .table-wrapper button[data-test-id]',
+                  '#tab-reports .card .table-wrapper',
+                  '#tab-reports .card .table-wrapper thead th:nth-child(1)',
+                  '#tab-reports .card .table-wrapper thead th:nth-child(2)',
+                  '#tab-reports .card .card-title',
+                  '#tab-reports .card',
+                ],
+              },
+            ],
+          },
+          {
+            tab: 'activity',
+            navTitle: 'Open Counsellor Activity',
+            navText: 'Review every counselor-activity function from selection, analytics controls and KPI cards to final completion table audit.',
+            sectionSteps: sharedActivitySteps,
+          },
+          {
+            tab: 'users',
+            navTitle: 'Open Users',
+            navText: 'Principal users view is read-only with counselor student list visibility.',
+            sectionSteps: [
+              {
+                title: 'Users - View Directory',
+                text: 'Use search, filters and view-only actions to inspect counselor student lists without editing accounts.',
+                selectors: ['#tab-users .global-action-bar', '#tab-users .table-wrapper'],
+              },
+            ],
+          },
+          {
+            tab: 'database',
+            navTitle: 'Open Database',
+            navText: 'Database tools are for backup, restore and maintenance operations.',
+            sectionSteps: [
+              {
+                title: 'Database Maintenance',
+                text: 'Run backup/restore actions carefully and validate current backup inventory before changes.',
+                selectors: ['#tab-database .card', '#tab-database .table-wrapper'],
+              },
+            ],
+          },
+        ],
+        hod: [
+          {
+            tab: 'dashboard',
+            navTitle: 'Open Dashboard',
+            navText: 'Start with dashboard charts to review scoped completion and marks trends.',
+            sectionSteps: [
+              {
+                title: 'Dashboard - Scoped Completion Overview',
+                text: 'Monitor completion and performance charts for your assigned department-year scopes first.',
+                selectors: ['#tab-dashboard .metrics-grid', '#tab-dashboard canvas', '#tab-dashboard .table-wrapper'],
+              },
+            ],
+          },
+          {
+            tab: 'reports',
+            navTitle: 'Open Reports',
+            navText: 'Inspect tests in your scoped departments and years.',
+            sectionSteps: [
+              {
+                url: reportsTabUrl,
+                title: 'Reports - Department Selection',
+                text: 'Start by selecting one department card from your allowed scope.',
+                selectors: [
+                  '#tab-reports .metrics-grid .metric-card',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsDeptUrl,
+                title: 'Reports - Year Selection',
+                text: 'Then pick a year from the available buttons before reviewing tests.',
+                selectors: [
+                  '#tab-reports .card .btn.btn-outline[href*="report_year="]',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsYearUrl,
+                title: 'Reports - Test View Actions',
+                text: 'Use the test rows and the view action button to inspect the selected test carefully.',
+                selectors: [
+                  '#tab-reports .card .table-wrapper button[data-test-id]',
+                  '#tab-reports .card .table-wrapper',
+                  '#tab-reports .card .card-title',
+                  '#tab-reports .card',
+                ],
+              },
+            ],
+          },
+          {
+            tab: 'activity',
+            navTitle: 'Open Counsellor Activity',
+            navText: 'Check completion progress by counselor for selected test contexts.',
+            sectionSteps: sharedActivitySteps,
+          },
+          {
+            tab: 'messages',
+            navTitle: 'Open Message Logs',
+            navText: 'Audit outbound communication history in your scope.',
+            sectionSteps: [
+              {
+                title: 'Message Filters and Log Rows',
+                text: 'Filter by date or counselor and review grouped daily entries before exporting.',
+                selectors: ['#tab-messages .card form', '#tab-messages .table-wrapper'],
+              },
+            ],
+          },
+        ],
+        deo: [
+          {
+            tab: 'reports',
+            navTitle: 'Open Reports',
+            navText: 'Use Reports to upload and verify tests per department and year.',
+            sectionSteps: [
+              {
+                url: reportsTabUrl,
+                title: 'Reports - Department Selection',
+                text: 'Pick the department card you want to work on first.',
+                selectors: [
+                  '#tab-reports .metrics-grid .metric-card',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsDeptUrl,
+                title: 'Reports - Year Selection',
+                text: 'Choose a year to open year-specific upload and test sections.',
+                selectors: [
+                  '#tab-reports .card .btn.btn-outline[href*="report_year="]',
+                  '#tab-reports .card .card-title',
+                ],
+              },
+              {
+                url: reportsYearUrl,
+                title: 'Reports - Upload and Test View',
+                text: 'Upload marksheet first, then use test rows and view buttons to validate uploaded tests.',
+                selectors: [
+                  '#tab-reports .card form',
+                  '#tab-reports .card .table-wrapper button[data-test-id]',
+                  '#tab-reports .card .table-wrapper',
+                  '#tab-reports .card .card-title',
+                  '#tab-reports .card',
+                ],
+              },
+            ],
+          },
+          {
+            tab: 'activity',
+            navTitle: 'Open Counsellor Activity',
+            navText: 'Track counselor completion against selected test checkpoints.',
+            sectionSteps: sharedActivitySteps,
+          },
+          {
+            tab: 'users',
+            navTitle: 'Open Users',
+            navText: 'Manage only counselors in your assigned scopes from this tab.',
+            sectionSteps: [
+              {
+                title: 'Users - Scoped Counselor Management',
+                text: 'Create and manage counselors in your scope only. Use student actions to maintain counselor student lists.',
+                selectors: ['#tab-users #registerUserCard', '#tab-users .table-wrapper'],
+              },
+            ],
+          },
+          {
+            tab: 'messages',
+            navTitle: 'Open Message Logs',
+            navText: 'Verify communication records and use exports for reporting.',
+            sectionSteps: [
+              {
+                title: 'Message Log Coverage',
+                text: 'Apply filters and inspect grouped records to verify all sent communication.',
+                selectors: ['#tab-messages .card form', '#tab-messages .table-wrapper'],
+              },
+            ],
+          },
+        ],
+      };
+
+      const tabs = tabConfig[role] || [];
+      if (!tabs.length) return [];
+
+      const result = [
+        {
+          url: withTab(panelBaseUrl, tabs[0].tab),
+          selector: '.sidebar-nav',
+          title: 'Navigation',
+          text: 'Use the sidebar to move through each work area in sequence.',
+        },
+      ];
+
+      tabs.forEach((item) => {
+        const tabUrl = withTab(panelBaseUrl, item.tab);
+        result.push({
+          url: tabUrl,
+          selector: navTabSelector(item.tab),
+          title: item.navTitle || `Open ${item.tab}`,
+          text: item.navText || 'Use this tab to continue the tutorial flow.',
+          advanceOnTargetClick: true,
+        });
+
+        (item.sectionSteps || []).forEach((section) => {
+          result.push({
+            url: section.url || tabUrl,
+            selector: section.selectors || section.selector,
+            title: section.title,
+            text: section.text,
+          });
+        });
+      });
+
+      result.push({
+        url: withTab(panelBaseUrl, tabs[tabs.length - 1].tab),
+        selector: '.global-footer-links',
+        title: 'Support and Instructions',
+        text: 'Use Support for templates and Instructions to relaunch this tutorial anytime.',
+      });
+
+      return result;
+    }
+
+    function buildCounselorSteps() {
+      const sendUiUrl = getCounselorSendWalkthroughUrl();
+      const sendWalkthroughUrl = sendUiUrl || withTab(counselorBaseUrl, 'test-database');
+
+      const tabs = [
+        {
+          tab: 'recent-tests',
+          navTitle: 'Open Dashboard',
+          navText: 'Use Dashboard to review recently uploaded tests and action shortcuts.',
+          sectionSteps: [
+            {
+              title: 'Dashboard - Recent Tests Table',
+              text: 'Review this table carefully for test name, year, status and action shortcuts.',
+              selectors: [
+                '#tab-recent-tests .section-title',
+                '#tab-recent-tests .table-wrapper',
+                '#tab-recent-tests .table-wrapper thead th:nth-child(1)',
+                '#tab-recent-tests .table-wrapper thead th:nth-child(2)',
+              ],
+            },
+          ],
+        },
+        {
+          tab: 'test-database',
+          navTitle: 'Open Reports',
+          navText: 'Use Reports to validate year-wise and test-wise coverage before sending.',
+          sectionSteps: [
+            {
+              title: 'Reports - Semester 1 Tests',
+              text: 'This section contains Semester 1 tests. Verify Test Name and Year columns before taking action.',
+              selectors: [
+                '#tab-test-database .card:nth-of-type(1) .card-title',
+                '#tab-test-database .card:nth-of-type(1) .table-wrapper',
+                '#tab-test-database .card:nth-of-type(1) thead th:nth-child(1)',
+                '#tab-test-database .card:nth-of-type(1) thead th:nth-child(2)',
+              ],
+            },
+            {
+              title: 'Reports - Semester 2 Tests',
+              text: 'This section contains Semester 2 tests. Make sure every required test is reviewed here as well.',
+              selectors: [
+                '#tab-test-database .card:nth-of-type(2) .card-title',
+                '#tab-test-database .card:nth-of-type(2) .table-wrapper',
+                '#tab-test-database .card:nth-of-type(2) thead th:nth-child(1)',
+                '#tab-test-database .card:nth-of-type(2) thead th:nth-child(2)',
+              ],
+            },
+            {
+              title: 'Reports - Send Result Entry',
+              text: 'Use this Send Results button to open the result delivery interface for a selected test.',
+              selectors: [
+                '#tab-test-database a[href*="/send"]',
+                '#tab-test-database .btn.btn-primary',
+              ],
+              advanceOnTargetClick: true,
+            },
+          ],
+        },
+      ];
+
+      const result = [
+        {
+          url: withTab(counselorBaseUrl, tabs[0].tab),
+          selector: '.sidebar-nav',
+          title: 'Navigation',
+          text: 'Use these tabs to move through dashboard, reports and message history.',
+        },
+      ];
+
+      tabs.forEach((item) => {
+        const tabUrl = withTab(counselorBaseUrl, item.tab);
+        result.push({
+          url: tabUrl,
+          selector: navTabSelector(item.tab),
+          title: item.navTitle,
+          text: item.navText,
+          advanceOnTargetClick: true,
+        });
+
+        (item.sectionSteps || []).forEach((section) => {
+          result.push({
+            url: section.url || tabUrl,
+            selector: section.selectors,
+            title: section.title,
+            text: section.text,
+          });
+        });
+      });
+
+      const sendTutorialSteps = [
+        {
+          url: sendWalkthroughUrl,
+          selector: [
+            '#varTemplate',
+            '#fieldOrderList',
+            '#fieldOrderHint',
+            '.content-area',
+          ],
+          title: 'Send Results - Template and Subject Parse Order',
+          text: 'Edit the message template here and manage subject/metric parse order in the field-order section. Reorder to control how marks, attendance, failed subjects and GPA appear in parent messages.',
+        },
+        {
+          url: sendWalkthroughUrl,
+          selector: [
+            'table tbody .btn.btn-primary.btn-sm',
+            '#sendPreviewForm',
+            '#previewText',
+            '.table-wrapper',
+            '.content-area',
+          ],
+          title: 'Send Results - Single Send Button Flow',
+          text: 'Click a Send to WhatsApp button to continue tutorial flow. Tutorial mode will not open the send preview dialog in this step.',
+          advanceOnTargetClick: true,
+          preventDefaultOnTargetClick: true,
+        },
+        {
+          url: sendWalkthroughUrl,
+          selector: [
+            '.send-batch-card',
+            '#batchIncludeGenerated',
+            '#batchDelayPreset',
+            '#batchSendStartBtn',
+            '#batchRunStatus',
+            '.content-area',
+          ],
+          title: 'Send Results - Batch Send Section',
+          text: 'Click the highlighted batch controls to continue tutorial flow. Tutorial mode will not start batch send during this step.',
+          advanceOnTargetClick: true,
+          preventDefaultOnTargetClick: true,
+        },
+      ];
+
+      sendTutorialSteps.forEach((step) => result.push(step));
+
+      result.push({
+        url: withTab(counselorBaseUrl, 'message-history'),
+        selector: navTabSelector('message-history'),
+        title: 'Open Message Logs',
+        text: 'After send operations, use Message Logs to confirm delivery records and statuses.',
+      });
+
+      result.push({
+        url: withTab(counselorBaseUrl, 'message-history'),
+        selector: [
+          '#tab-message-history .section-title',
+          '#tab-message-history .table-wrapper',
+          '.content-area',
+        ],
+        title: 'Message History Table',
+        text: 'Review date, student, registration number, status and format here for delivery auditing.',
+      });
+
+      result.push({
+        url: withTab(counselorBaseUrl, 'message-history'),
+        selector: '.global-footer-links',
+        title: 'Support and Instructions',
+        text: 'Use Support for templates and Instructions to replay this walkthrough anytime.',
+      });
+
+      return result;
+    }
+
+    function buildStepsForRole(role) {
+      if (role === 'counselor') return buildCounselorSteps();
+      return buildAdminSteps(role);
+    }
+
+    function openOverlay() {
+      overlay.classList.add('open');
+      overlay.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeOverlay() {
+      overlay.classList.remove('open');
+      overlay.classList.remove('spotlight-active');
+      overlay.classList.remove('welcome-mode');
+      overlay.setAttribute('aria-hidden', 'true');
+      clearMobileTutorialLocks();
+      resetMobileTutorialCardPosition();
+      highlight.style.display = 'none';
+      if (activeAdvanceTarget && activeAdvanceHandler) {
+        activeAdvanceTarget.removeEventListener('click', activeAdvanceHandler, true);
+      }
+      if (activeAdvanceTarget) {
+        activeAdvanceTarget.classList.remove('tutorial-clickable');
+      }
+      activeAdvanceTarget = null;
+      activeAdvanceHandler = null;
+      if (activeHighlightTarget) {
+        activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+        activeHighlightTarget = null;
+      }
+    }
+
+    function applyHighlightRect(target) {
+      const rect = target.getBoundingClientRect();
+      const padding = 8;
+      const verticalNudge = window.innerWidth <= 768 ? -8 : -5;
+
+      highlight.style.display = 'block';
+      highlight.style.top = `${Math.max(6, rect.top - padding + verticalNudge)}px`;
+      highlight.style.left = `${Math.max(6, rect.left - padding)}px`;
+      highlight.style.width = `${Math.max(28, rect.width + (padding * 2))}px`;
+      highlight.style.height = `${Math.max(28, rect.height + (padding * 2))}px`;
+    }
+
+    function isElementVisible(el) {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = window.getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) return false;
+      return true;
+    }
+
+    function ensureMobileSidebarForTarget(target) {
+      if (!target || window.innerWidth > 768) return;
+      const sidebar = document.getElementById('sidebar');
+      if (!sidebar) return;
+      if (sidebar.contains(target) && !sidebar.classList.contains('open')) {
+        sidebar.classList.add('open');
+      }
+    }
+
+    function getInteractiveTarget(target) {
+      if (!target || !(target instanceof Element)) return null;
+      const selector = 'a[href], button, [role="button"], .tab-nav, .metric-card[href], [data-tab]';
+      if (target.matches(selector)) return target;
+      return target.querySelector(selector);
+    }
+
+    function setHighlightForSelector(selector, preferInteractive = false) {
+      const selectorList = Array.isArray(selector)
+        ? selector.filter(Boolean)
+        : (selector ? [selector] : []);
+
+      const pickInteractiveNode = (nodeList) => {
+        for (const node of nodeList || []) {
+          const interactiveNode = getInteractiveTarget(node);
+          if (!interactiveNode) continue;
+          if (isElementVisible(interactiveNode)) return interactiveNode;
+        }
+        for (const node of nodeList || []) {
+          const interactiveNode = getInteractiveTarget(node);
+          if (interactiveNode) return interactiveNode;
+        }
+        return null;
+      };
+
+      if (!selectorList.length) {
+        overlay.classList.remove('spotlight-active');
+        highlight.style.display = 'none';
+        if (activeHighlightTarget) {
+          activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+          activeHighlightTarget.classList.remove('tutorial-clickable');
+          activeHighlightTarget = null;
+        }
+        return null;
+      }
+
+      let target = null;
+      for (const candidate of selectorList) {
+        let nodes = [];
+        try {
+          nodes = Array.from(document.querySelectorAll(candidate));
+        } catch (err) {
+          nodes = [];
+        }
+        const visibleNodes = nodes.filter((node) => isElementVisible(node));
+        if (preferInteractive) {
+          target = pickInteractiveNode(visibleNodes)
+            || pickInteractiveNode(nodes)
+            || visibleNodes[0]
+            || nodes[0]
+            || null;
+        } else {
+          target = visibleNodes[0] || nodes[0] || null;
+        }
+        if (target) break;
+      }
+
+      if (!target) {
+        overlay.classList.remove('spotlight-active');
+        highlight.style.display = 'none';
+        if (activeHighlightTarget) {
+          activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+          activeHighlightTarget.classList.remove('tutorial-clickable');
+          activeHighlightTarget = null;
+        }
+        return null;
+      }
+
+      if (activeHighlightTarget && activeHighlightTarget !== target) {
+        activeHighlightTarget.classList.remove('tutorial-spotlight-target');
+        activeHighlightTarget.classList.remove('tutorial-clickable');
+      }
+
+      target.classList.add('tutorial-spotlight-target');
+      activeHighlightTarget = target;
+      overlay.classList.add('spotlight-active');
+
+      ensureMobileSidebarForTarget(target);
+
+      target.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });
+      applyHighlightRect(target);
+      window.requestAnimationFrame(() => {
+        if (activeHighlightTarget === target && overlay.classList.contains('open')) {
+          applyHighlightRect(target);
+        }
+      });
+      window.setTimeout(() => {
+        if (activeHighlightTarget === target && overlay.classList.contains('open')) {
+          applyHighlightRect(target);
+        }
+      }, 140);
+
+      return target;
+    }
+
+    function shouldAdvanceOnTargetClick(step) {
+      if (!step) return false;
+      if (step.advanceOnTargetClick) return true;
+      const selector = step.selector;
+      const selectors = Array.isArray(selector) ? selector : [selector];
+      const joined = selectors.filter(Boolean).join(' ').toLowerCase();
+      return joined.includes('.tab-nav') || joined.includes('.btn') || joined.includes('.metric-card');
+    }
+
+    function shouldPreventTargetDefault(step) {
+      return !!(step && step.preventDefaultOnTargetClick);
+    }
+
+    function closeActivePageModalsForTutorial() {
+      document.querySelectorAll('.modal-overlay.open').forEach((overlayEl) => {
+        overlayEl.classList.remove('open');
+      });
+    }
+
+    function bindAdvanceOnHighlightedTarget(step, target) {
+      if (activeAdvanceTarget && activeAdvanceHandler) {
+        activeAdvanceTarget.removeEventListener('click', activeAdvanceHandler, true);
+      }
+      if (activeAdvanceTarget) {
+        activeAdvanceTarget.classList.remove('tutorial-clickable');
+      }
+      activeAdvanceTarget = null;
+      activeAdvanceHandler = null;
+
+      if (!target || !shouldAdvanceOnTargetClick(step)) {
+        return false;
+      }
+
+      const clickableTarget = getInteractiveTarget(target);
+      if (!clickableTarget) {
+        return false;
+      }
+
+      target.classList.add('tutorial-clickable');
+      const thisStepIndex = currentIndex;
+      activeAdvanceHandler = function(event) {
+        if (currentIndex !== thisStepIndex) return;
+
+        const preventNativeAction = shouldPreventTargetDefault(step);
+        if (preventNativeAction) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+        }
+
+        const nextStepIndex = thisStepIndex >= steps.length - 1 ? null : thisStepIndex + 1;
+        if (nextStepIndex !== null) {
+          setPendingTutorialStep(nextStepIndex);
+        } else {
+          clearPendingTutorialStep();
+        }
+
+        const linkEl = clickableTarget.closest('a[href]');
+        if (linkEl && nextStepIndex !== null) {
+          const href = linkEl.getAttribute('href') || '';
+          if (href && !href.startsWith('#') && !/^javascript:/i.test(href)) {
+            try {
+              const navUrl = new URL(href, window.location.origin);
+              if (navUrl.origin === window.location.origin) {
+                event.preventDefault();
+                event.stopPropagation();
+                navUrl.searchParams.set('tutorial', '1');
+                navUrl.searchParams.set('tutorial_step', String(nextStepIndex));
+                navUrl.searchParams.set('tutorial_role', roleKey);
+                navUrl.searchParams.set('tutorial_direct', '1');
+                window.location.href = `${navUrl.pathname}${navUrl.search}${navUrl.hash}`;
+                return;
+              }
+            } catch (err) {
+              // Ignore URL parsing failures and keep original link behavior.
+            }
+          }
+          if (!preventNativeAction) {
+            return;
+          }
+        }
+
+        window.setTimeout(() => {
+          if (currentIndex !== thisStepIndex) return;
+          if (thisStepIndex >= steps.length - 1) {
+            finishTutorial({ redirectToDefault: true });
+            return;
+          }
+          navigateToStep(thisStepIndex + 1);
+        }, 80);
+      };
+      clickableTarget.addEventListener('click', activeAdvanceHandler, true);
+      activeAdvanceTarget = clickableTarget;
+      return true;
+    }
+
+    function finishTutorial(options) {
+      const redirectToDefault = !!(options && options.redirectToDefault);
+      closeOverlay();
+      inWelcomeMode = false;
+      clearPendingTutorialStep();
+      if (redirectToDefault) {
+        window.location.href = getDefaultTutorialLandingUrl();
+        return;
+      }
+      stripTutorialParamsFromCurrentUrl();
+    }
+
+    function navigateToStep(index) {
+      if (!Array.isArray(steps) || !steps.length) {
+        finishTutorial();
+        return;
+      }
+
+      const safeIndex = Math.max(0, Math.min(steps.length - 1, index));
+      const step = steps[safeIndex];
+
+      closeActivePageModalsForTutorial();
+
+      if (!isStepLocationSatisfied(step.url)) {
+        const target = new URL(step.url, window.location.origin);
+        target.searchParams.set('tutorial', '1');
+        target.searchParams.set('tutorial_step', String(safeIndex));
+        target.searchParams.set('tutorial_role', roleKey);
+        target.searchParams.set('tutorial_direct', '1');
+        window.location.href = `${target.pathname}${target.search}`;
+        return;
+      }
+
+      currentIndex = safeIndex;
+      inWelcomeMode = false;
+      openOverlay();
+      overlay.classList.remove('welcome-mode');
+
+      titleEl.textContent = step.title;
+      textEl.textContent = step.text;
+      metaEl.textContent = `Step ${safeIndex + 1} of ${steps.length}`;
+
+      backBtn.style.display = safeIndex > 0 ? '' : 'none';
+      skipBtn.style.display = safeIndex >= steps.length - 1 ? 'none' : '';
+      skipBtn.textContent = 'Skip Tutorial';
+      const clickAdvanceExpected = shouldAdvanceOnTargetClick(step);
+      nextBtn.style.display = clickAdvanceExpected ? 'none' : '';
+      nextBtn.textContent = safeIndex >= steps.length - 1 ? 'Finish' : 'Next';
+
+      const target = setHighlightForSelector(step.selector, clickAdvanceExpected);
+      let resolvedTarget = target;
+      let clickAdvanceBound = false;
+      if (!target) {
+        bindAdvanceOnHighlightedTarget(step, null);
+        resolvedTarget = setHighlightForSelector(['.content-area', '.page-title']) || null;
+      } else {
+        clickAdvanceBound = bindAdvanceOnHighlightedTarget(step, target);
+      }
+
+      if (clickAdvanceExpected && !clickAdvanceBound) {
+        nextBtn.style.display = '';
+      }
+
+      if (clickAdvanceBound) {
+        metaEl.textContent = `Step ${safeIndex + 1} of ${steps.length} - Click the highlighted control to continue`;
+      }
+
+      applyMobileTutorialLocks(step);
+      updateMobileTutorialCardPosition(resolvedTarget || activeHighlightTarget);
+    }
+
+    function showWelcomeDialog() {
+      steps = buildStepsForRole(roleKey);
+      if (!steps.length) return;
+
+      inWelcomeMode = true;
+      openOverlay();
+      clearMobileTutorialLocks();
+      resetMobileTutorialCardPosition();
+      overlay.classList.remove('spotlight-active');
+      overlay.classList.add('welcome-mode');
+      highlight.style.display = 'none';
+
+      const welcomeRole = (roleKey || 'user').replace(/[_-]+/g, ' ').toUpperCase();
+      const welcomeName = String(userName || 'User').trim();
+      titleEl.textContent = `Welcome ${welcomeRole} ${welcomeName}`;
+      textEl.textContent = 'Would you like a quick guided tutorial of your panel? You can skip now and start it later from Instructions in the footer.';
+      metaEl.textContent = 'This appears on first login for your role.';
+
+      backBtn.style.display = 'none';
+      skipBtn.style.display = '';
+      skipBtn.textContent = 'Skip Tutorial';
+      nextBtn.textContent = 'Continue Tutorial';
+    }
+
+    function startTutorialFromBeginning() {
+      steps = buildStepsForRole(roleKey);
+      if (!steps.length) {
+        alert('Tutorial steps are not available for this role right now.');
+        return;
+      }
+      clearPendingTutorialStep();
+      navigateToStep(0);
+    }
+
+    backBtn.addEventListener('click', () => {
+      if (inWelcomeMode) return;
+      navigateToStep(currentIndex - 1);
+    });
+
+    skipBtn.addEventListener('click', () => {
+      finishTutorial({ redirectToDefault: true });
+    });
+
+    nextBtn.addEventListener('click', () => {
+      if (inWelcomeMode) {
+        startTutorialFromBeginning();
+        return;
+      }
+      if (currentIndex >= steps.length - 1) {
+        finishTutorial({ redirectToDefault: true });
+        return;
+      }
+      navigateToStep(currentIndex + 1);
+    });
+
+    overlay.addEventListener('click', (event) => {
+      if (inWelcomeMode && (event.target === overlay || event.target.classList.contains('tutorial-overlay-backdrop'))) {
+        finishTutorial();
+      }
+    });
+
+    document.addEventListener('click', (event) => {
+      if (!document.body.classList.contains('tutorial-mobile-tabs-only')) return;
+      const inTutorialCard = !!event.target.closest('.tutorial-card');
+      const onSidebarTab = !!event.target.closest('.sidebar-nav .tab-nav');
+      if (inTutorialCard || onSidebarTab) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') {
+        event.stopImmediatePropagation();
+      }
+    }, true);
+
+    window.addEventListener('resize', () => {
+      if (!overlay.classList.contains('open') || inWelcomeMode || !steps.length) return;
+      const step = steps[currentIndex];
+      if (!step) return;
+      applyMobileTutorialLocks(step);
+      const refreshedTarget = setHighlightForSelector(step.selector, shouldAdvanceOnTargetClick(step));
+      updateMobileTutorialCardPosition(refreshedTarget || activeHighlightTarget);
+    });
+
+    window.addEventListener('scroll', () => {
+      if (!overlay.classList.contains('open') || inWelcomeMode || !steps.length) return;
+      const step = steps[currentIndex];
+      if (!step) return;
+      const refreshedTarget = setHighlightForSelector(step.selector, shouldAdvanceOnTargetClick(step));
+      updateMobileTutorialCardPosition(refreshedTarget || activeHighlightTarget);
+    }, { passive: true });
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => {
+        if (!overlay.classList.contains('open') || inWelcomeMode || !steps.length) return;
+        const step = steps[currentIndex];
+        if (!step) return;
+        const refreshedTarget = setHighlightForSelector(step.selector, shouldAdvanceOnTargetClick(step));
+        updateMobileTutorialCardPosition(refreshedTarget || activeHighlightTarget);
+      });
+      window.visualViewport.addEventListener('scroll', () => {
+        if (!overlay.classList.contains('open') || inWelcomeMode || !steps.length) return;
+        const step = steps[currentIndex];
+        if (!step) return;
+        const refreshedTarget = setHighlightForSelector(step.selector, shouldAdvanceOnTargetClick(step));
+        updateMobileTutorialCardPosition(refreshedTarget || activeHighlightTarget);
+      });
+    }
+
+    window.startFooterTutorial = function(event) {
+      if (event) event.preventDefault();
+
+      if (!supportedRoles.has(roleKey)) {
+        window.location.href = fallbackInstructionsUrl;
+        return false;
+      }
+
+      if (!(tutorialFlags && tutorialFlags.master) || !tutorialEnabledForRole) {
+        alert('Guided tutorial is currently disabled by settings.');
+        return false;
+      }
+
+      startTutorialFromBeginning();
+      return false;
+    };
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const params = new URLSearchParams(window.location.search);
+      const isTutorialRequest = params.get('tutorial') === '1';
+      const requestedRole = (params.get('tutorial_role') || roleKey).toLowerCase();
+      const requestedStep = parseInt(params.get('tutorial_step') || '0', 10);
+
+      if (isTutorialRequest && supportedRoles.has(roleKey) && requestedRole === roleKey && tutorialEnabledForRole) {
+        clearPendingTutorialStep();
+        steps = buildStepsForRole(roleKey);
+        navigateToStep(Number.isFinite(requestedStep) ? requestedStep : 0);
+        return;
+      }
+
+      const pendingStep = consumePendingTutorialStep();
+      if (pendingStep !== null && supportedRoles.has(roleKey) && tutorialEnabledForRole) {
+        steps = buildStepsForRole(roleKey);
+        navigateToStep(pendingStep);
+        return;
+      }
+
+      if (autoWelcome && supportedRoles.has(roleKey) && tutorialEnabledForRole) {
+        showWelcomeDialog();
+      }
+    });
+  })();
+  </script>
+  <script>
+  (function() {
+    const smtpBtn = document.getElementById('smtpStatusButton');
+    if (!smtpBtn) return;
+
+    const statusUrl = {{ url_for('api_config_smtp_status')|tojson }};
+    const stateClasses = ['smtp-ready', 'smtp-error', 'smtp-missing', 'smtp-test', 'smtp-unknown'];
+
+    function applySmtpStatus(status) {
+      if (!status || typeof status !== 'object') return;
+
+      const icon = smtpBtn.querySelector('i');
+      const label = smtpBtn.querySelector('span');
+      smtpBtn.classList.remove(...stateClasses);
+      smtpBtn.classList.add(`smtp-${status.state || 'unknown'}`);
+      smtpBtn.title = status.detail || 'SMTP status';
+      if (icon) icon.className = `fas ${status.icon || 'fa-envelope'}`;
+      if (label) label.textContent = status.label || 'SMTP';
+
+      const card = document.getElementById('smtpStatusCard');
+      const cardLabel = document.getElementById('smtpStatusLabel');
+      const cardDetail = document.getElementById('smtpStatusDetail');
+      if (card) {
+        card.setAttribute('data-smtp-state', status.state || 'unknown');
+      }
+      if (cardLabel) cardLabel.textContent = status.label || 'SMTP';
+      if (cardDetail) cardDetail.textContent = status.detail || '';
+
+      document.dispatchEvent(new CustomEvent('smtp-status-updated', { detail: status }));
+    }
+
+    async function refreshSmtpStatus(forceRefresh) {
+      try {
+        const refreshParam = forceRefresh ? '1' : '0';
+        const response = await fetch(`${statusUrl}?refresh=${refreshParam}`, {
+          credentials: 'same-origin',
+          headers: { 'Accept': 'application/json' },
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload || !payload.success) return;
+        applySmtpStatus(payload.status || {});
+      } catch (err) {
+        // Keep previous UI state when status fetch fails.
+      }
+    }
+
+    window.applySmtpStatusToUi = applySmtpStatus;
+    window.refreshSmtpStatus = function() { refreshSmtpStatus(true); };
+
+    document.addEventListener('DOMContentLoaded', () => {
+      window.setTimeout(() => refreshSmtpStatus(true), 60);
+    });
+  })();
+  </script>
+  {% else %}
+  <script>
+    window.startFooterTutorial = function(event) {
+      if (event) event.preventDefault();
+      window.location.href = '{{ url_for("instructions_page") }}';
+      return false;
+    };
+  </script>
+  {% endif %}
+  {% block scripts %}{% endblock %}
+</body>
+</html>

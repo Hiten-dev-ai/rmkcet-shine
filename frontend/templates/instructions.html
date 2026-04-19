@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Instructions - {{ app_name }}{% endblock %}
+{% block page_title %}{{ role_title }} Instructions{% endblock %}
+
+{% block content %}
+<div class="card mb-3" style="max-width:980px;">
+  <div class="card-title"><i class="fas fa-book-open"></i> Quick Start</div>
+  <p style="font-size:.9rem;color:var(--text-dim);line-height:1.7;">
+    This page provides in-app instructions for your current role. Use the sidebar to return to your working tabs.
+    For support files, open the Support button in the footer.
+  </p>
+  <div class="btn-group" style="margin-top:12px;">
+    {% if role_key in ['admin', 'principal', 'hod', 'chief_admin', 'deo'] %}
+    <a class="btn btn-outline" href="{{ url_for(panel_endpoint, tab='reports') }}"><i class="fas fa-arrow-left"></i> Back To Panel</a>
+    {% else %}
+    <a class="btn btn-outline" href="{{ url_for('counselor_page', tab='recent-tests') }}"><i class="fas fa-arrow-left"></i> Back To Panel</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if role_key == 'admin' %}
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-user-shield"></i> System Admin Workflow</div>
+  <ul style="padding-left:18px;line-height:1.9;color:var(--text);">
+    <li>Use Reports to select Department, then Year, then manage Semester test data.</li>
+    <li>Use Counsellor Activity to track completion and export filtered PDF summaries.</li>
+    <li>Use Users to create and maintain Counselor, HoD, DEO and Principal accounts.</li>
+    <li>Use Database tab for backup, restore and controlled data clear operations.</li>
+    <li>Use Session Monitoring and Message Logs for audit and operations visibility.</li>
+  </ul>
+</div>
+{% elif role_key == 'principal' %}
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-gauge"></i> Principal Workflow</div>
+  <ul style="padding-left:18px;line-height:1.9;color:var(--text);">
+    <li>Dashboard provides institution-level completion summary and top performers.</li>
+    <li>Reports is read-only for institution-wide academic visibility across departments.</li>
+    <li>Counsellor Activity helps review completion status by test and section scope.</li>
+    <li>Database allows safe backup/restore supervision with password confirmation.</li>
+  </ul>
+</div>
+{% elif role_key in ['hod', 'chief_admin'] %}
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-building"></i> HoD Workflow</div>
+  <ul style="padding-left:18px;line-height:1.9;color:var(--text);">
+    <li>Your panel is scoped to assigned Department and Year only.</li>
+    <li>Use Reports to review semester tests and counselor progress in your scope.</li>
+    <li>Use Counsellor Activity to inspect pending/complete counselors by test.</li>
+    <li>Use Message Logs for communication audit under your scope.</li>
+    <li>HoD does not upload marksheets; uploads are handled by System Admin or DEO.</li>
+  </ul>
+</div>
+{% elif role_key == 'deo' %}
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-file-upload"></i> DEO Workflow</div>
+  <ul style="padding-left:18px;line-height:1.9;color:var(--text);">
+    <li>Your panel is scoped to assigned Department and Year only.</li>
+    <li>Use Reports to upload marksheets and maintain test records in your scope.</li>
+    <li>Use Counsellor Activity to monitor completion status by semester/test.</li>
+    <li>Use Message Logs to verify communication activity in your scope.</li>
+  </ul>
+</div>
+{% else %}
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-user-graduate"></i> Counselor Workflow</div>
+  <ul style="padding-left:18px;line-height:1.9;color:var(--text);">
+    <li>Dashboard shows your available tests for results communication.</li>
+    <li>Reports gives access to uploaded test records under your assignment.</li>
+    <li>Message Logs tracks sent communication entries for your students.</li>
+  </ul>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-title"><i class="fas fa-shield-halved"></i> Safety Notes</div>
+  <ul style="padding-left:18px;line-height:1.9;color:var(--text);">
+    <li>Always verify Department, Year, Semester and Test before exporting or updating.</li>
+    <li>Use backup before running any clear/restore operation in Database maintenance.</li>
+    <li>Keep account passwords confidential and rotate them periodically.</li>
+  </ul>
+</div>
+{% endblock %}

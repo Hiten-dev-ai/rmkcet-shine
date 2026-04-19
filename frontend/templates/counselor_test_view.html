@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}View/Edit Test - {{ app_name }}{% endblock %}
+{% block page_title %}Test View/Edit{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-between align-center mb-2">
+  <a href="{{ url_for('counselor_page', tab='test-database') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back To Reports</a>
+  <span class="badge badge-info">{{ test_meta.test_name or 'Selected Test' }}</span>
+</div>
+
+<div class="card mb-2">
+  <div class="card-title"><i class="fas fa-clipboard-check"></i> {{ test_meta.test_name or ('Test #' ~ test_id) }}</div>
+  <div class="form-row">
+    <div><strong>Semester:</strong> {{ test_meta.semester or '—' }}</div>
+    <div><strong>Batch:</strong> {{ test_meta.batch_name or '—' }}</div>
+  </div>
+  <div class="form-row mt-1">
+    <div><strong>Department:</strong> {{ test_meta.department or '—' }}</div>
+  </div>
+</div>
+
+<div class="card mb-2">
+  <div class="card-title"><i class="fas fa-pen"></i> Edit Test Details</div>
+  <form method="POST" action="{{ url_for('api_counselor_update_test', test_id=test_id) }}">
+    <input type="hidden" name="next" value="{{ url_for('counselor_test_view_page', test_id=test_id) }}">
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Test Name</label>
+        <select class="form-control" name="test_name" required>
+          <option value="IAT 1" {% if (test_meta.test_name or '') == 'IAT 1' %}selected{% endif %}>IAT 1</option>
+          <option value="IAT 2" {% if (test_meta.test_name or '') == 'IAT 2' %}selected{% endif %}>IAT 2</option>
+          <option value="MODEL EXAM" {% if (test_meta.test_name or '') == 'MODEL EXAM' %}selected{% endif %}>MODEL EXAM</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Semester</label>
+        <input class="form-control" name="semester" value="{{ test_meta.semester or '' }}">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Batch</label>
+        <input class="form-control" name="batch_name" value="{{ test_meta.batch_name or '' }}">
+      </div>
+    </div>
+    <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save Test Details</button>
+  </form>
+</div>
+
+<div class="table-wrapper">
+  <table>
+    <thead>
+      <tr>
+        <th>Reg No</th>
+        <th>Department</th>
+        {% for s in subjects %}
+        <th>{{ s }}</th>
+        {% endfor %}
+        <th>Save</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for st in students %}
+      <tr>
+        <td><strong>{{ st.reg_no }}</strong></td>
+        <td>{{ st.department or '—' }}</td>
+        {% for s in subjects %}
+        <td>
+          <input class="form-control" id="mark-{{ st.reg_no }}-{{ loop.index0 }}" data-subject="{{ s }}" value="{{ st.marks.get(s, '-') }}" style="min-width:90px;">
+        </td>
+        {% endfor %}
+        <td>
+          <button class="btn btn-primary btn-sm" onclick="saveStudentMarks('{{ st.reg_no }}')"><i class="fas fa-save"></i></button>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not students %}
+      <tr><td colspan="{{ 3 + (subjects|length) }}" class="text-center text-muted" style="padding:18px;">No student marks found.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function saveStudentMarks(regNo) {
+  const inputs = Array.from(document.querySelectorAll(`input[id^="mark-${regNo}-"]`));
+  const marks = {};
+  inputs.forEach((input) => {
+    marks[input.dataset.subject] = (input.value || '').trim();
+  });
+
+  try {
+    const response = await fetch('{{ url_for("api_counselor_update_marks", test_id=test_id) }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ reg_no: regNo, marks })
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.success) {
+      alert(payload.error || 'Unable to save marks.');
+      return;
+    }
+    alert('Saved in your personal counselor database.');
+  } catch (error) {
+    alert('Unable to save marks. Please try again.');
+  }
+}
+</script>
+{% endblock %}
