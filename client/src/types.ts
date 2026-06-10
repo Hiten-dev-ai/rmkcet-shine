@@ -299,6 +299,36 @@ export interface DashboardOverviewPayload {
     completion_pct: number;
   }>;
   recentTests: ReportTestRecord[];
+  admin_status?: {
+    smtp: SmtpStatusPayload;
+    oauth: {
+      enabled: boolean;
+      healthy: boolean;
+      label: string;
+      detail: string;
+      allowed_domain: string;
+      redirect_base_url: string;
+    };
+    backup: {
+      storage_mode: 'local' | 'gdrive';
+      health: 'healthy' | 'warning' | 'error';
+      label: string;
+      detail: string;
+      drive_configured: boolean;
+      periodic_enabled: boolean;
+      backup_count: number;
+      auto_backup_count: number;
+      archive_count: number;
+      latest_backup_name: string;
+      latest_backup_modified: string;
+    };
+    sessions: {
+      active_sessions: number;
+      today_sessions: number;
+      peak_concurrent: number;
+      forced_logouts: number;
+    };
+  };
 }
 
 export interface NoticeScopePair {
@@ -476,6 +506,7 @@ export interface SessionMonitoringRecord {
   name: string;
   role: string;
   department: string;
+  auth_method: string;
   ip_address: string;
   user_agent: string;
   login_time: string;
@@ -493,6 +524,7 @@ export interface SessionHistoryRecord {
   name: string;
   role: string;
   department: string;
+  auth_method: string;
   ip_address: string;
   login_time: string;
   last_activity: string;

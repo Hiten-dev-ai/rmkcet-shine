@@ -7,9 +7,23 @@ import type { AuthUser, Role, ScopeRow } from './roles.js';
 import { normalizeRole } from './roles.js';
 
 mkdirSync(dirname(SHINE_DB_PATH), { recursive: true });
+
+function ensureColumn(database: Database.Database, tableName: string, columnName: string, definition: string) {
+  try {
+    const columns = database.pragma(`table_info(${tableName})`) as Array<{ name?: string }>;
+    if (columns.some((column) => String(column.name || '').trim().toLowerCase() === columnName.trim().toLowerCase())) {
+      return;
+    }
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  } catch {
+    // Older or empty databases may not have every table during bootstrap.
+  }
+}
+
 function configureDatabaseConnection(database: Database.Database) {
   database.pragma('foreign_keys = ON');
   database.pragma('journal_mode = WAL');
+  ensureColumn(database, 'active_sessions', 'auth_method', "TEXT NOT NULL DEFAULT 'password'");
   try {
     database.exec(`
       CREATE INDEX IF NOT EXISTS idx_sent_messages_sent_at
@@ -532,6 +546,7 @@ export function getActiveSessions() {
       name: String(item.name || item.user_email || ''),
       role: String(item.role || ''),
       department: String(item.department || ''),
+      auth_method: String(item.auth_method || 'password'),
       ip_address: String(item.ip_address || ''),
       user_agent: String(item.user_agent || ''),
       login_time: String(item.login_time || ''),
@@ -656,6 +671,7 @@ export function getSessionHistory(limit = 100, userEmail?: string | null) {
       name: String(item.name || item.user_email || ''),
       role: String(item.role || ''),
       department: String(item.department || ''),
+      auth_method: String(item.auth_method || 'password'),
       ip_address: String(item.ip_address || ''),
       login_time: String(item.login_time || ''),
       last_activity: String(item.last_activity || ''),
@@ -675,7 +691,7 @@ export function checkUserAccess(email: string) {
   return { allowed: true, message: 'Access granted' };
 }
 
-export function registerSession(userEmail: string, ipAddress: string, userAgent: string, forceLogoutOthers: boolean) {
+export function registerSession(userEmail: string, ipAddress: string, userAgent: string, forceLogoutOthers: boolean, authMethod = 'password') {
   const config = getAppConfig();
   const allowConcurrent = String(config.allow_concurrent_sessions || 'false').toLowerCase() === 'true';
   const sessionId = randomUUID();
@@ -687,9 +703,9 @@ export function registerSession(userEmail: string, ipAddress: string, userAgent:
 
   db.prepare(`
     INSERT INTO active_sessions (
-      session_id, user_email, login_time, last_activity, ip_address, user_agent, browser_info, tab_id, is_active, forced_logout
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
-  `).run(sessionId, userEmail, now, now, ipAddress, userAgent, userAgent.slice(0, 100), randomUUID());
+      session_id, user_email, login_time, last_activity, ip_address, user_agent, browser_info, tab_id, is_active, forced_logout, auth_method
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
+  `).run(sessionId, userEmail, now, now, ipAddress, userAgent, userAgent.slice(0, 100), randomUUID(), authMethod);
 
   db.prepare('UPDATE users SET last_login = ?, last_activity = ?, session_id = ? WHERE email = ?').run(now, now, sessionId, userEmail);
   return sessionId;
@@ -875,6 +891,7 @@ export interface SessionMonitoringRecord {
   name: string;
   role: string;
   department: string;
+  auth_method: string;
   ip_address: string;
   user_agent: string;
   login_time: string;
@@ -892,6 +909,7 @@ export interface SessionHistoryRecord {
   name: string;
   role: string;
   department: string;
+  auth_method: string;
   ip_address: string;
   login_time: string;
   last_activity: string;

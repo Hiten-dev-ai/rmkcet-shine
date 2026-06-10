@@ -329,7 +329,7 @@ function applyThemeColors(config: BootstrapPayload['appConfig'] | null) {
 function getTabsForUser(user: AuthUser | null) {
   if (!user) return [];
   if (user.role === 'admin') {
-    return ['reports', 'notices', 'departments', 'activity', 'users', 'database', 'monitoring', 'messages', 'server-console'];
+    return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database', 'monitoring', 'messages', 'server-console'];
   }
   if (user.role === 'principal') {
     return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database'];
@@ -345,7 +345,7 @@ function getTabsForUser(user: AuthUser | null) {
 
 function getDefaultTab(user: AuthUser | null) {
   if (!user) return 'reports';
-  if (user.role === 'admin') return 'reports';
+  if (user.role === 'admin') return 'dashboard';
   if (user.role === 'principal' || user.role === 'hod') return 'dashboard';
   if (user.role === 'deo') return 'reports';
   return 'recent-tests';
@@ -1405,7 +1405,7 @@ export default function App() {
       else if (error === 'token_exchange_failed') message = 'Google sign-in token exchange failed.';
       else if (error === 'invalid_google_profile') message = 'Google sign-in did not return a valid verified email.';
       else if (error === 'invalid_domain') message = allowedDomain ? `Only ${allowedDomain} Google accounts are allowed.` : 'This Google account is not allowed.';
-      else if (error === 'user_not_linked') message = 'No local account is linked to this Google email yet.';
+      else if (error === 'user_not_linked') message = 'Account not registered.';
       else if (error === 'access_denied') message = errorDescription || 'Google account access is blocked.';
       else if (errorDescription) message = errorDescription;
       setFlash({ type: 'error', message });
@@ -1533,7 +1533,7 @@ export default function App() {
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'dashboard') return;
-    if (!['principal', 'hod'].includes(bootstrap.user.role)) return;
+    if (!['admin', 'principal', 'hod'].includes(bootstrap.user.role)) return;
     void loadDashboardOverview();
   }, [bootstrap?.user, activeTab]);
 
@@ -5152,7 +5152,7 @@ export default function App() {
               </div>
 
             </>
-          ) : ['principal', 'hod'].includes(currentUser.role) && activeTab === 'dashboard' ? (
+          ) : ['admin', 'principal', 'hod'].includes(currentUser.role) && activeTab === 'dashboard' ? (
             dashboardLoading && !dashboardData ? (
               <div className="card">
                 <div className="panel-placeholder">Loading dashboard...</div>
@@ -5167,6 +5167,94 @@ export default function App() {
                     <i className="fas fa-rotate"></i> Refresh
                   </button>
                 </div>
+
+                {currentUser.role === 'admin' && dashboardData?.admin_status ? (
+                  <>
+                    <div className="metrics-grid mb-3">
+                      <div className="metric-card">
+                        <div className="metric-label">Active Sessions</div>
+                        <div className="metric-value">{dashboardData.admin_status.sessions.active_sessions}</div>
+                        <div className="metric-icon"><i className="fas fa-signal"></i></div>
+                      </div>
+                      <div className="metric-card">
+                        <div className="metric-label">Today Sessions</div>
+                        <div className="metric-value">{dashboardData.admin_status.sessions.today_sessions}</div>
+                        <div className="metric-icon"><i className="fas fa-calendar-day"></i></div>
+                      </div>
+                      <div className="metric-card">
+                        <div className="metric-label">Backups</div>
+                        <div className="metric-value">{dashboardData.admin_status.backup.backup_count + dashboardData.admin_status.backup.auto_backup_count}</div>
+                        <div className="metric-icon"><i className="fas fa-database"></i></div>
+                      </div>
+                      <div className="metric-card">
+                        <div className="metric-label">Archives</div>
+                        <div className="metric-value">{dashboardData.admin_status.backup.archive_count}</div>
+                        <div className="metric-icon"><i className="fas fa-box-archive"></i></div>
+                      </div>
+                    </div>
+
+                    <div className="dashboard-dual-grid mb-3">
+                      <div className="card dashboard-status-card">
+                        <div className="card-title"><i className="fas fa-envelope"></i> SMTP Status</div>
+                        <div className="dashboard-summary-row">
+                          <span className={`badge ${dashboardData.admin_status.smtp.state === 'ready' ? 'badge-success' : 'badge-warning'}`}>{dashboardData.admin_status.smtp.label}</span>
+                        </div>
+                        <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.smtp.detail}</p>
+                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
+                          <div><strong>Server:</strong> {dashboardData.admin_status.smtp.config.server || '--'}</div>
+                          <div><strong>Username:</strong> {dashboardData.admin_status.smtp.config.username || '--'}</div>
+                          <div><strong>From:</strong> {dashboardData.admin_status.smtp.config.email_from || '--'}</div>
+                          <div><strong>Port:</strong> {dashboardData.admin_status.smtp.config.port || '--'}</div>
+                        </div>
+                      </div>
+
+                      <div className="card dashboard-status-card">
+                        <div className="card-title"><i className="fas fa-hard-drive"></i> Backup Status</div>
+                        <div className="dashboard-summary-row">
+                          <span className={`badge ${dashboardData.admin_status.backup.health === 'healthy' ? 'badge-success' : dashboardData.admin_status.backup.health === 'warning' ? 'badge-warning' : 'badge-danger'}`}>{dashboardData.admin_status.backup.label}</span>
+                          <span className="badge badge-primary">{dashboardData.admin_status.backup.storage_mode === 'gdrive' ? 'Google Drive' : 'Local'}</span>
+                        </div>
+                        <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.backup.detail}</p>
+                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
+                          <div><strong>Auto Backups:</strong> {dashboardData.admin_status.backup.auto_backup_count}</div>
+                          <div><strong>Manual Backups:</strong> {dashboardData.admin_status.backup.backup_count}</div>
+                          <div><strong>Archives:</strong> {dashboardData.admin_status.backup.archive_count}</div>
+                          <div><strong>Periodic Backups:</strong> {dashboardData.admin_status.backup.periodic_enabled ? 'Enabled' : 'Disabled'}</div>
+                          <div><strong>Drive Configured:</strong> {dashboardData.admin_status.backup.drive_configured ? 'Yes' : 'No'}</div>
+                          <div><strong>Latest Backup:</strong> {dashboardData.admin_status.backup.latest_backup_name ? `${dashboardData.admin_status.backup.latest_backup_name} (${dashboardData.admin_status.backup.latest_backup_modified})` : '--'}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="dashboard-dual-grid mb-3">
+                      <div className="card dashboard-status-card">
+                        <div className="card-title"><i className="fab fa-google"></i> OAuth Status</div>
+                        <div className="dashboard-summary-row">
+                          <span className={`badge ${dashboardData.admin_status.oauth.enabled && dashboardData.admin_status.oauth.healthy ? 'badge-success' : dashboardData.admin_status.oauth.enabled ? 'badge-warning' : 'badge-muted'}`}>{dashboardData.admin_status.oauth.label}</span>
+                        </div>
+                        <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.oauth.detail}</p>
+                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
+                          <div><strong>Allowed Domain:</strong> {dashboardData.admin_status.oauth.allowed_domain || 'Any verified email'}</div>
+                          <div><strong>Redirect Base URL:</strong> {dashboardData.admin_status.oauth.redirect_base_url || '--'}</div>
+                        </div>
+                      </div>
+
+                      <div className="card dashboard-status-card">
+                        <div className="card-title"><i className="fas fa-user-shield"></i> Session Health</div>
+                        <div className="dashboard-summary-row">
+                          <span className="badge badge-success">Peak {dashboardData.admin_status.sessions.peak_concurrent}</span>
+                          <span className="badge badge-warning">Forced {dashboardData.admin_status.sessions.forced_logouts}</span>
+                        </div>
+                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
+                          <div><strong>Active Sessions:</strong> {dashboardData.admin_status.sessions.active_sessions}</div>
+                          <div><strong>Today Logins:</strong> {dashboardData.admin_status.sessions.today_sessions}</div>
+                          <div><strong>Peak Concurrent:</strong> {dashboardData.admin_status.sessions.peak_concurrent}</div>
+                          <div><strong>Forced Logouts:</strong> {dashboardData.admin_status.sessions.forced_logouts}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : null}
 
                 <div className="dashboard-dual-grid mb-3">
                   <div className="card dashboard-status-card">
@@ -6949,6 +7037,7 @@ export default function App() {
                       <tr>
                         <th>User</th>
                         <th>Role</th>
+                        <th>Login</th>
                         <th>Dept</th>
                         <th>Status</th>
                         <th>Last Activity</th>
@@ -6962,6 +7051,7 @@ export default function App() {
                         <tr key={session.session_id}>
                           <td><strong>{session.name || session.user_email}</strong><br /><span className="inline-muted">{session.user_email}</span></td>
                           <td><span className="badge badge-primary">{session.role || 'N/A'}</span></td>
+                          <td><span className={`badge ${String(session.auth_method || 'password').toLowerCase() === 'google' ? 'badge-info' : 'badge-muted'}`}>{String(session.auth_method || 'password').toLowerCase() === 'google' ? 'Google' : 'Password'}</span></td>
                           <td>{session.department || 'N/A'}</td>
                           <td><span className={`badge ${session.status === 'Active' ? 'badge-success' : session.status === 'Idle' ? 'badge-warning' : 'badge-muted'}`}>{session.status}</span></td>
                           <td style={{ fontSize: '.82rem' }}>{session.time_ago || '--'}</td>
@@ -6972,7 +7062,7 @@ export default function App() {
                           </td>
                         </tr>
                       )) : (
-                        <tr><td colSpan={6} className="text-center text-muted" style={{ padding: 24 }}>No active sessions.</td></tr>
+                        <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No active sessions.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -6987,6 +7077,7 @@ export default function App() {
                       <tr>
                         <th>User</th>
                         <th>Role</th>
+                        <th>Login</th>
                         <th>Dept</th>
                         <th>Login Time</th>
                         <th>Last Activity</th>
@@ -6999,6 +7090,7 @@ export default function App() {
                         <tr key={`${entry.session_id}:${entry.last_activity}`}>
                           <td><strong>{entry.name || entry.user_email}</strong><br /><span className="inline-muted">{entry.user_email}</span></td>
                           <td>{entry.role || 'N/A'}</td>
+                          <td><span className={`badge ${String(entry.auth_method || 'password').toLowerCase() === 'google' ? 'badge-info' : 'badge-muted'}`}>{String(entry.auth_method || 'password').toLowerCase() === 'google' ? 'Google' : 'Password'}</span></td>
                           <td>{entry.department || 'N/A'}</td>
                           <td>{formatDateTime(entry.login_time)}</td>
                           <td>{formatDateTime(entry.last_activity)}</td>
@@ -7006,7 +7098,7 @@ export default function App() {
                           <td>{entry.logout_reason || '--'}</td>
                         </tr>
                       )) : (
-                        <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No session history available yet.</td></tr>
+                        <tr><td colSpan={8} className="text-center text-muted" style={{ padding: 24 }}>No session history available yet.</td></tr>
                       )}
                     </tbody>
                   </table>

@@ -29,7 +29,7 @@ export function isAdminPortalRole(role: Role) {
 
 export function allowedTabsForRole(role: Role) {
   if (role === 'admin') {
-    return ['reports', 'notices', 'departments', 'activity', 'users', 'database', 'monitoring', 'messages', 'server-console'];
+    return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database', 'monitoring', 'messages', 'server-console'];
   }
   if (role === 'principal') {
     return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database'];
@@ -44,7 +44,8 @@ export function allowedTabsForRole(role: Role) {
 }
 
 export function defaultTabForRole(role: Role) {
-  if (role === 'admin' || role === 'deo') return 'reports';
+  if (role === 'admin') return 'dashboard';
+  if (role === 'deo') return 'reports';
   if (role === 'principal' || role === 'hod') return 'dashboard';
   return 'recent-tests';
 }

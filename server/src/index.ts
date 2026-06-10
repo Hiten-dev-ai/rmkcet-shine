@@ -151,6 +151,7 @@ const COUNSELOR_DASHBOARD_PENDING_NOTICE_LIMIT = 5;
 const OTP_EXPIRY_MS = 5 * 60 * 1000;
 const OTP_RESEND_THROTTLE_MS = 30 * 1000;
 const CLIENT_PUBLIC_ASSETS_ROOT = resolve(SERVER_ROOT, '..', 'client', 'public', 'assets');
+const CLIENT_DIST_ROOT = resolve(SERVER_ROOT, '..', 'client', 'dist');
 const TEMPLATE_FILE_MAP = {
   'counsellor-list': {
     fileName: 'counsellor_list.xlsx',
@@ -1291,7 +1292,92 @@ function getSmtpStatus() {
   };
 }
 
-function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
+function getLatestBackupEntry(
+  entries: Array<{ name: string; modified: string; size_kb: number }>,
+) {
+  return [...entries].sort((a, b) => Date.parse(String(b.modified || '').replace(' ', 'T')) - Date.parse(String(a.modified || '').replace(' ', 'T')))[0] || null;
+}
+
+async function getAdminDashboardStatus() {
+  const appConfig = getAppConfig();
+  const smtp = getSmtpStatus();
+  const oauth = getGoogleOauthSettings(appConfig);
+  const sessionStats = getSessionStatistics();
+  const storageMode = getBackupStorageMode(appConfig);
+  const driveSettings = getGoogleDriveSettings(appConfig);
+
+  let backupHealth: 'healthy' | 'warning' | 'error' = 'healthy';
+  let backupLabel = storageMode === 'gdrive' ? 'Google Drive Connected' : 'Local Backup Storage';
+  let backupDetail = storageMode === 'gdrive'
+    ? 'Google Drive backup storage is active.'
+    : 'Backups are stored in the local rebuild data folder.';
+  let backupFiles = { autoBackupFiles: [] as Array<{ name: string; modified: string; size_kb: number }>, backupFiles: [] as Array<{ name: string; modified: string; size_kb: number }> };
+  let archiveFiles: Array<{ name: string; modified: string; size_kb: number }> = [];
+
+  try {
+    backupFiles = await listBackupFiles();
+    archiveFiles = await listArchiveFiles();
+    const totalBackupCount = backupFiles.autoBackupFiles.length + backupFiles.backupFiles.length;
+    if (storageMode === 'gdrive' && !driveSettings.enabled) {
+      backupHealth = 'error';
+      backupLabel = 'Google Drive Not Configured';
+      backupDetail = 'Drive mode is selected, but the OAuth client or refresh token is incomplete.';
+    } else if (totalBackupCount === 0) {
+      backupHealth = 'warning';
+      backupLabel = storageMode === 'gdrive' ? 'Google Drive Ready' : 'Local Storage Ready';
+      backupDetail = 'Storage is available, but no backups have been created yet.';
+    } else {
+      const latest = getLatestBackupEntry([...backupFiles.autoBackupFiles, ...backupFiles.backupFiles]);
+      if (latest) {
+        backupDetail = `Latest backup: ${latest.name} on ${latest.modified}.`;
+      }
+    }
+  } catch (error) {
+    backupHealth = 'error';
+    backupLabel = storageMode === 'gdrive' ? 'Google Drive Health Issue' : 'Local Backup Health Issue';
+    backupDetail = error instanceof Error ? error.message : 'Unable to inspect backup storage.';
+  }
+
+  const latestBackup = getLatestBackupEntry([...backupFiles.autoBackupFiles, ...backupFiles.backupFiles]);
+  const oauthHealthy = !String(appConfig.google_oauth_enabled || 'false').trim().toLowerCase().includes('true')
+    ? false
+    : oauth.enabled;
+
+  return {
+    smtp,
+    oauth: {
+      enabled: oauth.enabled,
+      healthy: oauthHealthy,
+      label: oauth.enabled ? 'Google OAuth Enabled' : 'Google OAuth Disabled',
+      detail: oauth.enabled
+        ? `OAuth is ready${oauth.allowedDomain ? ` for ${oauth.allowedDomain}` : ''}.`
+        : 'Google sign-in is currently disabled or incomplete.',
+      allowed_domain: oauth.allowedDomain,
+      redirect_base_url: oauth.redirectBaseUrl,
+    },
+    backup: {
+      storage_mode: storageMode,
+      health: backupHealth,
+      label: backupLabel,
+      detail: backupDetail,
+      drive_configured: driveSettings.enabled,
+      periodic_enabled: String(appConfig.enable_periodic_backups || 'false').trim().toLowerCase() === 'true',
+      backup_count: backupFiles.backupFiles.length,
+      auto_backup_count: backupFiles.autoBackupFiles.length,
+      archive_count: archiveFiles.length,
+      latest_backup_name: latestBackup?.name || '',
+      latest_backup_modified: latestBackup?.modified || '',
+    },
+    sessions: {
+      active_sessions: sessionStats.active_sessions,
+      today_sessions: sessionStats.today_sessions,
+      peak_concurrent: sessionStats.peak_concurrent,
+      forced_logouts: sessionStats.forced_logouts,
+    },
+  };
+}
+
+async function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
   const departments = getVisibleDepartmentsForActor(authUser);
   const allowedScopes =
     authUser.role === 'admin' || authUser.role === 'principal'
@@ -1408,7 +1494,7 @@ function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
     })
     .slice(0, 10);
 
-  return {
+  const payload = {
     metrics: {
       departmentsCovered: departments.length,
       totalTests: 0,
@@ -1424,6 +1510,13 @@ function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
     leaderboard,
     recentTests: [],
   };
+  if (authUser.role === 'admin') {
+    return {
+      ...payload,
+      admin_status: await getAdminDashboardStatus(),
+    };
+  }
+  return payload;
 }
 
 type ActivityScopeReportSection = {
@@ -2057,13 +2150,14 @@ async function clearExamDatabaseOnly() {
   `);
 }
 
-function finalizeLogin(c: Context, userRow: Record<string, unknown>, forceLogoutOthers: boolean) {
+function finalizeLogin(c: Context, userRow: Record<string, unknown>, forceLogoutOthers: boolean, authMethod = 'password') {
   const appConfig = getAppConfig();
   const sessionId = registerSession(
     String(userRow.email || '').toLowerCase(),
     c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || '',
     c.req.header('user-agent') || '',
     forceLogoutOthers,
+    authMethod,
   );
 
   setCookie(c, SESSION_COOKIE, sessionId, {
@@ -2224,6 +2318,38 @@ app.get('/api/footer/credits', async (c) => {
 </html>`);
 });
 
+function getStaticMimeType(filePath: string) {
+  switch (extname(filePath).toLowerCase()) {
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.js':
+      return 'application/javascript; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.ico':
+      return 'image/x-icon';
+    case '.woff':
+      return 'font/woff';
+    case '.woff2':
+      return 'font/woff2';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
 app.get('/api/bootstrap', (c) => {
   const authUser = c.get('authUser') || null;
   const sessionAuthUser = c.get('sessionAuthUser') || authUser || null;
@@ -2265,11 +2391,11 @@ app.get('/api/bootstrap', (c) => {
   });
 });
 
-app.get('/api/dashboard/overview', (c) => {
+app.get('/api/dashboard/overview', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
   if (!['admin', 'principal', 'hod', 'deo'].includes(authUser.role)) return c.json({ error: 'Forbidden' }, 403);
-  return c.json(buildDashboardOverview(authUser));
+  return c.json(await buildDashboardOverview(authUser));
 });
 
 app.post('/api/auth/login', async (c) => {
@@ -4710,6 +4836,7 @@ app.get('/auth/google/callback', async (c) => {
     const userRow = getUserByEmail(email);
     if (!userRow) {
       target.searchParams.set('error', 'user_not_linked');
+      target.searchParams.set('error_description', 'Account not registered.');
       return c.redirect(target.toString());
     }
 
@@ -4724,12 +4851,47 @@ app.get('/auth/google/callback', async (c) => {
     clearChallengeCookie(c, LOGIN_OTP_COOKIE);
     clearChallengeCookie(c, PASSWORD_RESET_COOKIE);
     clearChallengeCookie(c, SELF_RESET_OTP_COOKIE);
-    finalizeLogin(c, userRow, !allowConcurrent);
+    finalizeLogin(c, userRow, !allowConcurrent, 'google');
     target.searchParams.set('success', '1');
     return c.redirect(target.toString());
   } catch {
     target.searchParams.set('error', 'oauth_callback_failed');
     return c.redirect(target.toString());
+  }
+});
+
+app.get('*', async (c) => {
+  const pathname = decodeURIComponent(new URL(c.req.url).pathname || '/');
+  if (pathname.startsWith('/api/') || pathname.startsWith('/auth/')) {
+    return c.text('Not found.', 404);
+  }
+  const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  const requestedFile = resolve(CLIENT_DIST_ROOT, relativePath);
+  const isInsideDistRoot =
+    requestedFile === CLIENT_DIST_ROOT ||
+    requestedFile.startsWith(`${CLIENT_DIST_ROOT}/`) ||
+    requestedFile.startsWith(`${CLIENT_DIST_ROOT}\\`);
+
+  if (isInsideDistRoot) {
+    try {
+      const fileStat = await stat(requestedFile);
+      if (fileStat.isFile()) {
+        const fileData = await readFile(requestedFile);
+        c.header('Content-Type', getStaticMimeType(requestedFile));
+        return new Response(new Uint8Array(fileData));
+      }
+    } catch {
+      // Fall back to SPA shell for client-side routes.
+    }
+  }
+
+  try {
+    const indexPath = resolve(CLIENT_DIST_ROOT, 'index.html');
+    const indexData = await readFile(indexPath);
+    c.header('Content-Type', 'text/html; charset=utf-8');
+    return new Response(new Uint8Array(indexData));
+  } catch {
+    return c.text('Client build not found. Run npm run build in the rebuild root.', 404);
   }
 });
 
