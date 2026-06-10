@@ -1,0 +1,16 @@
+.env
+node_modules/
+dist/
+logs/
+*.log
+*.tsbuildinfo
+server/dist/
+client/dist/
+server/node_modules/
+client/node_modules/
+server-out.log
+client-out.log
+data/*
+!data/.gitkeep
+__pycache__/
+*.pyc

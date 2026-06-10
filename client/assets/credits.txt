@@ -1,0 +1,65 @@
+PROJECT DEVELOPERS                                     
+Team Lead                                              
+                                                                                 
+Hiten S (CSE B)                                                
+   (111625102079)                                                   
+* Lead Developer                                       
+* Deployment                                           
+* System Design                                          
+* User Experience                                        
+* Architecture Design                                    
+* Cloud Infrastructure 
+                                                       
+                                                      
+Sujith Kumar P CSE(CS)                                          
+    (111625108055)                                    
+* Lead Developer
+* Testing
+* User Interface
+* Cyber Security
+* Backend (Core)
+* Database Management
+
+Team Members
+
+Kishore Jaikumar (ECE B)
+   (111625104088)
+* Developer
+* Testing
+* Data Analysis
+* User Experience
+* Visual Communication
+
+Nandhakumar S (ECE B)
+  (111625104106)
+* Developer
+* Testing
+* Data Consolidation
+* User Support
+
+Agineti Tirupchandra (ECE A)
+  (111625104005)
+* Backend (Initial)
+* Idea Founder
+
+
+
+PROJECT MENTORS
+
+Ms. Chandipriya K.G.
+Faculty, Science and Humanities Department       
+* Mentorship
+* Team Organizer
+
+Dr. K. A. Selvakumaran
+Head of Department, Science and Humanities Department
+* UI Flow
+* Logo Design
+* Mentorship
+
+
+Dr. K. Sudhakar
+Faculty, Science and Humanities Department
+* Mentorship
+
+======================================================================================================================
