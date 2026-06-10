@@ -1217,6 +1217,57 @@ body.light-theme .report-sticky-toolbar {
   margin-bottom: 12px;
 }
 
+.segmented-switch {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  min-height: 48px;
+  padding: 4px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(148, 163, 184, 0.08);
+  overflow: hidden;
+}
+
+.segmented-switch-thumb {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  height: calc(100% - 8px);
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  box-shadow: 0 10px 20px rgba(102,126,234,.18);
+  transform: translateX(0);
+  transition: transform .22s ease;
+}
+
+.segmented-switch[data-mode="gdrive"] .segmented-switch-thumb {
+  transform: translateX(100%);
+}
+
+.segmented-switch-option {
+  position: relative;
+  z-index: 1;
+  min-height: 40px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: .9rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color .18s ease;
+}
+
+.segmented-switch-option.active {
+  color: #fff;
+}
+
+body.light-theme .segmented-switch {
+  background: #f4f7ff;
+}
+
 .report-marks-scroll {
   max-height: calc(100vh - 330px);
   overflow: auto;

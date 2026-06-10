@@ -29,7 +29,7 @@ export function isAdminPortalRole(role: Role) {
 
 export function allowedTabsForRole(role: Role) {
   if (role === 'admin') {
-    return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database', 'monitoring', 'messages', 'server-console'];
+    return ['dashboard', 'reports', 'notices', 'activity', 'users', 'departments', 'monitoring', 'messages', 'database', 'server-console'];
   }
   if (role === 'principal') {
     return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database'];

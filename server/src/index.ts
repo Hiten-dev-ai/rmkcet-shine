@@ -4543,6 +4543,88 @@ app.get('/api/config/overview', async (c) => {
   });
 });
 
+app.get('/api/config/export', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
+  if (!isSystemAdmin(authUser.role)) return c.json({ error: 'Forbidden' }, 403);
+  let envContent = '';
+  try {
+    envContent = await readFile(APP_ENV_FILE, 'utf-8');
+  } catch {
+    envContent = '';
+  }
+  const exportedAt = new Date().toISOString().replace(/[:]/g, '-');
+  const payload = {
+    app: APP_NAME,
+    version: APP_VERSION,
+    exported_at: new Date().toISOString(),
+    appConfig: getAppConfig(),
+    envContent,
+  };
+  c.header('Content-Type', 'application/json; charset=utf-8');
+  c.header('Content-Disposition', `attachment; filename="shine-config-${exportedAt}.json"`);
+  return c.body(JSON.stringify(payload, null, 2));
+});
+
+app.post('/api/config/import', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
+  if (!isSystemAdmin(authUser.role)) return c.json({ error: 'Forbidden' }, 403);
+
+  const body = (await c.req.json<Record<string, unknown>>().catch(() => ({}))) as Record<string, unknown>;
+  const importedConfigRaw = (body.appConfig && typeof body.appConfig === 'object' ? body.appConfig : {}) as Record<string, unknown>;
+  const importedEnvContent = typeof body.envContent === 'string' ? body.envContent : '';
+  const importedSettings = Object.fromEntries(
+    Object.entries(importedConfigRaw).map(([key, value]) => [String(key || '').trim(), String(value ?? '')]),
+  );
+
+  if (!Object.keys(importedSettings).length) {
+    return c.json({ error: 'Imported file does not contain any app settings.' }, 400);
+  }
+
+  const currentConfig = getAppConfig();
+  const currentStorageMode = getBackupStorageMode(currentConfig);
+  const mergedConfig = {
+    ...currentConfig,
+    ...importedSettings,
+  };
+  const nextStorageMode = getBackupStorageMode(mergedConfig);
+  const nextDriveSettings = getGoogleDriveSettings(mergedConfig);
+
+  if (nextStorageMode === 'gdrive' && !nextDriveSettings.enabled) {
+    return c.json({ error: 'Imported config enables Google Drive mode but the Drive OAuth details are incomplete.' }, 400);
+  }
+
+  try {
+    if (currentStorageMode !== nextStorageMode) {
+      await migrateStorageArtifacts(currentStorageMode, nextStorageMode, nextDriveSettings);
+    }
+    updateAppConfigBulk(importedSettings);
+    if (importedEnvContent.trim()) {
+      await writeFile(APP_ENV_FILE, importedEnvContent, 'utf-8');
+    }
+  } catch (error) {
+    if (currentStorageMode !== nextStorageMode) {
+      updateAppConfig('backup_storage_mode', currentStorageMode);
+    }
+    return c.json({ error: error instanceof Error ? error.message : 'Failed to import configuration.' }, 400);
+  }
+
+  let envContent = '';
+  try {
+    envContent = await readFile(APP_ENV_FILE, 'utf-8');
+  } catch {
+    envContent = importedEnvContent;
+  }
+
+  return c.json({
+    appConfig: sanitizeAppConfigForClient(getAppConfig(), authUser),
+    envContent,
+    smtpStatus: getSmtpStatus(),
+    resetUsers: listUsersForActor(authUser),
+  });
+});
+
 app.post('/api/config/update', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);

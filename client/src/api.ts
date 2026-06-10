@@ -802,6 +802,33 @@ export async function getConfigOverview() {
   return parseJson<ConfigOverviewPayload>(response);
 }
 
+export async function downloadConfigExport() {
+  const response = await fetch('/api/config/export', {
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(await response.text().catch(() => 'Failed to download config.'));
+  }
+  return {
+    blob: await response.blob(),
+    fileName: response.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1] || 'shine-config.json',
+  };
+}
+
+export async function importConfigPayload(payload: Record<string, unknown>) {
+  const response = await fetch('/api/config/import', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<ConfigOverviewPayload>(response);
+}
+
 export async function updateConfig(payload: Record<string, unknown>) {
   const response = await fetch('/api/config/update', {
     method: 'POST',

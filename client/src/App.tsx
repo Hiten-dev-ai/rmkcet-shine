@@ -1,10 +1,11 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import appCrestLogo from '../assets/logo.png';
 import appWordmarkLogo from '../assets/shine-logo.png';
 import {
   archiveAcademicYear,
   getActivityScopeReport,
   downloadActivityScopeReportPdf,
+  downloadConfigExport,
   cancelLoginOtp,
   cleanupSessions,
   completePasswordReset,
@@ -40,6 +41,7 @@ import {
   getReportsOverview,
   getServerConsole,
   getSmtpStatus,
+  importConfigPayload,
   getTestDetail,
   getUsers,
   login,
@@ -329,7 +331,7 @@ function applyThemeColors(config: BootstrapPayload['appConfig'] | null) {
 function getTabsForUser(user: AuthUser | null) {
   if (!user) return [];
   if (user.role === 'admin') {
-    return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database', 'monitoring', 'messages', 'server-console'];
+    return ['dashboard', 'reports', 'notices', 'activity', 'users', 'departments', 'monitoring', 'messages', 'database', 'server-console'];
   }
   if (user.role === 'principal') {
     return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database'];
@@ -1331,6 +1333,7 @@ export default function App() {
   const [resetSaving, setResetSaving] = useState(false);
   const [serverConsoleLoading, setServerConsoleLoading] = useState(false);
   const [serverConsoleData, setServerConsoleData] = useState<ServerConsolePayload | null>(null);
+  const [configImporting, setConfigImporting] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       return (localStorage.getItem('theme') as 'light' | 'dark') || 'light';
@@ -1350,6 +1353,7 @@ export default function App() {
   const counselorNoticeBatchIndexRef = useRef(0);
   const counselorNoticeBatchRunningRef = useRef(false);
   const counselorSendReturnRestoreRef = useRef(false);
+  const configImportInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     applyTheme(theme);
@@ -4066,6 +4070,43 @@ export default function App() {
     }
   }
 
+  async function handleDownloadConfigExport() {
+    try {
+      const { blob, fileName } = await downloadConfigExport();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(objectUrl);
+      setFlash({ type: 'success', message: 'Settings export downloaded successfully.' });
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to download settings export.' });
+    }
+  }
+
+  async function handleImportConfigFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setConfigImporting(true);
+    try {
+      const content = await file.text();
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      const payload = await importConfigPayload(parsed);
+      applyConfigPayload(payload);
+      setBootstrap((prev) => (prev ? { ...prev, appConfig: payload.appConfig } : prev));
+      applyThemeColors(payload.appConfig);
+      setFlash({ type: 'success', message: 'Settings imported successfully.' });
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to import settings file.' });
+    } finally {
+      if (event.target) event.target.value = '';
+      setConfigImporting(false);
+    }
+  }
+
   async function handleRunSmtpTest() {
     setSmtpTesting(true);
     try {
@@ -4202,6 +4243,14 @@ export default function App() {
             </>
           ) : (
             <form onSubmit={(event) => void handleLogin(event)}>
+              {flash ? (
+                <div className={`flash flash-${flash.type}`} style={{ marginBottom: 14 }}>
+                  <i className={`fas ${flash.type === 'success' ? 'fa-check-circle' : flash.type === 'warning' ? 'fa-exclamation-triangle' : flash.type === 'error' ? 'fa-times-circle' : 'fa-info-circle'}`}></i>
+                  <span>{flash.message}</span>
+                  <button className="flash-close" type="button" onClick={() => setFlash(null)}><i className="fas fa-times"></i></button>
+                </div>
+              ) : null}
+
               <div className="form-group">
                 <label className="form-label" htmlFor="identifier">Email or Name</label>
                 <input
@@ -4282,7 +4331,7 @@ export default function App() {
                   <button
                     type="button"
                     className="btn btn-outline"
-                    style={{ width: '100%' }}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
                     onClick={() => setForgotPasswordState((prev) => ({ ...prev, open: true, stage: 'request', error: '', identifier: loginState.identifier || prev.identifier }))}
                   >
                     <i className="fas fa-key"></i> Forgot Password
@@ -7112,6 +7161,28 @@ export default function App() {
               <>
                 <form onSubmit={(event) => void handleSaveConfig(event)}>
                   <div className="card mb-3">
+                    <div className="card-title"><i className="fas fa-file-arrow-up"></i> Configuration Migration</div>
+                    <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 12 }}>
+                      Export the full Shine rebuild settings package for migration, or import a previously downloaded config file into this instance.
+                    </p>
+                    <div className="btn-group" style={{ gap: 10, flexWrap: 'wrap' }}>
+                      <button type="button" className="btn btn-outline" onClick={() => void handleDownloadConfigExport()}>
+                        <i className="fas fa-download"></i> Download Config
+                      </button>
+                      <button type="button" className="btn btn-primary" disabled={configImporting} onClick={() => configImportInputRef.current?.click()}>
+                        <i className={`fas ${configImporting ? 'fa-spinner fa-spin' : 'fa-upload'}`}></i> {configImporting ? 'Importing...' : 'Upload Config'}
+                      </button>
+                    </div>
+                    <input
+                      ref={configImportInputRef}
+                      type="file"
+                      accept="application/json,.json"
+                      style={{ display: 'none' }}
+                      onChange={(event) => void handleImportConfigFile(event)}
+                    />
+                  </div>
+
+                  <div className="card mb-3">
                     <div className="card-title"><i className="fas fa-paper-plane"></i> Counselor Messaging Controls</div>
                     <label className="form-check">
                       <input type="checkbox" checked={Boolean(configForm.enable_counselor_batch_send)} onChange={(event) => setConfigForm((prev) => ({ ...prev, enable_counselor_batch_send: event.target.checked }))} />
@@ -7234,14 +7305,23 @@ export default function App() {
                     <div className="form-row">
                       <div className="form-group" style={{ maxWidth: 280 }}>
                         <label className="form-label">Storage Target</label>
-                        <select
-                          className="form-control"
-                          value={String(configForm.backup_storage_mode || 'local')}
-                          onChange={(event) => setConfigForm((prev) => ({ ...prev, backup_storage_mode: event.target.value }))}
-                        >
-                          <option value="local">Local Rebuild Storage</option>
-                          <option value="gdrive">Google Drive</option>
-                        </select>
+                        <div className="segmented-switch" data-mode={String(configForm.backup_storage_mode || 'local')}>
+                          <div className="segmented-switch-thumb" aria-hidden="true"></div>
+                          <button
+                            type="button"
+                            className={`segmented-switch-option ${String(configForm.backup_storage_mode || 'local') === 'local' ? 'active' : ''}`}
+                            onClick={() => setConfigForm((prev) => ({ ...prev, backup_storage_mode: 'local' }))}
+                          >
+                            Local
+                          </button>
+                          <button
+                            type="button"
+                            className={`segmented-switch-option ${String(configForm.backup_storage_mode || 'local') === 'gdrive' ? 'active' : ''}`}
+                            onClick={() => setConfigForm((prev) => ({ ...prev, backup_storage_mode: 'gdrive' }))}
+                          >
+                            Google Drive
+                          </button>
+                        </div>
                       </div>
                     </div>
                     {String(configForm.backup_storage_mode || 'local') === 'gdrive' ? (
