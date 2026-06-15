@@ -1,0 +1,26 @@
+{
+  "name": "rmkcet-shine-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "productName": "RMKCET Shine",
+  "author": "RMKCET Shine",
+  "type": "module",
+  "main": "src/main.mjs",
+  "scripts": {
+    "dev": "node ./scripts/start-electron.mjs desktop-dev",
+    "app": "node ./scripts/start-electron.mjs desktop-app",
+    "package:win": "node ./scripts/package-win.mjs",
+    "make:exe": "node ./scripts/make-exe.mjs",
+    "make:msix": "node ./scripts/make-msix.mjs",
+    "publish:exe": "node ./scripts/publish-exe.mjs",
+    "publish:release": "node ./scripts/publish-release.mjs",
+    "release:exe": "node ./scripts/release-exe.mjs",
+    "release:msix": "node ./scripts/release-msix.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.1",
+    "@microsoft/winappcli": "^0.3.2",
+    "electron-builder": "^26.0.12",
+    "electron": "^37.2.6"
+  }
+}

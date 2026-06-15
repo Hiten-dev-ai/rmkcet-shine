@@ -6,6 +6,16 @@ declare module 'hono' {
     realAuthUser: AuthUser;
     sessionId: string;
     sessionAuthUser: AuthUser;
+    sessionEndNotice: {
+      title: string;
+      message: string;
+      reason: string;
+    } | null;
+    archiveView: {
+      active: boolean;
+      archiveName: string;
+      academicYear: string;
+    } | null;
     testModeTarget: AuthUser;
   }
 }

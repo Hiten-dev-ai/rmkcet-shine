@@ -7,8 +7,10 @@ export interface ScopeRow {
 
 export interface AuthUser {
   email: string;
+  login_email?: string;
   name: string;
   role: Role;
+  designation?: string;
   department: string | null;
   year_level: number;
   scopes: ScopeRow[];
@@ -29,16 +31,16 @@ export function isAdminPortalRole(role: Role) {
 
 export function allowedTabsForRole(role: Role) {
   if (role === 'admin') {
-    return ['dashboard', 'reports', 'notices', 'activity', 'users', 'departments', 'monitoring', 'messages', 'database', 'server-console'];
+    return ['dashboard', 'notices', 'cdp', 'reports', 'activity', 'subjects', 'users', 'departments', 'monitoring', 'messages', 'server-console', 'database'];
   }
   if (role === 'principal') {
-    return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database'];
+    return ['dashboard', 'notices', 'cdp', 'reports', 'activity', 'departments', 'users', 'database'];
   }
   if (role === 'hod') {
-    return ['dashboard', 'reports', 'notices', 'activity', 'messages'];
+    return ['dashboard', 'notices', 'cdp', 'reports', 'activity', 'messages'];
   }
   if (role === 'deo') {
-    return ['reports', 'notices', 'activity', 'users', 'messages'];
+    return ['reports', 'notices', 'activity', 'subjects', 'users', 'messages'];
   }
   return ['recent-tests', 'notices', 'test-database', 'message-history'];
 }

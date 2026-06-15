@@ -1,6 +1,7 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import appCrestLogo from '../assets/logo.png';
-import appWordmarkLogo from '../assets/shine-logo.png';
+import { ChangeEvent, FormEvent, MouseEvent as ReactMouseEvent, Suspense, lazy, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import type { MutableRefObject } from 'react';
+import appCrestLogo from '../assets/logo-optimized.png';
+import appWordmarkLogo from '../assets/shine-logo-optimized.png';
 import {
   archiveAcademicYear,
   getActivityScopeReport,
@@ -10,20 +11,26 @@ import {
   cleanupSessions,
   completePasswordReset,
   createUserAccount,
+  createSubject,
   clearExamDatabase,
   createDatabaseBackup,
   createDepartment,
   deleteUserAccount,
+  deleteSubject,
   deleteAdminMessage,
   deleteAdminMessages,
   deleteAllCounselorStudentRows,
+  deleteArchiveYear,
   deleteCounselorStudentRow,
   deleteDatabaseBackup,
   deleteNoticeRecord,
+  deleteNotificationKeys,
   deleteTest as deleteReportTest,
   deleteDepartment,
   forceLogoutSession,
+  exitArchiveView,
   getActivityOverview,
+  prefetchActivityScope,
   getAdminMessagesOverview,
   getBootstrap,
   getDashboardOverview,
@@ -34,34 +41,48 @@ import {
   getCounselorStudentList,
   getCounselorSendPage,
   getCounselorTests,
+  getCdpOverview,
+  rebuildCdpScope,
   getDatabaseOverview,
   getDepartments,
   getMonitoringOverview,
   getNoticesOverview,
+  getNotificationState,
+  getLoginRoleSelection,
+  getSessionRoleSwitchOptions,
   getReportsOverview,
+  getSubjectsOverview,
+  parseSubjectSheet,
   getServerConsole,
   getSmtpStatus,
   importConfigPayload,
+  markNotificationKeysRead,
   getTestDetail,
   getUsers,
   login,
   logoutAllSessions,
   logout,
+  enterArchiveView,
   requestPasswordReset,
   resetUserPassword,
   resendLoginOtp,
+  restoreArchiveYear,
   restoreDatabaseBackup,
   runSmtpTest,
   saveTestMarks,
   saveNotice,
+  uploadNoticeAttachmentInChunks,
   saveCounselorStudentRow,
   saveTestMeta,
+  sendSessionHeartbeat,
   sendSingleNotice,
   sendSingleReport,
   startTestMode,
   lockUserAccount,
   stopTestMode,
+  switchSessionRole,
   sendSelfPasswordOtp,
+  selectLoginRole,
   toggleDepartment,
   toggleTestBlock,
   unlockUserAccount,
@@ -73,25 +94,72 @@ import {
   updateConfig,
   updateDepartment,
   updateEnvContent,
+  updateSubject,
   verifyLoginOtp,
   verifyPasswordResetOtp,
+  resolveGoogleLoginConflict,
 } from './api';
+import { clearPersistentCacheBucket, readPersistentCacheEntry, seedPersistentCacheEntries, writePersistentCacheEntry } from './readModelCache';
+import {
+  enterDesktopSendWorkspace,
+  exitDesktopSendWorkspace,
+  getAvailableDesktopSendTargets,
+  getDesktopSendWorkspaceState,
+  hideDesktopSendWorkspace,
+  closeFloatingSendWindow,
+  checkDesktopUpdate,
+  getDesktopAppSettings,
+  getDesktopConnectivityState,
+  onFloatingSendClosed,
+  onFloatingSendRequest,
+  onOpenDesktopSettings,
+  openDesktopSettings,
+  openExternalLink,
+  openExternalSendTarget,
+  reloadCurrentApp,
+  resolveDirectServerUrl,
+  runtimeConfig,
+  saveDesktopAppSettings,
+  showFloatingSendWindow,
+  showDesktopNotification,
+  showDesktopSendWorkspace,
+  startGoogleOauth,
+  installDesktopUpdate,
+} from './runtime';
+import type {
+  DesktopAppSettings,
+  DesktopConnectivityState,
+  DesktopSendTargetAvailability,
+  DesktopSendTargetPreference,
+  DesktopSendWorkspaceState as DesktopEmbeddedWhatsappState,
+  DesktopUpdateInfo,
+  FloatingSendWindowPayload,
+} from './runtime';
+
+const ActivityTab = lazy(() => import('./tabs/ActivityTab'));
+const CdpTab = lazy(() => import('./tabs/CdpTab'));
+const DashboardTab = lazy(() => import('./tabs/DashboardTab'));
+const MessagesTab = lazy(() => import('./tabs/MessagesTab'));
+const MonitoringTab = lazy(() => import('./tabs/MonitoringTab'));
+const ReportsTab = lazy(() => import('./tabs/ReportsTab'));
+const UsersTab = lazy(() => import('./tabs/UsersTab'));
+
 import type {
   ActivityOverviewPayload,
   ActivityScopeReportPayload,
   ActivityScopeReportSection,
   AdminMessagesOverviewPayload,
-  AdminMessageRecord,
   AuthUser,
   BootstrapPayload,
+  CdpOverviewPayload,
   ConfigOverviewPayload,
   DashboardOverviewPayload,
   CounselorMessageRecord,
   CounselorMessageStats,
+  CounselorActivityRow,
   CounselorNoticeSendPagePayload,
   CounselorStudentRecord,
   CounselorSendNoticeRow,
-  CounselorActivityRow,
   CounselorOverviewPayload,
   CounselorSendPagePayload,
   CounselorSendReportRow,
@@ -103,7 +171,6 @@ import type {
   NoticeCompletionRow,
   NoticeRecord,
   NoticesOverviewPayload,
-  ReportStudentRow,
   ReportTestRecord,
   ReportsOverviewPayload,
   Role,
@@ -114,9 +181,42 @@ import type {
   SessionConflict,
   ServerConsolePayload,
   SmtpStatusPayload,
+  SubjectRecord,
+  SubjectsOverviewPayload,
   TestDetailPayload,
   UserRecord,
+  UsersOverviewPayload,
+  RoleSelectionOption,
 } from './types';
+
+const LAST_AUTH_STATE_KEY = 'shine_last_auth_state';
+const USER_CREATE_DRAFT_STORAGE_KEY = 'shine_user_create_draft_v1';
+const DEFAULT_MANAGED_USER_DOMAIN = 'rmkcet.ac.in';
+const SHARED_ROLE_EMAIL_MARKER = '::__shine_role__:';
+
+function normalizeManagedUserEmailClient(value: string) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function resolveManagedUserDomainClient(config?: { google_oauth_allowed_domain?: string } | null) {
+  return String(config?.google_oauth_allowed_domain || DEFAULT_MANAGED_USER_DOMAIN).trim().toLowerCase().replace(/^@/, '') || DEFAULT_MANAGED_USER_DOMAIN;
+}
+
+function normalizeSharedRoleDisplayEmail(value: string) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  const markerIndex = raw.indexOf(SHARED_ROLE_EMAIL_MARKER);
+  return markerIndex >= 0 ? raw.slice(0, markerIndex) : raw;
+}
+
+function isCurrentRoleSwitchOption(option: RoleSelectionOption, currentUser: AuthUser | null) {
+  if (!currentUser) return false;
+  const optionEmail = normalizeSharedRoleDisplayEmail(option.accountEmail);
+  const currentEmail = normalizeSharedRoleDisplayEmail(currentUser.email);
+  return option.role === currentUser.role
+    && optionEmail === currentEmail
+    && String(option.designation || '').trim() === String(currentUser.designation || '').trim();
+}
 
 type LoginState = {
   identifier: string;
@@ -125,10 +225,18 @@ type LoginState = {
   loading: boolean;
   error: string;
   conflict: SessionConflict | null;
+  conflictAuthMethod: 'password' | 'google' | null;
 };
 
 type LoginOtpState = {
   maskedEmail: string;
+};
+
+type LoginRoleSelectionState = {
+  authMethod: 'password' | 'google';
+  loginEmail: string;
+  options: RoleSelectionOption[];
+  selectedAccountEmail: string;
 };
 
 type ForgotPasswordState = {
@@ -152,19 +260,22 @@ type SelfPasswordDraft = {
 
 const ADMIN_TAB_LABELS: Record<string, string> = {
   dashboard: 'Dashboard',
-  reports: 'Reports',
   notices: 'Notices',
-  departments: 'Departments',
+  cdp: 'CDP',
+  reports: 'Reports',
   activity: 'Counsellor Activity',
+  subjects: 'Subjects',
   users: 'Users',
-  database: 'Database',
+  departments: 'Departments',
   monitoring: 'Session Monitoring',
-  'server-console': 'Server Console',
   messages: 'Message Logs',
+  database: 'Database',
+  'server-console': 'Server Console',
   config: 'Settings',
 };
 
 const DEFAULT_ADMIN_MESSAGES_LIMIT = 300;
+const SCOPE_CACHE_TTL_MS = 30 * 1000;
 const ADMIN_MESSAGES_LIMIT_STEP = 300;
 const RESOURCE_TEMPLATES = [
   {
@@ -239,13 +350,44 @@ type SendReturnState = {
   timestamp: number;
 };
 
+type CounselorSendMode = 'app' | 'web' | 'embed';
+
+type DesktopSendQueueState = 'opened' | 'sent' | 'skipped' | 'failed';
+
+type DesktopSendPendingTarget = {
+  kind: 'report' | 'notice';
+  regNo: string;
+  studentName: string;
+  deliveryToken: string;
+  waLink: string;
+};
+
+type MissingWhatsappPromptState = {
+  kind: 'report' | 'notice';
+  id: number;
+  title: string;
+};
+
+type AppNotificationItem = {
+  key: string;
+  severity: 'critical' | 'info';
+  title: string;
+  body: string;
+  createdAt: string;
+  actionTab?: string;
+};
+
 type FieldOrderEntry =
   | { type: 'subject'; label: string; rawKey: string; normalizedKey: string }
   | { type: 'metric'; metricKey: 'failed_subjects' | 'not_attended' | 'gpa'; label: string };
 
 type BackupActionState = {
-  kind: 'restore' | 'delete';
+  kind: 'restore' | 'delete' | 'archive' | 'restore-archive' | 'delete-archive' | 'clear';
   backupName: string;
+} | null;
+
+type ConfigPasswordPromptState = {
+  nextTab?: string | null;
 } | null;
 
 type DepartmentActionState = {
@@ -308,6 +450,36 @@ function applyTheme(theme: 'light' | 'dark') {
   document.body.classList.toggle('light-theme', theme === 'light');
 }
 
+function shouldUseBootLoaderOnInitialLoad() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('auth') === 'google') {
+      return params.get('success') === '1';
+    }
+    return window.localStorage.getItem(LAST_AUTH_STATE_KEY) === 'authenticated';
+  } catch {
+    return false;
+  }
+}
+
+function markAuthStateAuthenticated() {
+  try {
+    window.localStorage.setItem(LAST_AUTH_STATE_KEY, 'authenticated');
+    window.sessionStorage.setItem(LAST_AUTH_STATE_KEY, 'authenticated');
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function clearRememberedAuthState() {
+  try {
+    window.localStorage.removeItem(LAST_AUTH_STATE_KEY);
+    window.sessionStorage.removeItem(LAST_AUTH_STATE_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 function applyThemeColors(config: BootstrapPayload['appConfig'] | null) {
   if (!config) return;
   const root = document.documentElement;
@@ -328,19 +500,40 @@ function applyThemeColors(config: BootstrapPayload['appConfig'] | null) {
   root.style.setProperty('--border', config.color_border);
 }
 
+function buildFloatingThemeVars(config: BootstrapPayload['appConfig'] | null | undefined): FloatingSendWindowPayload['themeVars'] {
+  if (!config) return {};
+  return {
+    primary: config.color_primary,
+    primaryDark: config.color_primary_dark,
+    secondary: config.color_secondary,
+    accent: config.color_accent,
+    success: config.color_success,
+    warning: config.color_warning,
+    danger: config.color_danger,
+    info: config.color_info,
+    bgPrimary: config.color_bg_primary,
+    bgSecondary: config.color_bg_secondary,
+    bgCard: config.color_bg_card,
+    text: config.color_text,
+    textDim: config.color_text_dim,
+    textMuted: config.color_text_muted,
+    border: config.color_border,
+  };
+}
+
 function getTabsForUser(user: AuthUser | null) {
   if (!user) return [];
   if (user.role === 'admin') {
-    return ['dashboard', 'reports', 'notices', 'activity', 'users', 'departments', 'monitoring', 'messages', 'database', 'server-console'];
+    return ['dashboard', 'notices', 'cdp', 'reports', 'activity', 'subjects', 'users', 'departments', 'monitoring', 'messages', 'server-console', 'database'];
   }
   if (user.role === 'principal') {
-    return ['dashboard', 'reports', 'notices', 'departments', 'activity', 'users', 'database'];
+    return ['dashboard', 'notices', 'cdp', 'reports', 'activity', 'subjects', 'departments', 'users', 'database'];
   }
   if (user.role === 'hod') {
-    return ['dashboard', 'reports', 'notices', 'activity', 'messages'];
+    return ['dashboard', 'notices', 'cdp', 'reports', 'activity', 'subjects', 'messages'];
   }
   if (user.role === 'deo') {
-    return ['reports', 'notices', 'activity', 'users', 'messages'];
+    return ['reports', 'notices', 'cdp', 'activity', 'subjects', 'users', 'messages'];
   }
   return ['recent-tests', 'notices', 'test-database', 'message-history'];
 }
@@ -351,6 +544,13 @@ function getDefaultTab(user: AuthUser | null) {
   if (user.role === 'principal' || user.role === 'hod') return 'dashboard';
   if (user.role === 'deo') return 'reports';
   return 'recent-tests';
+}
+
+function buildAcademicYearLabel(startYear: string, endYear: string) {
+  const start = String(startYear || '').trim();
+  const end = String(endYear || '').trim();
+  if (!start || !end) return '';
+  return `${start}-${end}`;
 }
 
 function getSmtpIndicator(
@@ -401,8 +601,10 @@ function getNavLabel(tab: string, user: AuthUser | null) {
 function getNavIcon(tab: string) {
   const map: Record<string, string> = {
     dashboard: 'fa-gauge',
+    cdp: 'fa-clipboard-list',
     reports: 'fa-file-lines',
     notices: 'fa-bullhorn',
+    subjects: 'fa-book-open',
     departments: 'fa-building',
     activity: 'fa-chart-line',
     users: 'fa-users',
@@ -421,14 +623,14 @@ function getNavIcon(tab: string) {
 function getRoleBadgeLabel(user: AuthUser) {
   if (user.role === 'hod') return 'HoD';
   if (user.role === 'deo') return 'DEO';
-  if (user.role === 'principal') return 'PRINCIPAL';
+  if (user.role === 'principal') return String(user.designation || 'Higher Official').trim().toUpperCase();
   if (user.role === 'counselor') return 'COUNSELOR';
   return 'ADMIN';
 }
 
-function getRoleOptionLabel(role: Role) {
+function getRoleOptionLabel(role: Role, designation?: string | null) {
   if (role === 'admin') return 'System Admin';
-  if (role === 'principal') return 'Principal';
+  if (role === 'principal') return String(designation || '').trim() || 'Higher Official';
   if (role === 'hod') return 'HoD';
   if (role === 'deo') return 'DEO';
   return 'Counselor';
@@ -445,6 +647,155 @@ function getFooterSupportHref(user: AuthUser | null) {
   if (user.role === 'counselor') return '/assets/doc_counsellor.pdf';
   if (user.role === 'hod' || user.role === 'deo') return '/assets/doc_chief_admin.pdf';
   return '/assets/doc_admin.pdf';
+}
+
+function getNotificationStorageKey(user: AuthUser | null) {
+  return `shine_notification_seen:${user?.email || 'guest'}`;
+}
+
+function getDeletedNotificationStorageKey(user: AuthUser | null) {
+  return `shine_notification_deleted:${user?.email || 'guest'}`;
+}
+
+function readSeenNotificationKeys(user: AuthUser | null) {
+  if (typeof window === 'undefined') return new Set<string>();
+  try {
+    return new Set(JSON.parse(window.localStorage.getItem(getNotificationStorageKey(user)) || '[]') as string[]);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function writeSeenNotificationKeys(user: AuthUser | null, keys: Iterable<string>) {
+  if (typeof window === 'undefined') return;
+  const uniqueKeys = Array.from(new Set(Array.from(keys).map((key) => String(key || '').trim()).filter(Boolean))).slice(-200);
+  window.localStorage.setItem(getNotificationStorageKey(user), JSON.stringify(uniqueKeys));
+}
+
+function readDeletedNotificationKeys(user: AuthUser | null) {
+  if (typeof window === 'undefined') return new Set<string>();
+  try {
+    return new Set(JSON.parse(window.localStorage.getItem(getDeletedNotificationStorageKey(user)) || '[]') as string[]);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function writeDeletedNotificationKeys(user: AuthUser | null, keys: Iterable<string>) {
+  if (typeof window === 'undefined') return;
+  const uniqueKeys = Array.from(new Set(Array.from(keys).map((key) => String(key || '').trim()).filter(Boolean))).slice(-300);
+  window.localStorage.setItem(getDeletedNotificationStorageKey(user), JSON.stringify(uniqueKeys));
+}
+
+function compareVersionStrings(left: string, right: string) {
+  const leftParts = String(left || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = String(right || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function getWeekdayKey(date = new Date()) {
+  return ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][date.getDay()];
+}
+
+function buildAppNotifications(
+  user: AuthUser | null,
+  pendingNotices: NoticeRecord[],
+  assignedTests: CounselorVisibleTestRecord[],
+  options: {
+    pendingThresholdDays: number;
+    updateInfo?: DesktopUpdateInfo | null;
+    appVersion?: string;
+    desktopSettings?: DesktopAppSettings | null;
+    activityRows?: CounselorActivityRow[];
+  },
+) {
+  if (!user) return [] as AppNotificationItem[];
+  const notifications: AppNotificationItem[] = [];
+  const nowMs = Date.now();
+  const pendingThresholdMs = Math.max(1, Number(options.pendingThresholdDays || 2) || 2) * 24 * 60 * 60 * 1000;
+  if (options.updateInfo?.available && options.updateInfo.version) {
+    notifications.push({
+      key: `update:${options.updateInfo.version}`,
+      severity: 'critical',
+      title: 'Update released',
+      body: `Shine ${options.updateInfo.version} is available.`,
+      createdAt: new Date().toISOString(),
+      actionTab: user.role === 'admin' ? 'config' : undefined,
+    });
+  }
+  if (user.role === 'counselor') {
+    for (const test of assignedTests || []) {
+      const uploadedAt = String(test.uploaded_at || '');
+      const pendingCount = Math.max(0, Number(test.student_count || 0) - Number(test.generated_count || 0));
+      const isOldPending = pendingCount > 0 && uploadedAt && nowMs - (Date.parse(uploadedAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
+      notifications.push({
+        key: `test-assigned:${test.test_id || test.id}`,
+        severity: 'info',
+        title: 'Test assigned',
+        body: `${test.test_name} ${formatSemesterBadge(test.semester)} is available for ${test.department} ${formatYearLevel(test.year_level || 1)}.`,
+        createdAt: uploadedAt,
+        actionTab: 'test-database',
+      });
+      if (isOldPending) {
+        notifications.push({
+          key: `test-pending-old:${test.test_id || test.id}`,
+          severity: 'critical',
+          title: 'Pending reminder',
+          body: `${test.test_name} has ${pendingCount} pending student${pendingCount === 1 ? '' : 's'} for more than ${Math.max(1, Number(options.pendingThresholdDays || 2) || 2)} days.`,
+          createdAt: uploadedAt,
+          actionTab: 'test-database',
+        });
+      }
+    }
+    for (const notice of pendingNotices || []) {
+      const noticeTitle = String(notice.title_display || notice.title || 'Notice pending').trim();
+      const createdAt = String(notice.created_at || '');
+      const isOldPending = createdAt && nowMs - (Date.parse(createdAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
+      notifications.push({
+        key: `notice-assigned:${notice.id}`,
+        severity: 'critical',
+        title: 'Notice assigned',
+        body: noticeTitle,
+        createdAt,
+        actionTab: 'notices',
+      });
+      if (isOldPending) {
+        notifications.push({
+          key: `notice-pending-old:${notice.id}`,
+          severity: 'critical',
+          title: 'Pending reminder',
+          body: `${noticeTitle} has been pending for more than ${Math.max(1, Number(options.pendingThresholdDays || 2) || 2)} days.`,
+          createdAt,
+          actionTab: 'notices',
+        });
+      }
+    }
+  }
+  if ((user.role === 'hod' || user.role === 'principal') && options.desktopSettings && runtimeConfig.isDesktop) {
+    const digestDay = String(options.desktopSettings.higherOfficialDigestDay || 'monday').toLowerCase();
+    if (digestDay === getWeekdayKey()) {
+      const pendingRows = (options.activityRows || []).filter((row) => Number(row.pending_count || 0) > 0);
+      const scopeRows = options.desktopSettings.higherOfficialDigestScope === 'all'
+        ? pendingRows
+        : pendingRows.filter((row) => user.scopes.some((scope) => scope.department === row.department && Number(scope.year_level) === Number(row.year_level)));
+      if (scopeRows.length) {
+        notifications.push({
+          key: `digest:${new Date().toISOString().slice(0, 10)}:${options.desktopSettings.higherOfficialDigestScope}:${scopeRows.length}`,
+          severity: 'critical',
+          title: 'Pending counselor digest',
+          body: `${scopeRows.length} counselor${scopeRows.length === 1 ? '' : 's'} have pending work in ${options.desktopSettings.higherOfficialDigestScope === 'all' ? 'all scopes' : 'your allocated scope'}.`,
+          createdAt: new Date().toISOString(),
+          actionTab: 'activity',
+        });
+      }
+    }
+  }
+  return notifications.sort((left, right) => Date.parse(right.createdAt || '') - Date.parse(left.createdAt || ''));
 }
 
 function shouldRestoreSendReturnState() {
@@ -495,26 +846,43 @@ function SmartDateInput({
         }}
         onChange={(event) => onChange(event.target.value)}
       />
-      <button
-        type="button"
-        className="smart-date-input-trigger"
-        aria-label="Open date picker"
-        onClick={() => {
-          setDateMode(true);
-          window.requestAnimationFrame(() => {
-            const element = inputRef.current;
-            if (!element) return;
-            element.focus();
-            if ('showPicker' in element && typeof element.showPicker === 'function') {
-              element.showPicker();
-            }
-          });
-        }}
-      >
-        <i className="fas fa-calendar-alt"></i>
-      </button>
+      {!dateMode ? (
+        <button
+          type="button"
+          className="smart-date-input-trigger"
+          aria-label="Open date picker"
+          onClick={() => {
+            setDateMode(true);
+            window.requestAnimationFrame(() => {
+              const element = inputRef.current;
+              if (!element) return;
+              element.focus();
+              if ('showPicker' in element && typeof element.showPicker === 'function') {
+                element.showPicker();
+              }
+            });
+          }}
+        >
+          <i className="fas fa-calendar-alt"></i>
+        </button>
+      ) : null}
     </div>
   );
+}
+
+function loginConflictHasUnknownDetails(conflict: SessionConflict | null | undefined) {
+  if (!conflict) return false;
+  const values = [
+    conflict.browser,
+    conflict.device_type,
+    conflict.ip_address,
+    conflict.login_time,
+  ].map((value) => String(value || '').trim().toLowerCase());
+  return values.every((value) => !value || value === 'unknown');
+}
+
+function normalizeOtpCode(value: string) {
+  return String(value || '').replace(/\D/g, '').slice(0, 6);
 }
 
 function formatYearLevel(year: number) {
@@ -531,6 +899,10 @@ function formatSemesterBadge(semester: string) {
   return `Sem - ${String(semester || '').trim() || '-'}`;
 }
 
+const DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE = 'The Following Counsellors are yet to send the specified Notices\n\n{entries}';
+const DEFAULT_ACTIVITY_DEFAULTER_COPY_TEMPLATE = 'The Following are all the counsellors who are yet to send results to their respective students\n\n{entries}';
+const DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE = "The following subjects's CDP is not yet filled ,\n\n{entries}";
+
 function escapeSvgText(value: string) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -542,6 +914,32 @@ function escapeSvgText(value: string) {
 
 function renderCopyLinesAsText(lines: CopyLine[]) {
   return lines.map((line) => line.text).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function renderCopyTemplate(template: string, values: Record<string, string>) {
+  return String(template || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => values[key] ?? '');
+}
+
+function plainTextToCopyLines(text: string) {
+  const rows = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const lines: CopyLine[] = [];
+  for (const row of rows) {
+    const trimmed = row.trim();
+    if (!trimmed) {
+      lines.push({ tone: 'spacer', text: '' });
+      continue;
+    }
+    if (trimmed.startsWith('- ')) {
+      lines.push({ tone: 'bullet', text: trimmed });
+      continue;
+    }
+    if (trimmed.startsWith('*') && trimmed.endsWith('*') && trimmed.length > 2) {
+      lines.push({ tone: 'name', text: trimmed });
+      continue;
+    }
+    lines.push({ tone: 'body', text: row });
+  }
+  return lines;
 }
 
 async function copySvgImageToClipboard(svgMarkup: string) {
@@ -718,7 +1116,7 @@ function buildCopyCardSvg(title: string, lines: CopyLine[]) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${rendered.join('')}</svg>`;
 }
 
-function buildNoticeCopyLines(rows: NoticeCompletionRow[]) {
+function buildNoticeCopyEntries(rows: NoticeCompletionRow[]) {
   const pendingRows = rows
     .filter((row) => (row.pending_notice_count || 0) > 0)
     .sort((a, b) =>
@@ -726,35 +1124,28 @@ function buildNoticeCopyLines(rows: NoticeCompletionRow[]) {
       || (a.year_level || 1) - (b.year_level || 1)
       || a.name.localeCompare(b.name),
     );
-  const lines: CopyLine[] = [
-    { tone: 'body', text: 'The Following Counsellors are yet to send the specified Notices' },
-    { tone: 'spacer', text: '' },
-  ];
+  const lines: string[] = [];
   let lastScope = '';
   for (const row of pendingRows) {
     const scopeKey = `${row.department}::${row.year_level}`;
     if (scopeKey !== lastScope) {
-      lines.push({ tone: 'section', text: row.department });
-      lines.push({ tone: 'subsection', text: formatYearLevel(row.year_level || 1) });
+      lines.push(row.department);
+      lines.push(formatYearLevel(row.year_level || 1));
       lastScope = scopeKey;
     }
-    lines.push({ tone: 'name', text: `*${row.name}*` });
+    lines.push(`*${row.name}*`);
     for (const title of row.pending_notice_titles || []) {
-      lines.push({ tone: 'bullet', text: `- ${title}` });
+      lines.push(`- ${title}`);
     }
-    lines.push({ tone: 'spacer', text: '' });
+    lines.push('');
   }
-  return lines;
+  return lines.join('\n').trim();
 }
 
-function buildActivityCopyLines(
+function buildActivityCopyEntries(
   sections: ActivityScopeReportSection[],
-  mode: 'scope' | 'department' | 'year' | 'test',
 ) {
-  const lines: CopyLine[] = [
-    { tone: 'body', text: 'The Following are all the counsellors who are yet to send results to their respective students' },
-    { tone: 'spacer', text: '' },
-  ];
+  const lines: string[] = [];
 
   const grouped = new Map<string, Map<number, Map<string, Map<string, string[]>>>>();
   for (const section of sections) {
@@ -778,11 +1169,11 @@ function buildActivityCopyLines(
     }
 
   for (const [department, yearMap] of grouped.entries()) {
-    lines.push({ tone: 'section', text: department });
+    lines.push(department);
     for (const [yearLevel, semesterMap] of yearMap.entries()) {
-      lines.push({ tone: 'subsection', text: formatYearLevel(yearLevel) });
+      lines.push(formatYearLevel(yearLevel));
       for (const [semester, counselorMap] of semesterMap.entries()) {
-        lines.push({ tone: 'subsection', text: formatSemesterBadge(semester) });
+        lines.push(formatSemesterBadge(semester));
         const counselorEntries = Array.from(counselorMap.entries())
           .filter(([key]) => !key.startsWith('__name__:'))
           .map(([key, tests]) => ({
@@ -791,17 +1182,17 @@ function buildActivityCopyLines(
           }))
           .sort((a, b) => a.name.localeCompare(b.name));
         for (const counselor of counselorEntries) {
-          lines.push({ tone: 'name', text: `*${counselor.name}*` });
+          lines.push(`*${counselor.name}*`);
           for (const testName of counselor.tests) {
-            lines.push({ tone: 'bullet', text: `- ${testName}` });
+            lines.push(`- ${testName}`);
           }
         }
-        lines.push({ tone: 'spacer', text: '' });
+        lines.push('');
       }
     }
   }
 
-  return lines;
+  return lines.join('\n').trim();
 }
 
 function getDefaultBatchNameForYearLevel(year: number, config: BootstrapPayload['appConfig'] | null) {
@@ -836,6 +1227,115 @@ function deriveBatchNameFromBase(rawBase: string, year: number) {
   return `${targetStart}-${targetEnd}`;
 }
 
+function parseAcademicBatchRange(rawBase: string) {
+  const match = String(rawBase || '').trim().match(/^(\d{4})\s*-\s*(\d{2,4})$/);
+  const currentYear = new Date().getFullYear();
+  if (!match) {
+    return { startYear: currentYear, endYear: currentYear + 1 };
+  }
+  const startYear = Number(match[1]);
+  const tail = match[2];
+  const endYear = tail.length === 2 ? Number(`${String(startYear).slice(0, 2)}${tail}`) : Number(tail);
+  return { startYear, endYear };
+}
+
+function getDefaultSubjectAttendanceYear() {
+  return new Date().getFullYear();
+}
+
+function getSemesterLabel(semester: string) {
+  return String(semester || '1').trim() === '2' ? 'Sem - II' : 'Sem - I';
+}
+
+function looksLikeGoogleSheetLink(value: string) {
+  const raw = String(value || '').trim();
+  return /^https?:\/\/docs\.google\.com\/spreadsheets\/d\//i.test(raw) || /\/d\/[a-zA-Z0-9-_]+/i.test(raw);
+}
+
+function normalizeClassSections(values: string[]) {
+  return Array.from(new Set((values || []).map((value) => String(value || '').trim().toUpperCase()).filter(Boolean)));
+}
+
+function splitFacultyNames(value: string) {
+  return Array.from(new Set(
+    String(value || '')
+      .split(/(?:\r?\n|\/|;)+/g)
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  ));
+}
+
+function normalizeFacultyAllocations(
+  allocations: Array<{ faculty_name: string; class_sections: string[] }>,
+  facultyNames: string[],
+  parsedClasses: string[],
+) {
+  const allowedClasses = normalizeClassSections(parsedClasses || []);
+  const normalizeFacultyKey = (value: string) =>
+    String(value || '')
+      .trim()
+      .toUpperCase()
+      .replace(/\./g, '')
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const findBestExistingClasses = (facultyName: string) => {
+    const direct = existingMap.get(facultyName);
+    if (direct && direct.length) return direct;
+    const targetKey = normalizeFacultyKey(facultyName);
+    if (!targetKey) return [];
+    const targetTokens = targetKey.split(' ').filter(Boolean);
+    let bestMatch: string[] = [];
+    let bestScore = 0;
+    for (const [existingName, existingClasses] of existingMap.entries()) {
+      if (!existingClasses.length) continue;
+      const existingKey = normalizeFacultyKey(existingName);
+      if (!existingKey) continue;
+      if (existingKey === targetKey || existingKey.includes(targetKey) || targetKey.includes(existingKey)) {
+        return existingClasses;
+      }
+      const existingTokens = existingKey.split(' ').filter(Boolean);
+      const shared = targetTokens.filter((token) =>
+        existingTokens.some((existingToken) =>
+          existingToken === token
+          || existingToken.startsWith(token)
+          || token.startsWith(existingToken),
+        ),
+      ).length;
+      if (shared > bestScore) {
+        bestScore = shared;
+        bestMatch = existingClasses;
+      }
+    }
+    return bestScore >= Math.max(1, Math.min(2, targetTokens.length)) ? bestMatch : [];
+  };
+  const existingMap = new Map(
+    (allocations || []).map((entry) => [
+      String(entry.faculty_name || '').trim(),
+      normalizeClassSections(entry.class_sections || []).filter((value) => allowedClasses.includes(value)),
+    ]),
+  );
+  return facultyNames
+    .map((facultyName) => String(facultyName || '').trim())
+    .filter(Boolean)
+    .map((facultyName) => ({
+      faculty_name: facultyName,
+      class_sections: (() => {
+        const existing = findBestExistingClasses(facultyName);
+        if (existing && existing.length) return existing;
+        return facultyNames.filter((name) => String(name || '').trim()).length === 1 ? allowedClasses : [];
+      })(),
+    }));
+}
+
+function doClassSectionsMatchDepartment(classSections: string[], department: string) {
+  const normalizedDepartment = String(department || '').trim().toUpperCase();
+  if (!normalizedDepartment) return true;
+  const sections = normalizeClassSections(classSections || []);
+  if (!sections.length) return true;
+  return sections.every((section) => section === normalizedDepartment || section.startsWith(`${normalizedDepartment} `));
+}
+
 function splitTestsBySemester<T extends { semester: string }>(tests: T[]) {
   return {
     sem1: tests.filter((test) => String(test.semester || '').trim() === '1'),
@@ -843,14 +1343,200 @@ function splitTestsBySemester<T extends { semester: string }>(tests: T[]) {
   };
 }
 
+function buildReportsOverviewCacheKey(department?: string, year?: number | null) {
+  return JSON.stringify({
+    department: String(department || '').trim().toUpperCase(),
+    year: Number(year || 0) || 0,
+  });
+}
+
+function buildDashboardOverviewCacheKey() {
+  return 'dashboard-overview';
+}
+
+function buildUsersOverviewCacheKey() {
+  return 'users-overview';
+}
+
+function buildCdpOverviewCacheKey(filters?: {
+  department?: string;
+  year?: number | null;
+  semester?: string;
+  subject_id?: number | null;
+}) {
+  return JSON.stringify({
+    department: String(filters?.department || '').trim().toUpperCase(),
+    year: Number(filters?.year || 0) || 0,
+    semester: String(filters?.semester || '').trim(),
+    subject_id: Number(filters?.subject_id || 0) || 0,
+  });
+}
+
+function buildActivityOverviewCacheKey(filters?: {
+  department?: string;
+  year?: number | null;
+  semester?: string;
+  test_name?: string;
+  q?: string;
+  sort?: string;
+}) {
+  const normalizedSort = String(filters?.sort || '').trim() || 'pending_first';
+  return JSON.stringify({
+    department: String(filters?.department || '').trim().toUpperCase(),
+    year: Number(filters?.year || 0) || 0,
+    semester: String(filters?.semester || '').trim(),
+    test_name: String(filters?.test_name || '').trim(),
+    q: String(filters?.q || '').trim(),
+    sort: normalizedSort,
+  });
+}
+
+function buildActivityScopeSeedKey(payload: Pick<ActivityOverviewPayload, 'selectedDepartment' | 'selectedYear' | 'cacheMeta'>) {
+  const department = String(payload.selectedDepartment || '').trim().toUpperCase();
+  const year = Number(payload.selectedYear || 0) || 0;
+  if (!department || !year) return '';
+  return [
+    department,
+    year,
+    String(payload.cacheMeta?.version || 0),
+    String(payload.cacheMeta?.generatedAt || ''),
+  ].join('::');
+}
+
+function stripActivityPrefetchedResults(payload: ActivityOverviewPayload): ActivityOverviewPayload {
+  if (!payload.prefetchedResults?.length) return payload;
+  return {
+    ...payload,
+    prefetchedResults: undefined,
+  };
+}
+
+function shouldPersistActivityOverviewPayload(payload: ActivityOverviewPayload) {
+  return !payload.prefetchedResults?.length
+    && !String(payload.selectedSemester || '').trim()
+    && !String(payload.selectedTestName || '').trim();
+}
+
+function buildActivityScopeReportCacheKey(filters?: {
+  department?: string;
+  year?: number | null;
+  semester?: string;
+  test_name?: string;
+}) {
+  return JSON.stringify({
+    department: String(filters?.department || '').trim().toUpperCase(),
+    year: Number(filters?.year || 0) || 0,
+    semester: String(filters?.semester || '').trim(),
+    test_name: String(filters?.test_name || '').trim(),
+  });
+}
+
+function buildPersistentCacheNamespace(payload: BootstrapPayload | null) {
+  const email = String(payload?.user?.email || '').trim().toLowerCase();
+  const role = String(payload?.user?.role || '').trim().toLowerCase();
+  if (!email || !role) return '';
+  return [
+    String(payload?.appVersion || 'app'),
+    `rmv${Number(payload?.readModelVersion || 0) || 0}`,
+    email,
+    role,
+  ].join('::');
+}
+
+function buildTestDetailMarksSnapshot(payload: TestDetailPayload | null) {
+  const snapshot: Record<string, Record<string, string>> = {};
+  if (!payload) return snapshot;
+  for (const student of payload.students || []) {
+    const regNo = String(student.reg_no || '').trim();
+    if (!regNo) continue;
+    snapshot[regNo] = Object.fromEntries(
+      (payload.subjects || []).map((subject) => [
+        subject,
+        String(student.marks?.[subject] || '').trim(),
+      ]),
+    );
+  }
+  return snapshot;
+}
+
 function toBooleanString(value: string | undefined) {
   return String(value || '').trim().toLowerCase() === 'true';
+}
+
+function normalizeDesktopSendTargetPreference(value: string | undefined): DesktopSendTargetPreference {
+  const candidate = String(value || '').trim().toLowerCase();
+  if (candidate === 'chrome' || candidate === 'edge' || candidate === 'whatsapp_desktop') return candidate;
+  return 'default_browser';
+}
+
+function isDesktopSendWorkspaceEnabled(config: BootstrapPayload['appConfig'] | null | undefined) {
+  return runtimeConfig.isDesktop
+    && String(config?.desktop_send_workspace_enabled || 'true').trim().toLowerCase() !== 'false';
+}
+
+function getDesktopSendTargetPreference(config: BootstrapPayload['appConfig'] | null | undefined): DesktopSendTargetPreference {
+  return normalizeDesktopSendTargetPreference(config?.desktop_send_target_preference);
+}
+
+function getDesktopWorkspaceLaunchTarget(): DesktopSendTargetPreference {
+  return 'whatsapp_desktop';
+}
+
+function getDesktopSendTargetLabel(preference: DesktopSendTargetPreference, availableTargets?: DesktopSendTargetAvailability) {
+  if (preference === 'whatsapp_desktop' && availableTargets?.whatsapp_desktop) return 'WhatsApp Desktop';
+  if (preference === 'chrome' && availableTargets?.chrome) return 'Google Chrome';
+  if (preference === 'edge' && availableTargets?.edge) return 'Microsoft Edge';
+  return 'Default Browser';
+}
+
+function resolveDesktopSendMode(_config: BootstrapPayload['appConfig'] | null | undefined): CounselorSendMode {
+  return runtimeConfig.isDesktop ? 'app' : 'web';
+}
+
+async function resolveDesktopSendModeWithPresence(_config: BootstrapPayload['appConfig'] | null | undefined): Promise<CounselorSendMode> {
+  if (!runtimeConfig.isDesktop) return 'web';
+  try {
+    const availability = await getAvailableDesktopSendTargets();
+    return availability.whatsapp_desktop ? 'app' : 'web';
+  } catch {
+    return 'web';
+  }
+}
+
+function resolveCounselorSendBackendMode(mode: CounselorSendMode): 'app' | 'web' {
+  return mode === 'embed' ? 'web' : mode;
 }
 
 function formatDateTime(value: string | null | undefined) {
   const raw = String(value || '').trim();
   if (!raw) return '--';
   return raw.slice(0, 16).replace('T', ' ');
+}
+
+function buildNoticeAttachmentPreviewUrl(attachment: { public_token?: string; public_url?: string }) {
+  const token = String(attachment?.public_token || '').trim();
+  if (token) {
+    const directServerUrl = String(resolveDirectServerUrl(`/api/notice-files/${token}`) || '').trim();
+    if (directServerUrl) return directServerUrl;
+  }
+  return String(attachment?.public_url || '').trim() || (token ? `/api/notice-files/${token}` : '');
+}
+
+function formatUtcSqlDateTime(value: string | null | undefined) {
+  const raw = String(value || '').trim();
+  if (!raw) return '--';
+  const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T');
+  const assumedUtc = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
+  const date = new Date(assumedUtc);
+  if (Number.isNaN(date.getTime())) return formatDateTime(raw);
+  return date.toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).replace(',', '');
 }
 
 function isSmtpConfigured(config: BootstrapPayload['appConfig'] | null | undefined) {
@@ -907,6 +1593,32 @@ function convertWhatsAppWebLinkToApp(waLink: string) {
   const raw = String(waLink || '').trim();
   if (!raw) return '';
   if (/^whatsapp:\/\/send\?/i.test(raw)) return raw;
+  if (/^https:\/\/wa\.me\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      const phone = String(url.pathname || '').replace(/^\/+/, '').replace(/\D/g, '').trim();
+      const text = String(url.searchParams.get('text') || '').trim();
+      const params = new URLSearchParams();
+      if (phone) params.set('phone', phone);
+      if (text) params.set('text', text);
+      return phone ? `whatsapp://send?${params.toString()}` : raw;
+    } catch {
+      return raw;
+    }
+  }
+  if (/^https:\/\/api\.whatsapp\.com\/send\/?/i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      const phone = String(url.searchParams.get('phone') || '').replace(/\D/g, '').trim();
+      const text = String(url.searchParams.get('text') || '').trim();
+      const params = new URLSearchParams();
+      if (phone) params.set('phone', phone);
+      if (text) params.set('text', text);
+      return phone ? `whatsapp://send?${params.toString()}` : raw;
+    } catch {
+      return raw;
+    }
+  }
   if (/^https:\/\/web\.whatsapp\.com\/send\/?/i.test(raw)) {
     try {
       const url = new URL(raw);
@@ -941,13 +1653,16 @@ function resolveWaLinkByMode(rawLink: string, mode: 'app' | 'web') {
   return mode === 'web' ? convertWhatsAppAppLinkToWeb(rawLink) : convertWhatsAppWebLinkToApp(rawLink);
 }
 
+const WHATSAPP_VERIFICATION_WEB_LINK = 'https://web.whatsapp.com/';
+
 function openWhatsAppAppDirect(waLink: string) {
   const appLink = resolveWaLinkByMode(waLink, 'app');
   if (!appLink) return false;
   if (isMobileUi()) {
-    window.location.assign(appLink);
+    openExternalLink(appLink);
     return true;
   }
+  if (runtimeConfig.isDesktop) return openExternalLink(appLink);
   try {
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
@@ -958,7 +1673,7 @@ function openWhatsAppAppDirect(waLink: string) {
     return true;
   } catch {
     try {
-      window.location.assign(appLink);
+      openExternalLink(appLink);
       return true;
     } catch {
       return false;
@@ -970,7 +1685,7 @@ function openWhatsAppWebDirect(waLink: string) {
   const webLink = resolveWaLinkByMode(waLink, 'web');
   if (!webLink) return false;
   try {
-    window.location.assign(webLink);
+    openExternalLink(webLink);
     return true;
   } catch {
     return false;
@@ -1098,8 +1813,11 @@ function applyReportTemplate(template: string, variables: Record<string, string>
 }
 
 export default function App() {
+  const MIN_BOOT_LOADER_MS = 900;
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
-  const [bootLoading, setBootLoading] = useState(true);
+  const [bootLoading, setBootLoading] = useState(() => shouldUseBootLoaderOnInitialLoad());
+  const [bootStatus, setBootStatus] = useState('Preparing workspace...');
+  const [sessionEndNotice, setSessionEndNotice] = useState<BootstrapPayload['sessionEndNotice']>(null);
   const [activeTab, setActiveTab] = useState('reports');
   const [flash, setFlash] = useState<FlashState>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -1110,8 +1828,15 @@ export default function App() {
     loading: false,
     error: '',
     conflict: null,
+    conflictAuthMethod: null,
   });
   const [loginOtpState, setLoginOtpState] = useState<LoginOtpState | null>(null);
+  const [loginRoleSelectionState, setLoginRoleSelectionState] = useState<LoginRoleSelectionState | null>(null);
+  const [roleSwitchModalOpen, setRoleSwitchModalOpen] = useState(false);
+  const [roleSwitchSelectedAccountEmail, setRoleSwitchSelectedAccountEmail] = useState('');
+  const [roleSwitchLoading, setRoleSwitchLoading] = useState(false);
+  const [roleSwitchError, setRoleSwitchError] = useState('');
+  const [roleSwitchOptionsOverride, setRoleSwitchOptionsOverride] = useState<RoleSelectionOption[]>([]);
   const [forgotPasswordState, setForgotPasswordState] = useState<ForgotPasswordState>({
     open: false,
     stage: 'request',
@@ -1137,6 +1862,7 @@ export default function App() {
   const [users, setUsers] = useState<UserRecord[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [userSearch, setUserSearch] = useState('');
+  const deferredUserSearch = useDeferredValue(userSearch);
   const [userFilterTrayOpen, setUserFilterTrayOpen] = useState(false);
   const [userFilterDepartment, setUserFilterDepartment] = useState('');
   const [userFilterRole, setUserFilterRole] = useState('');
@@ -1152,18 +1878,21 @@ export default function App() {
     password: '',
     confirm_password: '',
     role: 'counselor' as Role,
+    designation: '',
     department: '',
     year_level: '1',
     max_students: '30',
     scope_pairs: [] as string[],
   });
   const [userSaving, setUserSaving] = useState(false);
+  const userCreateDraftLoadedRef = useRef(false);
   const [userEditDraft, setUserEditDraft] = useState<{
     original_email: string;
     name: string;
     email: string;
     password: string;
     role: Role;
+    designation: string;
     department: string;
     year_level: string;
     max_students: string;
@@ -1171,6 +1900,7 @@ export default function App() {
   } | null>(null);
   const [userActionTarget, setUserActionTarget] = useState<{ kind: 'lock' | 'unlock' | 'delete'; user: UserRecord } | null>(null);
   const [userActionLoading, setUserActionLoading] = useState(false);
+  const [linkedUserGroupEmail, setLinkedUserGroupEmail] = useState('');
   const [bulkCounselorForm, setBulkCounselorForm] = useState<{ year_level: string; file: File | null }>({ year_level: '1', file: null });
   const [bulkCounselorUploadKey, setBulkCounselorUploadKey] = useState(0);
   const [bulkCounselorSaving, setBulkCounselorSaving] = useState(false);
@@ -1217,8 +1947,9 @@ export default function App() {
     title: '',
     text: '',
     template: '',
-    sendMode: 'app' as 'app' | 'web',
+    sendMode: 'app' as CounselorSendMode,
   });
+  const counselorNoticeSendVarsRef = useRef(counselorNoticeSendVars);
   const [counselorNoticeAutoTemplate, setCounselorNoticeAutoTemplate] = useState('');
   const [counselorNoticeTemplateEdited, setCounselorNoticeTemplateEdited] = useState(false);
   const [counselorNoticeBatchRunning, setCounselorNoticeBatchRunning] = useState(false);
@@ -1227,6 +1958,38 @@ export default function App() {
   const [counselorNoticeIncludeGenerated, setCounselorNoticeIncludeGenerated] = useState(false);
   const [reportsLoading, setReportsLoading] = useState(false);
   const [reportsData, setReportsData] = useState<ReportsOverviewPayload | null>(null);
+  const [subjectsLoading, setSubjectsLoading] = useState(false);
+  const [subjectsData, setSubjectsData] = useState<SubjectsOverviewPayload | null>(null);
+  const [subjectForm, setSubjectForm] = useState({
+    subject_code: '',
+    subject_name: '',
+    faculty_name: '',
+    google_sheet_link: '',
+    academic_start_year: String(getDefaultSubjectAttendanceYear()),
+    academic_end_year: String(getDefaultSubjectAttendanceYear()),
+    class_sections: [] as string[],
+    faculty_allocations: [] as Array<{ faculty_name: string; class_sections: string[] }>,
+  });
+  const [subjectEditId, setSubjectEditId] = useState<number | null>(null);
+  const [subjectSaving, setSubjectSaving] = useState(false);
+  const [subjectParsing, setSubjectParsing] = useState(false);
+  const [subjectLastParsedLink, setSubjectLastParsedLink] = useState('');
+  const [subjectParsedClasses, setSubjectParsedClasses] = useState<string[]>([]);
+  const [subjectParsedFaculties, setSubjectParsedFaculties] = useState<string[]>([]);
+  const [subjectParseError, setSubjectParseError] = useState('');
+  const subjectParseRequestRef = useRef(0);
+  const reportsOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: ReportsOverviewPayload }>());
+  const dashboardOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: DashboardOverviewPayload }>());
+  const usersOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: UsersOverviewPayload }>());
+  const subjectsOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: SubjectsOverviewPayload }>());
+  const cdpOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: CdpOverviewPayload }>());
+  const activityOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: ActivityOverviewPayload }>());
+  const activityScopeReportCacheRef = useRef(new Map<string, { timestamp: number; payload: ActivityScopeReportPayload }>());
+  const activityScopePrefetchRef = useRef(new Set<string>());
+  const activityScopeSeededRef = useRef(new Set<string>());
+  const tabWarmupKeyRef = useRef('');
+  const [cdpLoading, setCdpLoading] = useState(false);
+  const [cdpData, setCdpData] = useState<CdpOverviewPayload | null>(null);
   const [counselorOverviewLoading, setCounselorOverviewLoading] = useState(false);
   const [counselorOverview, setCounselorOverview] = useState<CounselorOverviewPayload | null>(null);
   const [counselorTestsLoading, setCounselorTestsLoading] = useState(false);
@@ -1235,15 +1998,54 @@ export default function App() {
   const [counselorMessages, setCounselorMessages] = useState<CounselorMessageRecord[]>([]);
   const [counselorMessageStats, setCounselorMessageStats] = useState<CounselorMessageStats | null>(null);
   const [counselorSendVerify, setCounselorSendVerify] = useState<CounselorSendVerifyState | null>(null);
+  const [missingWhatsappPrompt, setMissingWhatsappPrompt] = useState<MissingWhatsappPromptState | null>(null);
   const [counselorSendLoading, setCounselorSendLoading] = useState(false);
   const [counselorSendPage, setCounselorSendPage] = useState<CounselorSendPagePayload | null>(null);
+  const [desktopWhatsappState, setDesktopWhatsappState] = useState<DesktopEmbeddedWhatsappState>({
+    supported: runtimeConfig.featureFlags.desktopSendWorkspaceSupported,
+    active: false,
+    loading: false,
+    preferredTarget: 'default_browser',
+    preferredTargetLabel: 'Default Browser',
+    availableTargets: {
+      default_browser: true,
+      chrome: false,
+      edge: false,
+      whatsapp_desktop: false,
+    },
+    error: '',
+  });
+  const [desktopWhatsappWorkspaceReady, setDesktopWhatsappWorkspaceReady] = useState(false);
+  const [desktopWhatsappWorkspaceStarted, setDesktopWhatsappWorkspaceStarted] = useState(false);
+  const [desktopWhatsappWorkspaceBusy, setDesktopWhatsappWorkspaceBusy] = useState(false);
+  const [desktopWhatsappWorkspaceTransition, setDesktopWhatsappWorkspaceTransition] = useState<null | 'enter' | 'exit'>(null);
+  const [desktopWhatsappWorkspaceExiting, setDesktopWhatsappWorkspaceExiting] = useState(false);
+  const [desktopWhatsappActiveTarget, setDesktopWhatsappActiveTarget] = useState<DesktopSendPendingTarget | null>(null);
+  const [desktopWhatsappLoadingRow, setDesktopWhatsappLoadingRow] = useState<string | null>(null);
+  const [desktopReportQueueState, setDesktopReportQueueState] = useState<Record<string, DesktopSendQueueState>>({});
+  const [desktopNoticeQueueState, setDesktopNoticeQueueState] = useState<Record<string, DesktopSendQueueState>>({});
+  const [desktopSettingsPanelOpen, setDesktopSettingsPanelOpen] = useState(false);
+  const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
+  const [loginNotificationPrompt, setLoginNotificationPrompt] = useState<AppNotificationItem | null>(null);
+  const [notificationSeenVersion, setNotificationSeenVersion] = useState(0);
+  const [notificationDeletedVersion, setNotificationDeletedVersion] = useState(0);
+  const [serverNotificationState, setServerNotificationState] = useState<{ readKeys: string[]; deletedKeys: string[] }>({ readKeys: [], deletedKeys: [] });
+  const [configDesktopMode, setConfigDesktopMode] = useState<'server' | 'desktop'>('server');
+  const [sendResultOpeningId, setSendResultOpeningId] = useState<number | null>(null);
+  const [sendNoticeOpeningId, setSendNoticeOpeningId] = useState<number | null>(null);
+  const [desktopAppSettings, setDesktopAppSettings] = useState<DesktopAppSettings | null>(null);
+  const [desktopConnectivity, setDesktopConnectivity] = useState<DesktopConnectivityState | null>(null);
+  const [desktopUpdateInfo, setDesktopUpdateInfo] = useState<DesktopUpdateInfo | null>(null);
+  const [desktopSettingsSaving, setDesktopSettingsSaving] = useState(false);
+  const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
   const [counselorSendVars, setCounselorSendVars] = useState({
     test_name: '',
     semester: '',
     batch_name: '',
     template: DEFAULT_REPORT_TEMPLATE,
-    sendMode: 'app' as 'app' | 'web',
+    sendMode: 'app' as CounselorSendMode,
   });
+  const counselorSendVarsRef = useRef(counselorSendVars);
   const [counselorFieldOrder, setCounselorFieldOrder] = useState<FieldOrderEntry[]>([]);
   const [counselorDefaultFieldOrder, setCounselorDefaultFieldOrder] = useState<FieldOrderEntry[]>([]);
   const [counselorBatchRunning, setCounselorBatchRunning] = useState(false);
@@ -1254,14 +2056,16 @@ export default function App() {
   const [testDetail, setTestDetail] = useState<TestDetailPayload | null>(null);
   const [testDetailSearch, setTestDetailSearch] = useState('');
   const [testDetailSort, setTestDetailSort] = useState('reg_asc');
+  const testDetailOriginalMarksRef = useRef<Record<string, Record<string, string>>>({});
   const [testMetaDraft, setTestMetaDraft] = useState({ test_name: '', semester: '', batch_name: '', section: '' });
   const [savingMeta, setSavingMeta] = useState(false);
   const [savingMarks, setSavingMarks] = useState(false);
   const [uploadingReport, setUploadingReport] = useState(false);
   const [reportUploadInputKey, setReportUploadInputKey] = useState(0);
+  const reportUploadScopeKeyRef = useRef('');
   const [reportUploadDraft, setReportUploadDraft] = useState({
     test_name: '',
-    semester: '',
+    semester: '1',
     batch_name: '',
     section: '',
     upload_mode: 'new',
@@ -1271,6 +2075,8 @@ export default function App() {
   const [dashboardData, setDashboardData] = useState<DashboardOverviewPayload | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityData, setActivityData] = useState<ActivityOverviewPayload | null>(null);
+  const [activityCopying, setActivityCopying] = useState(false);
+  const [activityPdfLoading, setActivityPdfLoading] = useState(false);
   const [activityFilters, setActivityFilters] = useState({
     department: '',
     year: '',
@@ -1279,6 +2085,7 @@ export default function App() {
     q: '',
     sort: 'pending_first',
   });
+  const deferredActivitySearch = useDeferredValue(activityFilters.q);
   const [adminMessagesLoading, setAdminMessagesLoading] = useState(false);
   const [adminMessagesData, setAdminMessagesData] = useState<AdminMessagesOverviewPayload | null>(null);
   const [adminMessageFilters, setAdminMessageFilters] = useState({
@@ -1298,23 +2105,33 @@ export default function App() {
   const [noticeCompletionSortOpen, setNoticeCompletionSortOpen] = useState(false);
   const [noticeRecordSearch, setNoticeRecordSearch] = useState('');
   const [noticeRecordSort, setNoticeRecordSort] = useState('latest');
+  const [noticeRecordSortOpen, setNoticeRecordSortOpen] = useState(false);
   const [monitoringLoading, setMonitoringLoading] = useState(false);
   const [monitoringData, setMonitoringData] = useState<MonitoringOverviewPayload | null>(null);
+  const [monitoringSearch, setMonitoringSearch] = useState('');
+  const deferredMonitoringSearch = useDeferredValue(monitoringSearch);
+  const [monitoringStatusFilter, setMonitoringStatusFilter] = useState('all');
+  const [monitoringAuthFilter, setMonitoringAuthFilter] = useState('all');
+  const [monitoringSortBy, setMonitoringSortBy] = useState('last_activity_desc');
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseData, setDatabaseData] = useState<DatabaseOverviewPayload | null>(null);
   const [databaseBatchName, setDatabaseBatchName] = useState('');
   const [databaseOverwrite, setDatabaseOverwrite] = useState(false);
+  const [databaseBackupCreating, setDatabaseBackupCreating] = useState(false);
   const [databaseBackupAction, setDatabaseBackupAction] = useState<BackupActionState>(null);
   const [databaseActionPassword, setDatabaseActionPassword] = useState('');
   const [databaseActionLoading, setDatabaseActionLoading] = useState(false);
-  const [clearExamPassword, setClearExamPassword] = useState('');
-  const [archiveYearLabel, setArchiveYearLabel] = useState('');
+  const [archiveYearStart, setArchiveYearStart] = useState('');
+  const [archiveYearEnd, setArchiveYearEnd] = useState('');
   const [archiveYearOverwrite, setArchiveYearOverwrite] = useState(false);
-  const [archiveYearLoading, setArchiveYearLoading] = useState(false);
   const [databaseProgress, setDatabaseProgress] = useState<DatabaseProgressState>(null);
   const [configLoading, setConfigLoading] = useState(false);
   const [configData, setConfigData] = useState<ConfigOverviewPayload | null>(null);
   const [configForm, setConfigForm] = useState<Record<string, string | boolean>>({});
+  const [configBaselineSnapshot, setConfigBaselineSnapshot] = useState('');
+  const [configPasswordPrompt, setConfigPasswordPrompt] = useState<ConfigPasswordPromptState>(null);
+  const [configPromptPassword, setConfigPromptPassword] = useState('');
+  const [pendingConfigTab, setPendingConfigTab] = useState<string | null>(null);
   const [envDraft, setEnvDraft] = useState('');
   const [configSaving, setConfigSaving] = useState(false);
   const [envSaving, setEnvSaving] = useState(false);
@@ -1326,10 +2143,12 @@ export default function App() {
     force_logout: true,
   });
   const [resetUserSearch, setResetUserSearch] = useState('');
+  const deferredResetUserSearch = useDeferredValue(resetUserSearch);
   const [resetUserDepartmentFilter, setResetUserDepartmentFilter] = useState('');
   const [resetUserYearFilter, setResetUserYearFilter] = useState('');
   const [previewUserSearch, setPreviewUserSearch] = useState('');
   const [previewUserEmail, setPreviewUserEmail] = useState('');
+  const [loginConflictInfoOpen, setLoginConflictInfoOpen] = useState(false);
   const [resetSaving, setResetSaving] = useState(false);
   const [serverConsoleLoading, setServerConsoleLoading] = useState(false);
   const [serverConsoleData, setServerConsoleData] = useState<ServerConsolePayload | null>(null);
@@ -1341,19 +2160,165 @@ export default function App() {
       return 'light';
     }
   });
-  const selectedAdminMessageIdSet = useMemo(() => new Set(selectedAdminMessageIds), [selectedAdminMessageIds]);
   const counselorBatchTimerRef = useRef<number | null>(null);
   const counselorBatchQueueRef = useRef<CounselorSendReportRow[]>([]);
   const counselorBatchIndexRef = useRef(0);
+  const archiveYearLabel = useMemo(
+    () => buildAcademicYearLabel(archiveYearStart, archiveYearEnd),
+    [archiveYearStart, archiveYearEnd],
+  );
+  const archiveViewActive = Boolean(bootstrap?.archiveView?.active);
   const counselorBatchRunningRef = useRef(false);
   const counselorNoticeBatchTimerRef = useRef<number | null>(null);
   const noticeComposerRef = useRef<HTMLDivElement | null>(null);
+  const desktopReportWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const desktopNoticeWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const desktopReportQueueShellRef = useRef<HTMLDivElement | null>(null);
+  const desktopNoticeQueueShellRef = useRef<HTMLDivElement | null>(null);
   const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
   const counselorNoticeBatchQueueRef = useRef<CounselorSendNoticeRow[]>([]);
   const counselorNoticeBatchIndexRef = useRef(0);
   const counselorNoticeBatchRunningRef = useRef(false);
   const counselorSendReturnRestoreRef = useRef(false);
   const configImportInputRef = useRef<HTMLInputElement | null>(null);
+  const bootLoaderShownAtRef = useRef(typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const mainContentRef = useRef<HTMLElement | null>(null);
+  const contentAreaRef = useRef<HTMLDivElement | null>(null);
+
+  function readOverviewCacheEntry<T>(
+    ref: MutableRefObject<Map<string, { timestamp: number; payload: T }>>,
+    bucket: string,
+    key: string,
+  ) {
+    const inMemory = ref.current.get(key);
+    if (inMemory) return inMemory;
+    const persisted = readPersistentCacheEntry<T>(persistentCacheNamespace, bucket, key);
+    if (persisted) {
+      ref.current.set(key, persisted);
+      return persisted;
+    }
+    return null;
+  }
+
+  function writeOverviewCacheEntry<T>(
+    ref: MutableRefObject<Map<string, { timestamp: number; payload: T }>>,
+    bucket: string,
+    key: string,
+    payload: T,
+    persist = true,
+  ) {
+    const entry = { timestamp: Date.now(), payload };
+    ref.current.set(key, entry);
+    if (persist) {
+      writePersistentCacheEntry(persistentCacheNamespace, bucket, key, entry);
+    }
+    return entry;
+  }
+
+  function clearOverviewCacheBucket<T>(
+    ref: MutableRefObject<Map<string, { timestamp: number; payload: T }>>,
+    bucket: string,
+  ) {
+    ref.current.clear();
+    clearPersistentCacheBucket(persistentCacheNamespace, bucket);
+  }
+
+  function invalidateOverviewCaches(buckets: Array<'dashboard' | 'reports' | 'users' | 'cdp' | 'activity' | 'activity-scope'>) {
+    for (const bucket of buckets) {
+      if (bucket === 'dashboard') {
+        clearOverviewCacheBucket(dashboardOverviewCacheRef, 'dashboard');
+        continue;
+      }
+      if (bucket === 'reports') {
+        clearOverviewCacheBucket(reportsOverviewCacheRef, 'reports');
+        continue;
+      }
+      if (bucket === 'users') {
+        clearOverviewCacheBucket(usersOverviewCacheRef, 'users');
+        continue;
+      }
+      if (bucket === 'cdp') {
+        clearOverviewCacheBucket(cdpOverviewCacheRef, 'cdp');
+        continue;
+      }
+      if (bucket === 'activity') {
+        clearOverviewCacheBucket(activityOverviewCacheRef, 'activity');
+        continue;
+      }
+      if (bucket === 'activity-scope') {
+        activityScopeReportCacheRef.current.clear();
+      }
+    }
+  }
+
+  function seedBootstrapOverviewCaches(payload: BootstrapPayload) {
+    const namespace = buildPersistentCacheNamespace(payload);
+    if (!namespace || !payload.prefetched) return;
+
+    const now = Date.now();
+    const seeds: Array<{ bucket: string; key: string; entry: { timestamp: number; payload: unknown } }> = [];
+
+    if (payload.prefetched.dashboard) {
+      const key = buildDashboardOverviewCacheKey();
+      const entry = { timestamp: now, payload: payload.prefetched.dashboard };
+      dashboardOverviewCacheRef.current.set(key, entry);
+      seeds.push({ bucket: 'dashboard', key, entry });
+    }
+    if (payload.prefetched.reports) {
+      const key = buildReportsOverviewCacheKey(
+        payload.prefetched.reports.selectedDepartment,
+        payload.prefetched.reports.selectedYear,
+      );
+      const entry = { timestamp: now, payload: payload.prefetched.reports };
+      reportsOverviewCacheRef.current.set(key, entry);
+      seeds.push({ bucket: 'reports', key, entry });
+      if (key !== buildReportsOverviewCacheKey()) {
+        reportsOverviewCacheRef.current.set(buildReportsOverviewCacheKey(), entry);
+        seeds.push({ bucket: 'reports', key: buildReportsOverviewCacheKey(), entry });
+      }
+    }
+    if (payload.prefetched.activity) {
+      const key = buildActivityOverviewCacheKey({
+        department: payload.prefetched.activity.selectedDepartment,
+        year: payload.prefetched.activity.selectedYear,
+        semester: payload.prefetched.activity.selectedSemester,
+        test_name: payload.prefetched.activity.selectedTestName,
+        q: payload.prefetched.activity.searchQuery,
+        sort: payload.prefetched.activity.sortMode,
+      });
+      const entry = { timestamp: now, payload: payload.prefetched.activity };
+      activityOverviewCacheRef.current.set(key, entry);
+      if (shouldPersistActivityOverviewPayload(payload.prefetched.activity)) {
+        seeds.push({ bucket: 'activity', key, entry });
+      }
+      if (key !== buildActivityOverviewCacheKey()) {
+        activityOverviewCacheRef.current.set(buildActivityOverviewCacheKey(), entry);
+        if (shouldPersistActivityOverviewPayload(payload.prefetched.activity)) {
+          seeds.push({ bucket: 'activity', key: buildActivityOverviewCacheKey(), entry });
+        }
+      }
+    }
+    if (payload.prefetched.cdp) {
+      const key = buildCdpOverviewCacheKey({
+        department: payload.prefetched.cdp.selectedDepartment,
+        year: payload.prefetched.cdp.selectedYear,
+        semester: payload.prefetched.cdp.selectedSemester,
+        subject_id: payload.prefetched.cdp.selectedSubjectId,
+      });
+      const entry = { timestamp: now, payload: payload.prefetched.cdp };
+      cdpOverviewCacheRef.current.set(key, entry);
+      seeds.push({ bucket: 'cdp', key, entry });
+      if (key !== buildCdpOverviewCacheKey()) {
+        cdpOverviewCacheRef.current.set(buildCdpOverviewCacheKey(), entry);
+        seeds.push({ bucket: 'cdp', key: buildCdpOverviewCacheKey(), entry });
+      }
+    }
+
+    seedPersistentCacheEntries(namespace, 'dashboard', seeds.filter((item) => item.bucket === 'dashboard').map((item) => ({ key: item.key, entry: item.entry })));
+    seedPersistentCacheEntries(namespace, 'reports', seeds.filter((item) => item.bucket === 'reports').map((item) => ({ key: item.key, entry: item.entry })));
+    seedPersistentCacheEntries(namespace, 'activity', seeds.filter((item) => item.bucket === 'activity').map((item) => ({ key: item.key, entry: item.entry })));
+    seedPersistentCacheEntries(namespace, 'cdp', seeds.filter((item) => item.bucket === 'cdp').map((item) => ({ key: item.key, entry: item.entry })));
+  }
 
   useEffect(() => {
     applyTheme(theme);
@@ -1374,14 +2339,147 @@ export default function App() {
   }, [mobileSidebarOpen]);
 
   useEffect(() => {
+    if (activeTab !== 'config' || !configData || JSON.stringify(configForm) === configBaselineSnapshot) return undefined;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [activeTab, configBaselineSnapshot, configData, configForm]);
+
+  async function warmInitialUiCaches(payload: BootstrapPayload, preferredTab?: string) {
+    const viewer = payload.user;
+    if (!viewer || !['admin', 'principal', 'hod', 'deo'].includes(viewer.role)) return null;
+
+    const warmed: {
+      reports?: ReportsOverviewPayload;
+      dashboard?: DashboardOverviewPayload;
+      activity?: ActivityOverviewPayload;
+      cdp?: CdpOverviewPayload;
+    } = {};
+
+    if (payload.prefetched?.reports) {
+      warmed.reports = payload.prefetched.reports;
+    }
+    if (payload.prefetched?.dashboard) {
+      warmed.dashboard = payload.prefetched.dashboard;
+    }
+    if (payload.prefetched?.activity) {
+      warmed.activity = payload.prefetched.activity;
+    }
+    if (payload.prefetched?.cdp) {
+      warmed.cdp = payload.prefetched.cdp;
+    }
+
+    const defaultTab = preferredTab || payload.defaultTab || getDefaultTab(viewer);
+    if (defaultTab === 'dashboard' && ['admin', 'principal', 'hod'].includes(viewer.role) && !warmed.dashboard) {
+      setBootStatus('Preparing dashboard...');
+      const dashboardPayload = await getDashboardOverview();
+      warmed.dashboard = dashboardPayload;
+      writeOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', buildDashboardOverviewCacheKey(), dashboardPayload);
+    } else if (defaultTab === 'activity' && !warmed.activity) {
+      setBootStatus('Warming activity...');
+      const activityPayload = await getActivityOverview();
+      warmed.activity = activityPayload;
+      writeOverviewCacheEntry(
+        activityOverviewCacheRef,
+        'activity',
+        buildActivityOverviewCacheKey(),
+        activityPayload,
+        shouldPersistActivityOverviewPayload(activityPayload),
+      );
+    } else if (defaultTab === 'cdp' && !warmed.cdp) {
+      setBootStatus('Warming CDP...');
+      const cdpPayload = await getCdpOverview();
+      warmed.cdp = cdpPayload;
+      writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', buildCdpOverviewCacheKey(), cdpPayload);
+    } else if (defaultTab === 'reports' && !warmed.reports) {
+      setBootStatus('Caching reports...');
+      const reportsPayload = await getReportsOverview();
+      warmed.reports = reportsPayload;
+      writeOverviewCacheEntry(reportsOverviewCacheRef, 'reports', buildReportsOverviewCacheKey(), reportsPayload);
+    }
+
+    return warmed;
+  }
+
+  async function prefetchActivityScopeCombos(payload: ActivityOverviewPayload) {
+    const department = String(payload.selectedDepartment || '').trim().toUpperCase();
+    const year = Number(payload.selectedYear || 0) || 0;
+    if (!department || !year) return;
+
+    const scopeKey = `${department}::${year}`;
+    if (activityScopePrefetchRef.current.has(scopeKey)) return;
+    activityScopePrefetchRef.current.add(scopeKey);
+
+    try {
+      const prefetched = await prefetchActivityScope({ department, year });
+      for (const entry of prefetched.entries || []) {
+        const cacheKey = buildActivityOverviewCacheKey({
+          department: entry.selectedDepartment,
+          year: entry.selectedYear,
+          semester: entry.selectedSemester,
+          test_name: entry.selectedTestName,
+          q: entry.searchQuery,
+          sort: entry.sortMode,
+        });
+        writeOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey, entry, false);
+      }
+    } catch {
+      activityScopePrefetchRef.current.delete(scopeKey);
+    }
+  }
+
+  async function getCachedActivityScopeReport(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    test_name?: string;
+  }) {
+    const cacheKey = buildActivityScopeReportCacheKey(filters);
+    const cached = activityScopeReportCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) {
+      return cached.payload;
+    }
+    const payload = await getActivityScopeReport(filters);
+    activityScopeReportCacheRef.current.set(cacheKey, { timestamp: Date.now(), payload });
+    return payload;
+  }
+
+  async function warmActivityScopeReport(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    test_name?: string;
+  }) {
+    try {
+      await getCachedActivityScopeReport(filters);
+    } catch {
+      // Ignore background prefetch failures.
+    }
+  }
+
+  async function waitForNextPaint() {
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
+  }
+
+  async function waitForMinimumBootLoaderTime() {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const remaining = Math.max(0, MIN_BOOT_LOADER_MS - (now - bootLoaderShownAtRef.current));
+    if (!remaining) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
+  }
+
+  useEffect(() => {
     void (async () => {
+      const showBootLoader = shouldUseBootLoaderOnInitialLoad();
       try {
-        const payload = await getBootstrap();
-        setBootstrap(payload);
-        applyThemeColors(payload.appConfig);
-        if (payload.user) {
-          setActiveTab(payload.defaultTab || getDefaultTab(payload.user));
-        }
+        await refreshBootstrap({ showBootLoader, forceDefaultTab: true });
       } finally {
         setBootLoading(false);
       }
@@ -1397,10 +2495,51 @@ export default function App() {
     const errorDescription = params.get('error_description');
     const allowedDomain = params.get('allowed_domain');
     const success = params.get('success');
+    const conflict = params.get('conflict');
+    const roleSelect = params.get('role_select');
 
-    if (success === '1') {
+    if (roleSelect === '1') {
+      void (async () => {
+        try {
+          const result = await getLoginRoleSelection();
+          setLoginRoleSelectionState({
+            authMethod: result.authMethod,
+            loginEmail: result.loginEmail,
+            options: result.options.map((option) => ({
+              ...option,
+              role: option.role as Role,
+            })),
+            selectedAccountEmail: String(result.options[0]?.accountEmail || ''),
+          });
+          setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null, otp_code: '' }));
+        } catch (selectionError) {
+          setFlash({ type: 'error', message: selectionError instanceof Error ? selectionError.message : 'Role selection expired. Please sign in again.' });
+        }
+      })();
+    } else if (success === '1') {
+      setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null, otp_code: '' }));
+      setLoginConflictInfoOpen(false);
+      setForgotPasswordState((prev) => ({ ...prev, loading: false, error: '' }));
       setFlash({ type: 'success', message: 'Google sign-in completed successfully.' });
-      void refreshBootstrap();
+      void refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
+    } else if (conflict === '1') {
+      const nextConflict = {
+        browser: String(params.get('browser') || 'Unknown'),
+        device_type: String(params.get('device_type') || 'Unknown'),
+        ip_address: String(params.get('ip_address') || 'Unknown'),
+        login_time: String(params.get('login_time') || ''),
+      };
+      clearRememberedAuthState();
+      setLoginState((prev) => ({
+        ...prev,
+        loading: false,
+        error: '',
+        otp_code: '',
+        conflictAuthMethod: 'google',
+        conflict: nextConflict,
+      }));
+      setLoginConflictInfoOpen(loginConflictHasUnknownDetails(nextConflict));
+      setForgotPasswordState((prev) => ({ ...prev, loading: false, error: '' }));
     } else if (error) {
       let message = 'Google sign-in could not be completed.';
       if (error === 'google_disabled') message = 'Google sign-in is not enabled right now.';
@@ -1410,8 +2549,11 @@ export default function App() {
       else if (error === 'invalid_google_profile') message = 'Google sign-in did not return a valid verified email.';
       else if (error === 'invalid_domain') message = allowedDomain ? `Only ${allowedDomain} Google accounts are allowed.` : 'This Google account is not allowed.';
       else if (error === 'user_not_linked') message = 'Account not registered.';
+      else if (error === 'account_in_test_mode') message = 'This account is currently being reviewed in admin test mode. Please try again after the admin exits test mode.';
       else if (error === 'access_denied') message = errorDescription || 'Google account access is blocked.';
       else if (errorDescription) message = errorDescription;
+      clearRememberedAuthState();
+      setLoginConflictInfoOpen(false);
       setFlash({ type: 'error', message });
     }
 
@@ -1420,6 +2562,12 @@ export default function App() {
     params.delete('error_description');
     params.delete('allowed_domain');
     params.delete('success');
+    params.delete('conflict');
+    params.delete('role_select');
+    params.delete('browser');
+    params.delete('device_type');
+    params.delete('ip_address');
+    params.delete('login_time');
     const nextQuery = params.toString();
     const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
     window.history.replaceState({}, document.title, nextUrl);
@@ -1446,6 +2594,27 @@ export default function App() {
   }, [testDetail?.testId]);
 
   useEffect(() => {
+    if (!reportsData?.selectedDepartment || !reportsData.selectedYear) return;
+    const nextScopeKey = `${String(reportsData.selectedDepartment || '').trim().toUpperCase()}::${Number(reportsData.selectedYear || 0) || 0}`;
+    const scopeChanged = Boolean(reportUploadScopeKeyRef.current) && reportUploadScopeKeyRef.current !== nextScopeKey;
+    reportUploadScopeKeyRef.current = nextScopeKey;
+    const nextBatchName = getDefaultBatchNameForYearLevel(reportsData.selectedYear, bootstrap?.appConfig || null);
+    setReportUploadDraft((prev) => {
+      return {
+        ...prev,
+        semester: prev.semester || '1',
+        batch_name: prev.batch_name || nextBatchName,
+        section: '',
+        upload_mode: scopeChanged ? 'new' : prev.upload_mode,
+        file: scopeChanged ? null : prev.file,
+      };
+    });
+    if (scopeChanged) {
+      setReportUploadInputKey((value) => value + 1);
+    }
+  }, [reportsData?.selectedDepartment, reportsData?.selectedYear, bootstrap?.appConfig]);
+
+  useEffect(() => {
     const viewer = bootstrap?.user;
     if (!viewer || activeTab !== 'messages') return;
     if (!['admin', 'hod', 'deo'].includes(viewer.role)) return;
@@ -1460,6 +2629,28 @@ export default function App() {
     }, 220);
     return () => window.clearTimeout(timer);
   }, [activeTab, adminMessageFilters.day, adminMessageFilters.day_num, adminMessageFilters.month, adminMessageFilters.year, adminMessageSearch, bootstrap?.user]);
+
+  useEffect(() => {
+    if (!bootstrap?.user) return;
+    const heartbeatSeconds = Math.max(10, Number(bootstrap.appConfig.session_heartbeat_interval || 30) || 30);
+    const timer = window.setInterval(() => {
+      void sendSessionHeartbeat().catch(() => undefined);
+    }, heartbeatSeconds * 1000);
+    return () => window.clearInterval(timer);
+  }, [bootstrap?.user?.email, bootstrap?.appConfig.session_heartbeat_interval]);
+
+  useEffect(() => {
+    if (!bootstrap?.user) return;
+    const rafId = window.requestAnimationFrame(() => {
+      if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
+        document.activeElement.blur();
+      }
+      contentAreaRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      mainContentRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [activeTab, bootstrap?.user?.email]);
 
   useEffect(() => {
     if (!bootstrap?.user || activeTab !== 'notices') return;
@@ -1490,20 +2681,7 @@ export default function App() {
     if (!bootstrap?.user) return;
     if (activeTab !== 'users') return;
     if (!['admin', 'principal', 'deo'].includes(bootstrap.user.role)) return;
-
-    setUsersLoading(true);
-    void getUsers()
-      .then((payload) => {
-        setUsers(payload.users);
-        setDepartments(payload.departments);
-        setUserActorScopes(payload.actorScopes || []);
-        setUserAssignableRoles(payload.assignableRoles || []);
-        setUserCreateForm((prev) => ({
-          ...prev,
-          role: (payload.assignableRoles?.[0] || prev.role || 'counselor') as Role,
-        }));
-      })
-      .finally(() => setUsersLoading(false));
+    void refreshUsersOverview();
   }, [bootstrap?.user, activeTab]);
 
   useEffect(() => {
@@ -1527,11 +2705,14 @@ export default function App() {
     if (!bootstrap?.user) return;
     if (activeTab !== 'reports') return;
     if (!['admin', 'principal', 'hod', 'deo'].includes(bootstrap.user.role)) return;
+    void loadReports();
+  }, [bootstrap?.user, activeTab]);
 
-    setReportsLoading(true);
-    void getReportsOverview()
-      .then((payload) => setReportsData(payload))
-      .finally(() => setReportsLoading(false));
+  useEffect(() => {
+    if (!bootstrap?.user) return;
+    if (activeTab !== 'subjects') return;
+    if (!['admin', 'deo'].includes(bootstrap.user.role)) return;
+    void loadSubjects();
   }, [bootstrap?.user, activeTab]);
 
   useEffect(() => {
@@ -1560,6 +2741,151 @@ export default function App() {
     if (!['admin', 'principal', 'hod', 'deo'].includes(bootstrap.user.role)) return;
     void loadActivityOverview();
   }, [bootstrap?.user, activeTab]);
+
+  useEffect(() => {
+    if (!activityData?.showYearPicker) return;
+    const department = String(activityData.selectedDepartment || '').trim().toUpperCase();
+    if (!department) return;
+    for (const year of activityData.availableYears || []) {
+      const scopeKey = `${department}::${year}`;
+      if (activityScopePrefetchRef.current.has(scopeKey)) continue;
+      activityScopePrefetchRef.current.add(scopeKey);
+      void prefetchActivityScope({ department, year })
+        .then((prefetched) => {
+          for (const entry of prefetched.entries || []) {
+            const cacheKey = buildActivityOverviewCacheKey({
+              department: entry.selectedDepartment,
+              year: entry.selectedYear,
+              semester: entry.selectedSemester,
+              test_name: entry.selectedTestName,
+              q: entry.searchQuery,
+              sort: entry.sortMode,
+            });
+            writeOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey, entry, false);
+          }
+        })
+        .catch(() => {
+          activityScopePrefetchRef.current.delete(scopeKey);
+        });
+    }
+  }, [activityData?.availableYears, activityData?.selectedDepartment, activityData?.showYearPicker]);
+
+  useEffect(() => {
+    if (!activityData) return;
+    if (activityData.showDepartmentPicker || activityData.showYearPicker) return;
+    if (!activityData.selectedDepartment || !activityData.selectedYear) return;
+    void prefetchActivityScopeCombos(activityData);
+  }, [
+    activityData?.selectedDepartment,
+    activityData?.selectedYear,
+    activityData?.showDepartmentPicker,
+    activityData?.showYearPicker,
+    activityData?.testStatus,
+  ]);
+
+  useEffect(() => {
+    if (!activityData || activityData.showDepartmentPicker) return;
+    void warmActivityScopeReport({
+      department: activityData.selectedDepartment || undefined,
+      year: activityData.selectedYear || null,
+      semester: activityData.selectedSemester || undefined,
+      test_name: activityData.selectedTestName || undefined,
+    });
+  }, [
+    activityData?.selectedDepartment,
+    activityData?.selectedSemester,
+    activityData?.selectedTestName,
+    activityData?.selectedYear,
+    activityData?.showDepartmentPicker,
+  ]);
+
+  useEffect(() => {
+    if (!bootstrap?.user) return;
+    if (activeTab !== 'cdp') return;
+    if (!['admin', 'principal', 'hod'].includes(bootstrap.user.role)) return;
+    void loadCdpOverview(
+      cdpData?.selectedDepartment
+        ? {
+          department: cdpData.selectedDepartment,
+          year: cdpData.selectedYear,
+          semester: cdpData.selectedSemester || undefined,
+          subject_id: cdpData.selectedSubjectId,
+        }
+        : undefined,
+    );
+  }, [bootstrap?.user, activeTab]);
+
+  useEffect(() => {
+    const viewer = bootstrap?.user;
+    if (!viewer) return;
+    if (!['admin', 'principal', 'hod', 'deo'].includes(viewer.role)) return;
+
+    const warmupKey = `${viewer.email}:${viewer.role}`;
+    if (tabWarmupKeyRef.current === warmupKey) return;
+    tabWarmupKeyRef.current = warmupKey;
+
+    const timer = window.setTimeout(() => {
+      const warmers: Array<Promise<unknown>> = [];
+      const cacheDashboard = readOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', buildDashboardOverviewCacheKey());
+      if (['admin', 'principal', 'hod'].includes(viewer.role) && (!cacheDashboard || Date.now() - cacheDashboard.timestamp >= SCOPE_CACHE_TTL_MS)) {
+        warmers.push(
+          getDashboardOverview().then((payload) => {
+            writeOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', buildDashboardOverviewCacheKey(), payload);
+          }),
+        );
+      }
+
+      const reportsCacheKey = buildReportsOverviewCacheKey();
+      const cachedReports = readOverviewCacheEntry(reportsOverviewCacheRef, 'reports', reportsCacheKey);
+      if (!cachedReports || Date.now() - cachedReports.timestamp >= SCOPE_CACHE_TTL_MS) {
+        warmers.push(
+          getReportsOverview().then((payload) => {
+            writeOverviewCacheEntry(reportsOverviewCacheRef, 'reports', reportsCacheKey, payload);
+          }),
+        );
+      }
+
+      const activityCacheKey = buildActivityOverviewCacheKey();
+      const cachedActivity = readOverviewCacheEntry(activityOverviewCacheRef, 'activity', activityCacheKey);
+      if (!cachedActivity || Date.now() - cachedActivity.timestamp >= SCOPE_CACHE_TTL_MS) {
+        warmers.push(
+          getActivityOverview().then((payload) => {
+            writeOverviewCacheEntry(
+              activityOverviewCacheRef,
+              'activity',
+              activityCacheKey,
+              payload,
+              shouldPersistActivityOverviewPayload(payload),
+            );
+          }),
+        );
+      }
+
+      const cdpCacheKey = buildCdpOverviewCacheKey();
+      const cachedCdp = readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cdpCacheKey);
+      if (['admin', 'principal', 'hod'].includes(viewer.role) && (!cachedCdp || Date.now() - cachedCdp.timestamp >= SCOPE_CACHE_TTL_MS)) {
+        warmers.push(
+          getCdpOverview().then((payload) => {
+            writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cdpCacheKey, payload);
+          }),
+        );
+      }
+
+      const usersCacheKey = buildUsersOverviewCacheKey();
+      const cachedUsers = readOverviewCacheEntry(usersOverviewCacheRef, 'users', usersCacheKey);
+      if (['admin', 'principal', 'deo'].includes(viewer.role) && (!cachedUsers || Date.now() - cachedUsers.timestamp >= SCOPE_CACHE_TTL_MS)) {
+        warmers.push(
+          getUsers().then((payload) => {
+            writeOverviewCacheEntry(usersOverviewCacheRef, 'users', usersCacheKey, payload);
+          }),
+        );
+      }
+
+      void Promise.allSettled(warmers);
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -1642,6 +2968,7 @@ export default function App() {
 
   useEffect(() => {
     if (!counselorSendPage) return;
+    counselorSendVarsRef.current = { ...counselorSendVarsRef.current, ...counselorSendVars };
     try {
       localStorage.setItem(
         `send_common_vars_${counselorSendPage.testId}`,
@@ -1659,6 +2986,7 @@ export default function App() {
 
   useEffect(() => {
     if (!counselorNoticeSendPage) return;
+    counselorNoticeSendVarsRef.current = { ...counselorNoticeSendVarsRef.current, ...counselorNoticeSendVars };
     try {
       localStorage.setItem(
         `notice_send_vars_${counselorNoticeSendPage.noticeId}`,
@@ -1682,6 +3010,7 @@ export default function App() {
     );
     setCounselorNoticeAutoTemplate((prev) => (prev === nextAutoTemplate ? prev : nextAutoTemplate));
     if (!counselorNoticeTemplateEdited || counselorNoticeSendVars.template === counselorNoticeAutoTemplate) {
+      counselorNoticeSendVarsRef.current = { ...counselorNoticeSendVarsRef.current, template: nextAutoTemplate };
       setCounselorNoticeSendVars((prev) => (prev.template === nextAutoTemplate ? prev : { ...prev, template: nextAutoTemplate }));
     }
   }, [
@@ -1845,7 +3174,7 @@ export default function App() {
   }, [counselorNoticeSendVerify]);
 
   const filteredUsers = useMemo(() => {
-    const query = userSearch.trim().toLowerCase();
+    const query = deferredUserSearch.trim().toLowerCase();
     const filtered = users.filter((row) => {
       const matchesQuery = !query || [row.name, row.email, row.role, row.department || '', String(row.year_level || '')].join(' ').toLowerCase().includes(query);
       const matchesDepartment = !userFilterDepartment || String(row.department || '').toUpperCase() === userFilterDepartment.toUpperCase();
@@ -1864,16 +3193,103 @@ export default function App() {
     sorted.sort((a, b) => {
       if (userSortBy === 'name_desc') return a.name.localeCompare(b.name) * -1;
       if (userSortBy === 'date_added') return String(b.created_at || '').localeCompare(String(a.created_at || ''));
-      if (userSortBy === 'role') return getRoleOptionLabel(a.role).localeCompare(getRoleOptionLabel(b.role));
+      if (userSortBy === 'role') return getRoleOptionLabel(a.role, a.designation).localeCompare(getRoleOptionLabel(b.role, b.designation));
       if (userSortBy === 'department') return String(a.department || '').localeCompare(String(b.department || ''));
       if (userSortBy === 'year') return Number(a.year_level || 0) - Number(b.year_level || 0);
       return a.name.localeCompare(b.name);
     });
     return sorted;
-  }, [userFilterDepartment, userFilterRole, userFilterStatus, userFilterStudentList, userFilterYear, userSearch, userSortBy, users]);
+  }, [deferredUserSearch, userFilterDepartment, userFilterRole, userFilterStatus, userFilterStudentList, userFilterYear, userSortBy, users]);
+  const managedUserDomain = useMemo(
+    () => resolveManagedUserDomainClient(configData?.appConfig || bootstrap?.appConfig || null),
+    [bootstrap?.appConfig, configData?.appConfig],
+  );
+  const normalizedUserCreateEmail = useMemo(
+    () => normalizeManagedUserEmailClient(userCreateForm.email),
+    [userCreateForm.email],
+  );
+  const userCreateExistingAccounts = useMemo(
+    () => normalizedUserCreateEmail ? users.filter((row) => normalizeManagedUserEmailClient(row.email) === normalizedUserCreateEmail) : [],
+    [normalizedUserCreateEmail, users],
+  );
+  const userCreateAvailableRoles = useMemo(() => {
+    const takenRoles = new Set(userCreateExistingAccounts.map((row) => row.role));
+    return userAssignableRoles.filter((role) => !takenRoles.has(role));
+  }, [userAssignableRoles, userCreateExistingAccounts]);
+  const userCreateEmailExists = userCreateExistingAccounts.length > 0;
+  const userCreateEmailDomainValid = !normalizedUserCreateEmail || normalizedUserCreateEmail.endsWith(`@${managedUserDomain}`);
+  const otpPolicyChanged = useMemo(
+    () => Boolean(configData) && Boolean(configForm.require_otp_on_login) !== toBooleanString(configData?.appConfig?.require_otp_on_login),
+    [configData, configData?.appConfig?.require_otp_on_login, configForm.require_otp_on_login],
+  );
+  const configFormDirty = useMemo(
+    () => Boolean(configData) && JSON.stringify(configForm) !== configBaselineSnapshot,
+    [configBaselineSnapshot, configData, configForm],
+  );
+  const linkedUserGroupRecords = useMemo(
+    () => linkedUserGroupEmail ? users.filter((row) => normalizeManagedUserEmailClient(row.email) === normalizeManagedUserEmailClient(linkedUserGroupEmail)) : [],
+    [linkedUserGroupEmail, users],
+  );
+  useEffect(() => {
+    const authUser = bootstrap?.user || null;
+    if (userCreateDraftLoadedRef.current) return;
+    if (!authUser || !['admin', 'deo'].includes(authUser.role)) return;
+    userCreateDraftLoadedRef.current = true;
+    try {
+      const raw = window.localStorage.getItem(USER_CREATE_DRAFT_STORAGE_KEY);
+      if (!raw) return;
+      const stored = JSON.parse(raw) as Partial<typeof userCreateForm>;
+      setUserCreateForm((prev) => ({
+        ...prev,
+        ...stored,
+        scope_pairs: Array.isArray(stored?.scope_pairs) ? stored.scope_pairs.filter((value): value is string => typeof value === 'string') : prev.scope_pairs,
+      }));
+    } catch {
+      // Ignore malformed drafts.
+    }
+  }, [bootstrap?.user]);
+  useEffect(() => {
+    const authUser = bootstrap?.user || null;
+    if (!authUser || !['admin', 'deo'].includes(authUser.role)) return;
+    try {
+      window.localStorage.setItem(USER_CREATE_DRAFT_STORAGE_KEY, JSON.stringify(userCreateForm));
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  }, [bootstrap?.user, userCreateForm]);
+  useEffect(() => {
+    if (!userCreateEmailExists) return;
+    const existingName = String(userCreateExistingAccounts[0]?.name || '').trim();
+    setUserCreateForm((prev) => {
+      const nextRole = userCreateAvailableRoles.includes(prev.role) ? prev.role : (userCreateAvailableRoles[0] || prev.role);
+      const nextState = {
+        ...prev,
+        name: existingName || prev.name,
+        password: '',
+        confirm_password: '',
+        role: nextRole,
+        designation: nextRole === 'principal' ? (String(prev.designation || '').trim() || 'Higher Official') : '',
+      };
+      if (
+        nextState.name === prev.name
+        && nextState.password === prev.password
+        && nextState.confirm_password === prev.confirm_password
+        && nextState.role === prev.role
+        && nextState.designation === prev.designation
+      ) {
+        return prev;
+      }
+      return nextState;
+    });
+  }, [userCreateAvailableRoles, userCreateEmailExists, userCreateExistingAccounts]);
+  useEffect(() => {
+    if (linkedUserGroupEmail && !linkedUserGroupRecords.length) {
+      setLinkedUserGroupEmail('');
+    }
+  }, [linkedUserGroupEmail, linkedUserGroupRecords.length]);
   const filteredResetUsers = useMemo(() => {
     const allUsers = configData?.resetUsers || [];
-    const query = resetUserSearch.trim().toLowerCase();
+    const query = deferredResetUserSearch.trim().toLowerCase();
     const filtered = allUsers.filter((row) => {
       const matchesQuery = !query || [row.name, row.email, row.role, row.department || ''].join(' ').toLowerCase().includes(query);
       const matchesDepartment = !resetUserDepartmentFilter || String(row.department || '').toUpperCase() === resetUserDepartmentFilter.toUpperCase();
@@ -1882,7 +3298,7 @@ export default function App() {
     });
     if (!query && !resetUserDepartmentFilter && !resetUserYearFilter) return filtered.slice(0, 12);
     return filtered.slice(0, 20);
-  }, [configData?.resetUsers, resetUserDepartmentFilter, resetUserSearch, resetUserYearFilter]);
+  }, [configData?.resetUsers, deferredResetUserSearch, resetUserDepartmentFilter, resetUserYearFilter]);
   const resetFilterDepartments = useMemo(
     () => Array.from(new Set((configData?.resetUsers || []).map((row) => String(row.department || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [configData?.resetUsers],
@@ -1892,23 +3308,15 @@ export default function App() {
     [configData?.resetUsers],
   );
   const filteredPreviewUsers = useMemo(() => {
-    const allUsers = configData?.resetUsers || [];
+    const allUsers = (configData?.resetUsers || []).filter((row) => String(row.role || '').trim().toLowerCase() !== 'admin');
     const query = previewUserSearch.trim().toLowerCase();
     if (!query) return allUsers.slice(0, 12);
     return allUsers
       .filter((row) => [row.name, row.email, row.role, row.department || ''].join(' ').toLowerCase().includes(query))
       .slice(0, 12);
   }, [configData?.resetUsers, previewUserSearch]);
-  const filteredAdminMessageSuggestions = useMemo(() => {
-    const allSuggestions = adminMessagesData?.suggestions || [];
-    const query = adminMessageSearch.trim().toLowerCase();
-    if (!query) return allSuggestions.slice(0, 12);
-    return allSuggestions
-      .filter((item) => [item.name || '', item.email || ''].join(' ').toLowerCase().includes(query))
-      .slice(0, 12);
-  }, [adminMessageSearch, adminMessagesData?.suggestions]);
   const previewUserRecord = useMemo(
-    () => (configData?.resetUsers || []).find((row) => row.email === previewUserEmail) || null,
+    () => (configData?.resetUsers || []).find((row) => (row.account_email || row.email) === previewUserEmail) || null,
     [configData?.resetUsers, previewUserEmail],
   );
   const previewShellUser = useMemo(
@@ -1916,6 +3324,7 @@ export default function App() {
       email: previewUserRecord.email,
       name: previewUserRecord.name,
       role: previewUserRecord.role,
+      designation: previewUserRecord.designation || '',
       department: previewUserRecord.department || null,
       year_level: Number(previewUserRecord.year_level || 1) || 1,
       scopes: previewUserRecord.scopes || [],
@@ -1943,15 +3352,6 @@ export default function App() {
     }
     return previewShellUser.department || 'All Departments';
   }, [previewShellUser]);
-  const selectedAdminMessageSuggestion = useMemo(() => {
-    const needle = String(adminMessageFilters.q || adminMessageSearch || '').trim().toLowerCase();
-    if (!needle) return null;
-    return (adminMessagesData?.suggestions || []).find((item) => {
-      const name = String(item.name || '').trim().toLowerCase();
-      const email = String(item.email || '').trim().toLowerCase();
-      return name === needle || email === needle;
-    }) || null;
-  }, [adminMessageFilters.q, adminMessageSearch, adminMessagesData?.suggestions]);
   const noticeCompletionRows = useMemo(() => {
     const rows = [...(noticesData?.completionRows || [])];
     const query = noticeCompletionSearch.trim().toLowerCase();
@@ -2012,9 +3412,14 @@ export default function App() {
 
     return rows;
   }, [bootstrap?.user?.role, noticeRecordSearch, noticeRecordSort, noticesData?.records]);
+  const activeNoticeEdit = useMemo(() => {
+    if (!noticeForm.notice_id) return null;
+    if (!noticesData?.editNotice) return null;
+    return noticesData.editNotice.id === noticeForm.notice_id ? noticesData.editNotice : null;
+  }, [noticeForm.notice_id, noticesData?.editNotice]);
   const activityDisplayRows = useMemo(() => {
     const rows = [...(activityData?.result?.rows || [])];
-    const query = String(activityFilters.q || '').trim().toLowerCase();
+    const query = String(deferredActivitySearch || '').trim().toLowerCase();
     const filtered = rows.filter((row) => {
       if (!query) return true;
       return [row.name, row.email, row.department, formatYearLevel(row.year_level || 1)]
@@ -2031,7 +3436,76 @@ export default function App() {
       return a.name.localeCompare(b.name);
     });
     return filtered;
-  }, [activityData?.result?.rows, activityFilters.q, activityFilters.sort]);
+  }, [activityData?.result?.rows, activityFilters.sort, deferredActivitySearch]);
+  const filteredMonitoringSessions = useMemo(() => {
+    const rows = [...(monitoringData?.sessions || [])];
+    const query = String(deferredMonitoringSearch || '').trim().toLowerCase();
+    const filtered = rows.filter((session) => {
+      const authMethod = String(session.auth_method || 'password').trim().toLowerCase();
+      const normalizedAuth = authMethod === 'password_failed'
+        ? 'password_failed'
+        : authMethod === 'google_unregistered'
+        ? 'google_failed'
+        : authMethod.startsWith('google')
+          ? 'google'
+          : 'password';
+      if (monitoringAuthFilter !== 'all' && normalizedAuth !== monitoringAuthFilter) return false;
+      if (monitoringStatusFilter !== 'all' && String(session.status || '').trim().toLowerCase() !== monitoringStatusFilter) return false;
+      if (!query) return true;
+        return [
+          session.name,
+          session.login_email,
+          session.user_email,
+        session.role,
+        session.department,
+        session.ip_address,
+        session.user_agent,
+        session.status,
+      ].join(' ').toLowerCase().includes(query);
+    });
+    const getTime = (value: string | null | undefined) => Date.parse(String(value || '').replace(' ', 'T')) || 0;
+    filtered.sort((a, b) => {
+      if (monitoringSortBy === 'last_activity_asc') return getTime(a.last_activity) - getTime(b.last_activity);
+      if (monitoringSortBy === 'login_asc') return getTime(a.login_time) - getTime(b.login_time);
+      if (monitoringSortBy === 'login_desc') return getTime(b.login_time) - getTime(a.login_time);
+      return getTime(b.last_activity) - getTime(a.last_activity);
+    });
+    return filtered;
+  }, [deferredMonitoringSearch, monitoringAuthFilter, monitoringData?.sessions, monitoringSortBy, monitoringStatusFilter]);
+  const filteredMonitoringHistory = useMemo(() => {
+    const rows = [...(monitoringData?.history || [])];
+    const query = String(deferredMonitoringSearch || '').trim().toLowerCase();
+    const filtered = rows.filter((entry) => {
+      const authMethod = String(entry.auth_method || 'password').trim().toLowerCase();
+      const normalizedAuth = authMethod === 'password_failed'
+        ? 'password_failed'
+        : authMethod === 'google_unregistered'
+        ? 'google_failed'
+        : authMethod.startsWith('google')
+          ? 'google'
+          : 'password';
+      if (monitoringAuthFilter !== 'all' && normalizedAuth !== monitoringAuthFilter) return false;
+      if (!query) return true;
+        return [
+          entry.name,
+          entry.login_email,
+          entry.user_email,
+        entry.role,
+        entry.department,
+        entry.ip_address,
+        entry.logout_reason,
+        entry.auth_method,
+      ].join(' ').toLowerCase().includes(query);
+    });
+    const getTime = (value: string | null | undefined) => Date.parse(String(value || '').replace(' ', 'T')) || 0;
+    filtered.sort((a, b) => {
+      if (monitoringSortBy === 'last_activity_asc') return getTime(a.last_activity) - getTime(b.last_activity);
+      if (monitoringSortBy === 'login_asc') return getTime(a.login_time) - getTime(b.login_time);
+      if (monitoringSortBy === 'login_desc') return getTime(b.login_time) - getTime(a.login_time);
+      return getTime(b.last_activity) - getTime(a.last_activity);
+    });
+    return filtered;
+  }, [deferredMonitoringSearch, monitoringAuthFilter, monitoringData?.history, monitoringSortBy]);
   const reportTestsBySemester = useMemo(() => splitTestsBySemester(reportsData?.tests || []), [reportsData]);
   const counselorVisibleTests = useMemo(() => {
     if (counselorTests.length) return counselorTests;
@@ -2063,8 +3537,97 @@ export default function App() {
   }, [bootstrap?.counselorOverview?.pendingNotices, counselorOverview?.pendingNotices]);
 
   const currentUser = bootstrap?.user || null;
+  const deletedNotificationKeys = useMemo(
+    () => new Set([...readDeletedNotificationKeys(currentUser), ...serverNotificationState.deletedKeys]),
+    [currentUser?.email, notificationDeletedVersion, serverNotificationState.deletedKeys],
+  );
+  const appNotifications = useMemo(
+    () => buildAppNotifications(currentUser, counselorDashboardPendingNotices, counselorVisibleTests, {
+      pendingThresholdDays: Number(bootstrap?.appConfig?.notification_pending_threshold_days || 2) || 2,
+      updateInfo: desktopUpdateInfo,
+      appVersion: bootstrap?.appVersion,
+      desktopSettings: desktopAppSettings,
+      activityRows: activityData?.result?.rows || [],
+    }).filter((item) => !deletedNotificationKeys.has(item.key)),
+    [
+      activityData?.result?.rows,
+      bootstrap?.appConfig?.notification_pending_threshold_days,
+      bootstrap?.appVersion,
+      counselorDashboardPendingNotices,
+      counselorVisibleTests,
+      currentUser,
+      deletedNotificationKeys,
+      desktopAppSettings,
+      desktopUpdateInfo,
+    ],
+  );
+  const seenNotificationKeys = useMemo(
+    () => new Set([...readSeenNotificationKeys(currentUser), ...serverNotificationState.readKeys, ...serverNotificationState.deletedKeys]),
+    [currentUser?.email, notificationSeenVersion, serverNotificationState.deletedKeys, serverNotificationState.readKeys],
+  );
+  const unreadNotifications = useMemo(
+    () => appNotifications.filter((item) => !seenNotificationKeys.has(item.key)),
+    [appNotifications, seenNotificationKeys],
+  );
+  const unreadNotificationCount = unreadNotifications.length;
+  const persistentCacheNamespace = useMemo(() => buildPersistentCacheNamespace(bootstrap), [bootstrap]);
   const canOpenFooterTemplates = currentUser?.role === 'admin' || currentUser?.role === 'deo';
   const isTestMode = Boolean(bootstrap?.testMode?.active);
+  const roleSwitchOptions = roleSwitchOptionsOverride.length ? roleSwitchOptionsOverride : (bootstrap?.roleSwitchOptions || []);
+  const orderedRoleSwitchOptions = useMemo(() => {
+    if (!currentUser) return roleSwitchOptions;
+    return [...roleSwitchOptions].sort((left, right) => {
+      const leftCurrent = isCurrentRoleSwitchOption(left, currentUser);
+      const rightCurrent = isCurrentRoleSwitchOption(right, currentUser);
+      if (leftCurrent && !rightCurrent) return -1;
+      if (!leftCurrent && rightCurrent) return 1;
+      return getRoleOptionLabel(left.role, left.designation).localeCompare(getRoleOptionLabel(right.role, right.designation));
+    });
+  }, [currentUser, roleSwitchOptions]);
+  const roleSwitchLoginDisplayEmail = normalizeSharedRoleDisplayEmail(
+    String(
+      currentUser?.login_email
+      || orderedRoleSwitchOptions[0]?.accountEmail
+      || currentUser?.email
+      || '',
+    ),
+  );
+  const hasLinkedRoleAccount = Boolean(
+    (currentUser?.login_email && currentUser.login_email !== currentUser.email)
+    || String(currentUser?.email || '').includes('::__shine_role__:'),
+  );
+  const canSwitchRoles = Boolean(currentUser && !isTestMode && !archiveViewActive && (orderedRoleSwitchOptions.length > 1 || hasLinkedRoleAccount));
+  const embeddedWhatsappDesktopEnabled = isDesktopSendWorkspaceEnabled(bootstrap?.appConfig || null);
+  const embeddedWhatsappDesktopFlowEnabled = embeddedWhatsappDesktopEnabled || desktopWhatsappWorkspaceStarted;
+  const embeddedWhatsappWorkspaceVisible = embeddedWhatsappDesktopFlowEnabled
+    && desktopWhatsappWorkspaceStarted
+    && (
+      (activeTab === 'test-database' && (counselorSendLoading || Boolean(counselorSendPage)))
+      || (activeTab === 'notices' && (counselorNoticeSendLoading || Boolean(counselorNoticeSendPage)))
+    );
+  const counselorSendEmbeddedWhatsappActive = embeddedWhatsappDesktopFlowEnabled && activeTab === 'test-database' && Boolean(counselorSendPage);
+  const counselorNoticeEmbeddedWhatsappActive = embeddedWhatsappDesktopFlowEnabled && activeTab === 'notices' && Boolean(counselorNoticeSendPage);
+  const counselorSendDesktopWorkspaceMode = counselorSendEmbeddedWhatsappActive && (counselorSendVars.sendMode === 'app' || counselorSendVars.sendMode === 'web');
+  const counselorNoticeDesktopWorkspaceMode = counselorNoticeEmbeddedWhatsappActive && (counselorNoticeSendVars.sendMode === 'app' || counselorNoticeSendVars.sendMode === 'web');
+  const embeddedWhatsappSidepaneLayoutActive = false;
+  const counselorSendRowCounts = useMemo(() => {
+    const rows = counselorSendPage?.rows || [];
+    const generated = rows.filter((row) => row.status === 'Generated').length;
+    return {
+      total: rows.length,
+      generated,
+      pending: rows.length - generated,
+    };
+  }, [counselorSendPage?.rows]);
+  const counselorNoticeRowCounts = useMemo(() => {
+    const rows = counselorNoticeSendPage?.rows || [];
+    const generated = rows.filter((row) => row.status === 'Generated').length;
+    return {
+      total: rows.length,
+      generated,
+      pending: rows.length - generated,
+    };
+  }, [counselorNoticeSendPage?.rows]);
   const navTabs = bootstrap?.navTabs?.length ? bootstrap.navTabs : getTabsForUser(currentUser);
   const smtpIndicator = useMemo(
     () => getSmtpIndicator(bootstrap?.appConfig || null, bootstrap?.authUi || null),
@@ -2073,6 +3636,398 @@ export default function App() {
   const sidebarDepartmentCodes = useMemo(() => getUserDepartmentCodes(currentUser).slice(0, 6), [currentUser]);
   const testMetaReadOnly = Boolean(testDetail?.isMetaReadOnly ?? testDetail?.isReadOnly);
   const testMarksReadOnly = Boolean(testDetail?.isMarksReadOnly ?? testDetail?.isReadOnly);
+
+  const loadDesktopRuntimeState = async () => {
+    if (!runtimeConfig.isDesktop) return;
+    const [settings, connectivity] = await Promise.all([
+      getDesktopAppSettings(),
+      getDesktopConnectivityState(),
+    ]);
+    if (settings) {
+      setDesktopAppSettings(currentUser?.role === 'admin'
+        ? settings
+        : { ...settings, updateChecksEnabled: true, autoInstallUpdatesWhenIdle: true });
+    }
+    if (connectivity) setDesktopConnectivity(connectivity);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!currentUser) {
+      setServerNotificationState({ readKeys: [], deletedKeys: [] });
+      return () => {
+        cancelled = true;
+      };
+    }
+    const refreshNotificationState = async () => {
+      try {
+        const state = await getNotificationState();
+        if (!cancelled) {
+          setServerNotificationState({
+            readKeys: Array.isArray(state.readKeys) ? state.readKeys : [],
+            deletedKeys: Array.isArray(state.deletedKeys) ? state.deletedKeys : [],
+          });
+        }
+      } catch {
+        if (!cancelled) setServerNotificationState({ readKeys: [], deletedKeys: [] });
+      }
+    };
+    void refreshNotificationState();
+    const timerId = window.setInterval(() => void refreshNotificationState(), 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
+    };
+  }, [currentUser?.email]);
+
+  const markNotificationsRead = (keys: string[]) => {
+    const uniqueKeys = Array.from(new Set(keys.map((key) => String(key || '').trim()).filter(Boolean)));
+    if (!uniqueKeys.length) return;
+    const seen = readSeenNotificationKeys(currentUser);
+    for (const key of uniqueKeys) seen.add(key);
+    writeSeenNotificationKeys(currentUser, seen);
+    setServerNotificationState((prev) => ({
+      ...prev,
+      readKeys: Array.from(new Set([...prev.readKeys, ...uniqueKeys])),
+    }));
+    setNotificationSeenVersion((prev) => prev + 1);
+    void markNotificationKeysRead(uniqueKeys)
+      .then((state) => setServerNotificationState({
+        readKeys: Array.isArray(state.readKeys) ? state.readKeys : [],
+        deletedKeys: Array.isArray(state.deletedKeys) ? state.deletedKeys : [],
+      }))
+      .catch(() => undefined);
+  };
+
+  const deleteNotifications = (keys: string[]) => {
+    const uniqueKeys = Array.from(new Set(keys.map((key) => String(key || '').trim()).filter(Boolean)));
+    if (!uniqueKeys.length) return;
+    markNotificationsRead(uniqueKeys);
+    const deleted = readDeletedNotificationKeys(currentUser);
+    for (const key of uniqueKeys) deleted.add(key);
+    writeDeletedNotificationKeys(currentUser, deleted);
+    setServerNotificationState((prev) => ({
+      readKeys: Array.from(new Set([...prev.readKeys, ...uniqueKeys])),
+      deletedKeys: Array.from(new Set([...prev.deletedKeys, ...uniqueKeys])),
+    }));
+    setNotificationDeletedVersion((prev) => prev + 1);
+    void deleteNotificationKeys(uniqueKeys)
+      .then((state) => setServerNotificationState({
+        readKeys: Array.isArray(state.readKeys) ? state.readKeys : [],
+        deletedKeys: Array.isArray(state.deletedKeys) ? state.deletedKeys : [],
+      }))
+      .catch(() => undefined);
+  };
+
+  const openNotificationCenter = () => {
+    setNotificationCenterOpen(true);
+    setLoginNotificationPrompt(null);
+  };
+
+  const saveDesktopSettingPatch = async (patch: Partial<DesktopAppSettings>) => {
+    if (!runtimeConfig.isDesktop) return;
+    setDesktopSettingsSaving(true);
+    try {
+      const nextSettings = await saveDesktopAppSettings({
+        ...patch,
+        role: currentUser?.role,
+      } as Partial<DesktopAppSettings> & { role?: string });
+      if (nextSettings) setDesktopAppSettings(nextSettings);
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to save desktop settings.' });
+    } finally {
+      setDesktopSettingsSaving(false);
+    }
+  };
+
+  const handleDesktopUpdateCheck = async () => {
+    if (!runtimeConfig.isDesktop) return;
+    setDesktopUpdateChecking(true);
+    try {
+      const result = await checkDesktopUpdate();
+      if (result) setDesktopUpdateInfo(result);
+      if (result?.available) {
+        setFlash({ type: 'info', message: `Desktop update ${result.version} is available.` });
+      } else if (result?.error) {
+        setFlash({ type: 'error', message: result.error });
+      } else {
+        setFlash({ type: 'success', message: 'Desktop app is up to date.' });
+      }
+    } finally {
+      setDesktopUpdateChecking(false);
+    }
+  };
+
+  const handleDesktopUpdateInstall = async () => {
+    if (!runtimeConfig.isDesktop) return;
+    const result = await installDesktopUpdate();
+    if (result?.deferred) {
+      setFlash({ type: 'warning', message: result.error || 'Update install was deferred until the send workflow closes.' });
+    } else if (result?.error) {
+      setFlash({ type: 'error', message: result.error });
+    }
+  };
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop) return;
+    void loadDesktopRuntimeState();
+    return onOpenDesktopSettings(() => {
+      setDesktopSettingsPanelOpen(true);
+      if (currentUser?.role === 'admin') {
+        setActiveTab('config');
+        setConfigDesktopMode('desktop');
+      }
+      void loadDesktopRuntimeState();
+    });
+  }, [currentUser?.role]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    const loadUpdateNotification = async () => {
+      try {
+        const response = await fetch('/api/desktop/installer/meta', { credentials: 'include', headers: { Accept: 'application/json' } });
+        if (!response.ok) return;
+        const manifest = await response.json() as { version?: string; exeUrl?: string; releaseNotes?: string[] };
+        const latestVersion = String(manifest.version || '').trim();
+        const currentVersion = String(runtimeConfig.appVersion || bootstrap?.appVersion || '0.0.0').trim();
+        if (!latestVersion || compareVersionStrings(latestVersion, currentVersion) <= 0) return;
+        if (!cancelled) {
+          setDesktopUpdateInfo({
+            available: true,
+            currentVersion,
+            version: latestVersion,
+            exeUrl: String(manifest.exeUrl || ''),
+            releaseNotes: Array.isArray(manifest.releaseNotes) ? manifest.releaseNotes : [],
+          });
+        }
+      } catch {
+        // Update notifications are best-effort.
+      }
+    };
+    void loadUpdateNotification();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrap?.appVersion, currentUser?.email]);
+
+  useEffect(() => {
+    if (runtimeConfig.isDesktop || !currentUser) return;
+    if (notificationCenterOpen) return;
+    if (loginNotificationPrompt) return;
+    const latestCritical = unreadNotifications.find((item) => item.severity === 'critical');
+    if (latestCritical) {
+      setLoginNotificationPrompt(latestCritical);
+    }
+  }, [currentUser, loginNotificationPrompt, notificationCenterOpen, unreadNotifications]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
+    const storageKey = `shine_desktop_toast_seen:${currentUser.email || currentUser.name || 'user'}`;
+    let notifiedKeys = new Set<string>();
+    try {
+      notifiedKeys = new Set(JSON.parse(window.localStorage.getItem(storageKey) || '[]') as string[]);
+    } catch {
+      notifiedKeys = new Set<string>();
+    }
+    const notificationsToShow = unreadNotifications
+      .filter((item) => !notifiedKeys.has(item.key))
+      .slice(0, 5);
+    if (!notificationsToShow.length) return;
+    for (const item of notificationsToShow) {
+      notifiedKeys.add(item.key);
+      void showDesktopNotification({ title: item.title, body: item.body });
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-200)));
+  }, [currentUser, desktopAppSettings?.desktopNotificationsEnabled, unreadNotifications]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings) return;
+    if (currentUser.role !== 'hod' && currentUser.role !== 'principal') return;
+    if (desktopAppSettings.higherOfficialDigestDay !== getWeekdayKey()) return;
+    if (activityData?.result?.rows?.length) return;
+    void loadActivityOverview({
+      sort: 'pending_first',
+    });
+  }, [activityData?.result?.rows?.length, currentUser, desktopAppSettings?.higherOfficialDigestDay, desktopAppSettings?.higherOfficialDigestScope]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
+    const storageKey = `shine_desktop_notified:${currentUser.email || currentUser.name || 'user'}`;
+    const seen = new Set<string>(JSON.parse(window.localStorage.getItem(storageKey) || '[]') as string[]);
+    const remember = (key: string) => {
+      seen.add(key);
+      window.localStorage.setItem(storageKey, JSON.stringify(Array.from(seen).slice(-80)));
+    };
+    const poll = async () => {
+      if (currentUser.role !== 'counselor') return;
+      const overview = await getCounselorOverview().catch(() => null);
+      for (const notice of overview?.pendingNotices || []) {
+        const key = `notice-assigned:${notice.id || notice.title || notice.created_at}`;
+        if (seen.has(key)) continue;
+        remember(key);
+        void showDesktopNotification({ title: 'Notice pending', body: String(notice.title || 'A notice is waiting to be sent.') });
+      }
+    };
+    void poll();
+    const pollSeconds = Math.max(10, Number(bootstrap?.appConfig?.desktop_notification_poll_seconds || bootstrap?.appConfig?.desktop_notification_poll_minutes || 30) || 30);
+    const intervalMs = pollSeconds * 1000;
+    const timerId = window.setInterval(() => void poll(), intervalMs);
+    return () => window.clearInterval(timerId);
+  }, [bootstrap?.appConfig?.desktop_notification_poll_minutes, bootstrap?.appConfig?.desktop_notification_poll_seconds, currentUser, desktopAppSettings?.desktopNotificationsEnabled]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop) return;
+    let cancelled = false;
+
+    (async () => {
+      const nextState = desktopWhatsappWorkspaceReady
+        ? await getDesktopSendWorkspaceState(getDesktopSendTargetPreference(bootstrap?.appConfig || null))
+        : await exitDesktopSendWorkspace(getDesktopSendTargetPreference(bootstrap?.appConfig || null));
+      if (!cancelled) {
+        setDesktopWhatsappState(nextState);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrap?.appConfig, desktopWhatsappWorkspaceReady]);
+
+  useEffect(() => {
+    if (!embeddedWhatsappSidepaneLayoutActive) return;
+    const kind: 'report' | 'notice' = counselorSendDesktopWorkspaceMode ? 'report' : 'notice';
+    const timer = window.setTimeout(() => {
+      scrollDesktopWorkspaceIntoView(kind);
+    }, 30);
+    return () => window.clearTimeout(timer);
+  }, [embeddedWhatsappSidepaneLayoutActive, counselorSendDesktopWorkspaceMode, counselorNoticeDesktopWorkspaceMode]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop || !desktopWhatsappWorkspaceReady || desktopWhatsappWorkspaceStarted) return;
+    let cancelled = false;
+
+    const syncState = async () => {
+      const nextState = await getDesktopSendWorkspaceState(getDesktopSendTargetPreference(bootstrap?.appConfig || null));
+      if (!cancelled) {
+        setDesktopWhatsappState(nextState);
+      }
+    };
+
+    void syncState();
+    const timerId = window.setInterval(() => {
+      void syncState();
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
+    };
+  }, [bootstrap?.appConfig, desktopWhatsappWorkspaceReady, desktopWhatsappWorkspaceStarted]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop) return;
+    if (!desktopWhatsappWorkspaceStarted) {
+      void closeFloatingSendWindow('inactive');
+      return;
+    }
+
+    let payload: FloatingSendWindowPayload | null = null;
+    const themeVars = buildFloatingThemeVars(bootstrap?.appConfig || null);
+    if (counselorSendDesktopWorkspaceMode && counselorSendPage) {
+      payload = {
+        kind: 'report',
+        mode: counselorSendVarsRef.current.sendMode,
+        title: counselorSendPage.meta.test_name || 'Student Send List',
+        subtitle: `${counselorSendRowCounts.pending} pending | ${counselorSendRowCounts.total} students`,
+        theme,
+        themeVars,
+        rows: counselorSendPage.rows.map((row) => ({
+          regNo: row.reg_no,
+          studentName: row.student_name,
+          parentPhone: row.parent_phone,
+          status: row.status,
+          queueState: desktopReportQueueState[row.reg_no] || '',
+          active: desktopWhatsappActiveTarget?.kind === 'report' && desktopWhatsappActiveTarget.regNo === row.reg_no,
+          loading: desktopWhatsappLoadingRow === row.reg_no,
+        })),
+      };
+    } else if (counselorNoticeDesktopWorkspaceMode && counselorNoticeSendPage) {
+      payload = {
+        kind: 'notice',
+        mode: counselorNoticeSendVarsRef.current.sendMode,
+        title: counselorNoticeSendPage.notice.title_display || counselorNoticeSendPage.notice.title || 'Notice Send List',
+        subtitle: `${counselorNoticeRowCounts.pending} pending | ${counselorNoticeRowCounts.total} students`,
+        theme,
+        themeVars,
+        rows: counselorNoticeSendPage.rows.map((row) => ({
+          regNo: row.reg_no,
+          studentName: row.student_name,
+          parentPhone: row.parent_phone,
+          status: row.status,
+          queueState: desktopNoticeQueueState[row.reg_no] || '',
+          active: desktopWhatsappActiveTarget?.kind === 'notice' && desktopWhatsappActiveTarget.regNo === row.reg_no,
+          loading: desktopWhatsappLoadingRow === row.reg_no,
+        })),
+      };
+    }
+
+    if (payload) {
+      void showFloatingSendWindow(payload).then((result) => {
+        if (!result.success && result.error) {
+          setFlash({ type: 'warning', message: result.error });
+        }
+      });
+    } else {
+      void closeFloatingSendWindow('inactive');
+    }
+  }, [
+    counselorNoticeDesktopWorkspaceMode,
+    counselorNoticeSendPage,
+    counselorNoticeRowCounts,
+    bootstrap?.appConfig,
+    counselorSendDesktopWorkspaceMode,
+    counselorSendPage,
+    counselorSendRowCounts,
+    desktopNoticeQueueState,
+    desktopReportQueueState,
+    desktopWhatsappActiveTarget,
+    desktopWhatsappLoadingRow,
+    desktopWhatsappWorkspaceStarted,
+    theme,
+  ]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop) return;
+    const offPick = onFloatingSendRequest((payload) => {
+      const regNo = String(payload?.regNo || '').trim();
+      if (!regNo) return;
+      if (payload?.kind === 'notice') {
+        const row = counselorNoticeSendPage?.rows.find((item) => item.reg_no === regNo);
+        if (row) void handleCounselorNoticeDesktopQueuePick(row);
+        return;
+      }
+      const row = counselorSendPage?.rows.find((item) => item.reg_no === regNo);
+      if (row) void handleCounselorDesktopQueuePick(row);
+    });
+    const offClosed = onFloatingSendClosed(() => {
+      setDesktopWhatsappWorkspaceStarted(false);
+      setDesktopWhatsappWorkspaceReady(false);
+      setDesktopWhatsappActiveTarget(null);
+      setDesktopWhatsappLoadingRow(null);
+      setDesktopWhatsappState((prev) => ({
+        ...prev,
+        active: false,
+        loading: false,
+        error: '',
+      }));
+    });
+    return () => {
+      offPick();
+      offClosed();
+    };
+  }, [counselorNoticeDesktopWorkspaceMode, counselorNoticeSendPage, counselorSendPage]);
+
   const visibleTestDetailStudents = useMemo(() => {
     if (!testDetail?.students?.length) return [];
     const query = testDetailSearch.trim().toLowerCase();
@@ -2113,15 +4068,41 @@ export default function App() {
     }));
   }, [currentUser, userActorScopes, userSelectableDepartments]);
 
-  async function refreshBootstrap() {
-    const payload = await getBootstrap();
+  async function applyBootstrapPayload(
+    payload: BootstrapPayload,
+    options?: { showBootLoader?: boolean; forceDefaultTab?: boolean; targetTab?: string },
+  ) {
+    const showBootLoader = Boolean(options?.showBootLoader);
+    const forceDefaultTab = Boolean(options?.forceDefaultTab);
+    const targetTab = String(options?.targetTab || '').trim();
     const previousEmail = String(bootstrap?.user?.email || '').toLowerCase();
     const nextEmail = String(payload.user?.email || '').toLowerCase();
     const userChanged = previousEmail !== nextEmail;
-    setBootstrap(payload);
     applyThemeColors(payload.appConfig);
+    seedBootstrapOverviewCaches(payload);
+    const warmed = showBootLoader && payload.user ? await warmInitialUiCaches(payload, targetTab || undefined) : null;
+    startTransition(() => {
+      if (warmed?.dashboard) setDashboardData(warmed.dashboard);
+      if (warmed?.reports) setReportsData(warmed.reports);
+      if (warmed?.activity) setActivityData((prev) => prev || warmed.activity || null);
+      if (warmed?.cdp) setCdpData((prev) => prev || warmed.cdp || null);
+    });
+    if (showBootLoader && payload.user) {
+      setBootStatus('Opening workspace...');
+    }
+    setBootstrap(payload);
+    setSessionEndNotice(payload.user ? null : (payload.sessionEndNotice || null));
+    if (!payload.user || userChanged) {
+      setRoleSwitchModalOpen(false);
+      setRoleSwitchSelectedAccountEmail('');
+      setRoleSwitchError('');
+      setRoleSwitchLoading(false);
+      setRoleSwitchOptionsOverride([]);
+    }
     if (!payload.user) {
+      clearRememberedAuthState();
       setLoginOtpState(null);
+      setLoginRoleSelectionState(null);
       setActiveTab('reports');
       setUsers([]);
       setTestDetail(null);
@@ -2133,6 +4114,8 @@ export default function App() {
       setCounselorNoticeSendVerify(null);
       return;
     }
+    markAuthStateAuthenticated();
+    setLoginRoleSelectionState(null);
     if (userChanged) {
       setTestDetail(null);
       setTestDetailSearch('');
@@ -2143,6 +4126,11 @@ export default function App() {
       setCounselorNoticeSendVerify(null);
     }
     setLoginOtpState(null);
+    if (forceDefaultTab || targetTab) {
+      setActiveTab(targetTab || payload.defaultTab || getDefaultTab(payload.user));
+      setMobileSidebarOpen(false);
+      return;
+    }
     const allowHiddenConfig = activeTab === 'config' && payload.user.role === 'admin';
     if (!payload.navTabs.includes(activeTab) && !allowHiddenConfig) {
       setActiveTab(payload.defaultTab || getDefaultTab(payload.user));
@@ -2150,12 +4138,29 @@ export default function App() {
     setMobileSidebarOpen(false);
   }
 
+  async function refreshBootstrap(options?: { showBootLoader?: boolean; forceDefaultTab?: boolean; targetTab?: string }) {
+    const showBootLoader = Boolean(options?.showBootLoader);
+    if (showBootLoader) {
+      bootLoaderShownAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      setBootStatus('Loading session...');
+      setBootLoading(true);
+      await waitForNextPaint();
+    }
+    try {
+      const payload = await getBootstrap();
+      await applyBootstrapPayload(payload, options);
+    } finally {
+      if (showBootLoader) {
+        await waitForMinimumBootLoaderTime();
+        setBootLoading(false);
+      }
+    }
+  }
+
   async function handleStartAccountTestMode(email: string) {
     try {
       await startTestMode(email);
-      await refreshBootstrap();
-      setPreviewUserEmail('');
-      setPreviewUserSearch('');
+      await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
       setFlash({ type: 'success', message: 'Entered account test mode.' });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to start account test mode.' });
@@ -2165,25 +4170,117 @@ export default function App() {
   async function handleExitTestMode() {
     try {
       await stopTestMode();
-      await refreshBootstrap();
-      setActiveTab('config');
+      await refreshBootstrap({ showBootLoader: true, targetTab: 'config' });
       setFlash({ type: 'success', message: 'Exited test mode.' });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to exit test mode.' });
     }
   }
 
+  async function handleOpenRoleSwitchModal() {
+    if (!canSwitchRoles || !currentUser) return;
+    setRoleSwitchError('');
+    setRoleSwitchLoading(true);
+    try {
+      let nextOptions = orderedRoleSwitchOptions;
+      if (!nextOptions.length) {
+        const payload = await getSessionRoleSwitchOptions();
+        const fetchedOptions = Array.isArray(payload.options)
+          ? payload.options.map((option) => ({
+            accountEmail: String(option.accountEmail || ''),
+            role: String(option.role || 'counselor') as Role,
+            name: String(option.name || option.accountEmail || ''),
+            designation: String(option.designation || ''),
+            department: String(option.department || ''),
+            year_level: Number(option.year_level || 1) || 1,
+          }))
+          : [];
+        setRoleSwitchOptionsOverride(fetchedOptions);
+        nextOptions = [...fetchedOptions].sort((left, right) => {
+          const leftCurrent = isCurrentRoleSwitchOption(left, currentUser);
+          const rightCurrent = isCurrentRoleSwitchOption(right, currentUser);
+          if (leftCurrent && !rightCurrent) return -1;
+          if (!leftCurrent && rightCurrent) return 1;
+          return getRoleOptionLabel(left.role, left.designation).localeCompare(getRoleOptionLabel(right.role, right.designation));
+        });
+      }
+      const nextSelection = nextOptions.find((option) => !isCurrentRoleSwitchOption(option, currentUser))?.accountEmail
+        || currentUser.email
+        || String(nextOptions[0]?.accountEmail || '');
+      setRoleSwitchSelectedAccountEmail(nextSelection);
+      setRoleSwitchModalOpen(true);
+    } catch (error) {
+      setRoleSwitchError(error instanceof Error ? error.message : 'Unable to load available roles.');
+      setRoleSwitchModalOpen(true);
+    } finally {
+      setRoleSwitchLoading(false);
+    }
+  }
+
+  async function handleSwitchRole(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentUser) return;
+    if (!roleSwitchSelectedAccountEmail) {
+      setRoleSwitchError('Select a role to continue.');
+      return;
+    }
+    if (roleSwitchSelectedAccountEmail === currentUser.email) {
+      setRoleSwitchModalOpen(false);
+      setRoleSwitchError('');
+      return;
+    }
+    const selectedOption = orderedRoleSwitchOptions.find((option) => option.accountEmail === roleSwitchSelectedAccountEmail) || null;
+    setRoleSwitchLoading(true);
+    setRoleSwitchError('');
+    try {
+      await switchSessionRole(roleSwitchSelectedAccountEmail);
+      setRoleSwitchModalOpen(false);
+      setRoleSwitchSelectedAccountEmail('');
+      await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
+      setFlash({
+        type: 'success',
+        message: selectedOption
+          ? `Switched to ${getRoleOptionLabel(selectedOption.role, selectedOption.designation)}.`
+          : 'Role switched successfully.',
+      });
+    } catch (error) {
+      setRoleSwitchError(error instanceof Error ? error.message : 'Unable to switch roles.');
+    } finally {
+      setRoleSwitchLoading(false);
+    }
+  }
+
   async function handleLogin(event: FormEvent<HTMLFormElement>, forceLogout = false) {
     event.preventDefault();
-    setLoginState((prev) => ({ ...prev, loading: true, error: '', conflict: null }));
+    setSessionEndNotice(null);
+    setLoginState((prev) => ({ ...prev, loading: true, error: '', conflict: null, conflictAuthMethod: null }));
     try {
       const result = await login(loginState.identifier, loginState.password, forceLogout);
-      if (result?.requiresOtp) {
-        setLoginOtpState({ maskedEmail: String(result.maskedEmail || '') });
-        setLoginState((prev) => ({ ...prev, otp_code: '', loading: false, error: '', conflict: null }));
+      if (result?.requiresRoleSelection) {
+        setLoginRoleSelectionState({
+          authMethod: (result.authMethod || 'password') as 'password' | 'google',
+          loginEmail: String(result.loginEmail || loginState.identifier || ''),
+          options: Array.isArray(result.options)
+              ? result.options.map((option: any) => ({
+                  accountEmail: String(option.accountEmail || ''),
+                  role: String(option.role || 'counselor') as Role,
+                  name: String(option.name || option.accountEmail || ''),
+                  designation: String(option.designation || ''),
+                  department: String(option.department || ''),
+                  year_level: Number(option.year_level || 1) || 1,
+                }))
+            : [],
+          selectedAccountEmail: String(result.options?.[0]?.accountEmail || ''),
+        });
+        setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null }));
         return;
       }
-      await refreshBootstrap();
+      if (result?.requiresOtp) {
+        setLoginOtpState({ maskedEmail: String(result.maskedEmail || '') });
+        setLoginState((prev) => ({ ...prev, otp_code: '', loading: false, error: '', conflict: null, conflictAuthMethod: null }));
+        return;
+      }
+      await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
     } catch (error) {
       const err = error as Error & { payload?: any; status?: number };
       if (err.status === 409 && err.payload?.requiresForceLogout) {
@@ -2192,7 +4289,9 @@ export default function App() {
           loading: false,
           error: '',
           conflict: err.payload.existingSession || null,
+          conflictAuthMethod: 'password',
         }));
+        setLoginConflictInfoOpen(false);
         return;
       }
       setLoginState((prev) => ({
@@ -2209,6 +4308,7 @@ export default function App() {
       loading: false,
       error: '',
       conflict: null,
+      conflictAuthMethod: null,
     });
   }
 
@@ -2216,8 +4316,35 @@ export default function App() {
     event.preventDefault();
     setLoginState((prev) => ({ ...prev, loading: true, error: '' }));
     try {
-      await verifyLoginOtp(loginState.otp_code);
-      await refreshBootstrap();
+      const result = await verifyLoginOtp(loginState.otp_code);
+      if (result?.requiresRoleSelection) {
+        setLoginRoleSelectionState({
+          authMethod: (result.authMethod || 'password') as 'password' | 'google',
+          loginEmail: String(result.loginEmail || loginState.identifier || ''),
+          options: Array.isArray(result.options)
+            ? result.options.map((option) => ({
+                accountEmail: String(option.accountEmail || ''),
+                role: String(option.role || 'counselor') as Role,
+                name: String(option.name || option.accountEmail || ''),
+                designation: String(option.designation || ''),
+                department: String(option.department || ''),
+                year_level: Number(option.year_level || 1) || 1,
+              }))
+            : [],
+          selectedAccountEmail: String(result.options?.[0]?.accountEmail || ''),
+        });
+        setLoginOtpState(null);
+        setLoginState((prev) => ({
+          ...prev,
+          loading: false,
+          error: '',
+          conflict: null,
+          conflictAuthMethod: null,
+          otp_code: '',
+        }));
+        return;
+      }
+      await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
       setLoginState({
         identifier: '',
         password: '',
@@ -2225,13 +4352,64 @@ export default function App() {
         loading: false,
         error: '',
         conflict: null,
+        conflictAuthMethod: null,
       });
       setLoginOtpState(null);
     } catch (error) {
+      const err = error as Error & { status?: number };
+      if (err.status === 423 || /expired|sign in again/i.test(err.message || '')) {
+        setLoginOtpState(null);
+      }
       setLoginState((prev) => ({
         ...prev,
         loading: false,
         error: error instanceof Error ? error.message : 'OTP verification failed.',
+      }));
+    }
+  }
+
+  async function handleCompleteLoginRoleSelection(forceLogout = false) {
+    if (!loginRoleSelectionState?.selectedAccountEmail) {
+      setLoginState((prev) => ({ ...prev, error: 'Select a role to continue.' }));
+      return;
+    }
+    setLoginState((prev) => ({ ...prev, loading: true, error: '' }));
+    try {
+      const result = await selectLoginRole(loginRoleSelectionState.selectedAccountEmail, forceLogout);
+      if (result?.requiresOtp) {
+        setLoginOtpState({ maskedEmail: String(result.maskedEmail || '') });
+        setLoginRoleSelectionState(null);
+        setLoginState((prev) => ({ ...prev, otp_code: '', loading: false, error: '', conflict: null, conflictAuthMethod: null }));
+        return;
+      }
+      await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
+      setLoginState({
+        identifier: '',
+        password: '',
+        otp_code: '',
+        loading: false,
+        error: '',
+        conflict: null,
+        conflictAuthMethod: null,
+      });
+      setLoginRoleSelectionState(null);
+    } catch (error) {
+      const err = error as Error & { payload?: any; status?: number };
+      if (err.status === 409 && err.payload?.requiresForceLogout) {
+        setLoginState((prev) => ({
+          ...prev,
+          loading: false,
+          error: '',
+          conflict: err.payload.existingSession || null,
+          conflictAuthMethod: loginRoleSelectionState.authMethod,
+        }));
+        setLoginConflictInfoOpen(loginRoleSelectionState.authMethod === 'google' && loginConflictHasUnknownDetails(err.payload.existingSession || null));
+        return;
+      }
+      setLoginState((prev) => ({
+        ...prev,
+        loading: false,
+        error: err.message || 'Unable to continue with the selected role.',
       }));
     }
   }
@@ -2259,7 +4437,47 @@ export default function App() {
       // Ignore cancellation failures.
     }
     setLoginOtpState(null);
-    setLoginState((prev) => ({ ...prev, otp_code: '', loading: false, error: '', conflict: null }));
+    setLoginRoleSelectionState(null);
+    setLoginConflictInfoOpen(false);
+    setLoginState((prev) => ({ ...prev, otp_code: '', loading: false, error: '', conflict: null, conflictAuthMethod: null }));
+  }
+
+  function handleGoogleLoginStart(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    setSessionEndNotice(null);
+    setLoginRoleSelectionState(null);
+    setLoginConflictInfoOpen(false);
+    setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null }));
+    setForgotPasswordState((prev) => ({ ...prev, loading: false, error: '' }));
+    setFlash(null);
+    if (!startGoogleOauth()) {
+      setFlash({ type: 'info', message: 'Google sign-in will be added to the desktop shell after the core login workflow is stabilized. Please use password login for desktop testing right now.' });
+    }
+  }
+
+  async function handleResolveGoogleLoginConflict() {
+    setLoginState((prev) => ({ ...prev, loading: true, error: '' }));
+    try {
+      await resolveGoogleLoginConflict();
+      setLoginState({
+        identifier: '',
+        password: '',
+        otp_code: '',
+        loading: false,
+        error: '',
+        conflict: null,
+        conflictAuthMethod: null,
+      });
+      setLoginConflictInfoOpen(false);
+      await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
+      setFlash({ type: 'success', message: 'Google sign-in completed successfully.' });
+    } catch (error) {
+      setLoginState((prev) => ({
+        ...prev,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Unable to continue Google sign-in.',
+      }));
+    }
   }
 
   async function handleForgotPasswordRequest(event: FormEvent<HTMLFormElement>) {
@@ -2329,6 +4547,20 @@ export default function App() {
     }
   }
 
+  function closeForgotPasswordModal() {
+    setForgotPasswordState({
+      open: false,
+      stage: 'request',
+      identifier: '',
+      maskedEmail: '',
+      otp_code: '',
+      new_password: '',
+      confirm_password: '',
+      loading: false,
+      error: '',
+    });
+  }
+
   async function handleSendSelfPasswordOtp() {
     setSelfPasswordSendingOtp(true);
     try {
@@ -2368,6 +4600,16 @@ export default function App() {
       await handleExitTestMode();
       return;
     }
+    if (archiveViewActive) {
+      await handleExitArchiveView();
+      return;
+    }
+    clearRememberedAuthState();
+    try {
+      window.localStorage.removeItem(USER_CREATE_DRAFT_STORAGE_KEY);
+    } catch {
+      // Ignore localStorage cleanup failures.
+    }
     await logout();
     setLoginOtpState(null);
     await refreshBootstrap();
@@ -2383,15 +4625,40 @@ export default function App() {
     }
   }
 
-  async function refreshUsersOverview() {
-    if (!currentUser || !['admin', 'principal', 'deo'].includes(currentUser.role)) return;
-    setUsersLoading(true);
-    try {
-      const payload = await getUsers();
+  function applyUsersOverviewPayload(payload: UsersOverviewPayload) {
+    startTransition(() => {
       setUsers(payload.users);
       setDepartments(payload.departments);
       setUserActorScopes(payload.actorScopes || []);
       setUserAssignableRoles(payload.assignableRoles || []);
+      setUserCreateForm((prev) => ({
+        ...prev,
+        role: (payload.assignableRoles || []).includes(prev.role)
+          ? prev.role
+          : (payload.assignableRoles?.[0] || prev.role || 'counselor') as Role,
+        designation: ((payload.assignableRoles || []).includes(prev.role)
+          ? prev.role
+          : (payload.assignableRoles?.[0] || prev.role || 'counselor')) === 'principal'
+          ? (String(prev.designation || '').trim() || 'Higher Official')
+          : '',
+      }));
+    });
+  }
+
+  async function refreshUsersOverview(options?: { preferCache?: boolean }) {
+    if (!currentUser || !['admin', 'principal', 'deo'].includes(currentUser.role)) return;
+    const preferCache = options?.preferCache !== false;
+    const cacheKey = buildUsersOverviewCacheKey();
+    const cached = preferCache ? readOverviewCacheEntry(usersOverviewCacheRef, 'users', cacheKey) : null;
+    if (cached) {
+      applyUsersOverviewPayload(cached.payload);
+      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+    }
+    setUsersLoading(!cached);
+    try {
+      const payload = await getUsers();
+      writeOverviewCacheEntry(usersOverviewCacheRef, 'users', cacheKey, payload);
+      applyUsersOverviewPayload(payload);
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load users.' });
     } finally {
@@ -2416,7 +4683,7 @@ export default function App() {
   async function loadCounselorStudents(user: UserRecord) {
     setStudentListLoading(true);
     try {
-      const payload = await getCounselorStudentList(user.email);
+      const payload = await getCounselorStudentList(user.account_email || user.email);
       setStudentListRows(payload.students || []);
       setStudentListCounselor(user);
       setStudentListModalOpen(true);
@@ -2437,7 +4704,7 @@ export default function App() {
       setFlash({ type: 'success', message: `${result.count} students uploaded successfully.` });
       setStudentUploadKey((value) => value + 1);
       await loadCounselorStudents(studentListCounselor);
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to upload student list.' });
     } finally {
@@ -2455,9 +4722,9 @@ export default function App() {
         department: studentListCounselor.department || '',
       });
       setStudentQuickAdd({ reg_no: '', student_name: '', parent_phone: '', parent_email: '' });
-      setFlash({ type: 'success', message: 'Student saved successfully.' });
+      setFlash({ type: 'success', message: 'Student added successfully.' });
       await loadCounselorStudents(studentListCounselor);
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to save student.' });
     } finally {
@@ -2480,7 +4747,7 @@ export default function App() {
       await deleteCounselorStudentRow(studentListCounselor.email, regNo);
       setFlash({ type: 'success', message: 'Student deleted successfully.' });
       await loadCounselorStudents(studentListCounselor);
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to delete student.' });
     } finally {
@@ -2503,7 +4770,7 @@ export default function App() {
       await deleteAllCounselorStudentRows(studentListCounselor.email);
       setFlash({ type: 'success', message: 'Student list deleted successfully.' });
       await loadCounselorStudents(studentListCounselor);
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to delete student list.' });
     } finally {
@@ -2554,6 +4821,7 @@ export default function App() {
 
   function applyNoticeEditState(editNotice: NoticeRecord | null) {
     if (!editNotice) {
+      setNoticesData((prev) => (prev ? { ...prev, editNotice: null } : prev));
       setNoticeForm({
         notice_id: 0,
         notice_title: '',
@@ -2604,10 +4872,18 @@ export default function App() {
     }
   }
 
-  async function loadReports(department?: string, year?: number | null) {
-    setReportsLoading(true);
+  async function loadReports(department?: string, year?: number | null, options?: { preferCache?: boolean }) {
+    const cacheKey = buildReportsOverviewCacheKey(department, year);
+    const cached = options?.preferCache === false ? null : readOverviewCacheEntry(reportsOverviewCacheRef, 'reports', cacheKey);
+    if (cached) {
+      setReportsData(cached.payload);
+      setTestDetail(null);
+      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+    }
+    setReportsLoading(!cached);
     try {
       const payload = await getReportsOverview(department, year);
+      writeOverviewCacheEntry(reportsOverviewCacheRef, 'reports', cacheKey, payload);
       setReportsData(payload);
       setTestDetail(null);
     } finally {
@@ -2615,10 +4891,381 @@ export default function App() {
     }
   }
 
-  async function loadDashboardOverview() {
-    setDashboardLoading(true);
+  useEffect(() => {
+    const link = String(subjectForm.google_sheet_link || '').trim();
+    const selectedDepartment = String(subjectsData?.selectedDepartment || '').trim().toUpperCase();
+    const parseKey = link ? `${selectedDepartment}::${link}` : '';
+    if (!link) {
+      subjectParseRequestRef.current += 1;
+      setSubjectLastParsedLink('');
+      setSubjectParsedClasses([]);
+      setSubjectParsedFaculties([]);
+      setSubjectParseError('');
+      setSubjectParsing(false);
+      return undefined;
+    }
+
+    if (!looksLikeGoogleSheetLink(link)) {
+      subjectParseRequestRef.current += 1;
+      setSubjectParsedClasses([]);
+      setSubjectParsedFaculties([]);
+      setSubjectParseError('');
+      setSubjectParsing(false);
+      return undefined;
+    }
+
+    if (parseKey === subjectLastParsedLink) {
+      return undefined;
+    }
+
+    setSubjectParsedClasses([]);
+    setSubjectParseError('');
+
+    const requestId = subjectParseRequestRef.current + 1;
+    subjectParseRequestRef.current = requestId;
+
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        setSubjectParsing(true);
+        try {
+          const parsed = await parseSubjectSheet(link, String(subjectsData?.selectedDepartment || ''));
+          if (subjectParseRequestRef.current !== requestId) return;
+
+          const parsedSections = normalizeClassSections(parsed.class_sections || []);
+          const parsedFaculties = splitFacultyNames((parsed.faculty_names || []).join(' / ') || parsed.faculty_name || '');
+          const parsedSuggestedAllocations = normalizeFacultyAllocations(parsed.faculty_allocations || [], parsedFaculties, parsedSections);
+          if (selectedDepartment && parsedSections.length && !doClassSectionsMatchDepartment(parsedSections, selectedDepartment)) {
+            setSubjectParsedClasses([]);
+            setSubjectParsedFaculties(parsedFaculties);
+            setSubjectParseError(`Parsed classes (${parsedSections.join(', ')}) do not match the selected department ${selectedDepartment}.`);
+            setSubjectLastParsedLink(parseKey);
+            setSubjectForm((prev) => ({
+              ...prev,
+              subject_code: parsed.subject_code || prev.subject_code,
+              subject_name: parsed.subject_name || prev.subject_name,
+              faculty_name: parsed.faculty_name || prev.faculty_name,
+              class_sections: [],
+              faculty_allocations: [],
+            }));
+            return;
+          }
+          setSubjectForm((prev) => {
+            if (String(prev.google_sheet_link || '').trim() !== link) return prev;
+            const nextAllocations = normalizeFacultyAllocations(
+              prev.faculty_allocations.some((entry) => entry.class_sections.length) ? prev.faculty_allocations : parsedSuggestedAllocations,
+              parsedFaculties,
+              parsedSections,
+            );
+            return {
+              ...prev,
+              subject_code: parsed.subject_code || prev.subject_code,
+              subject_name: parsed.subject_name || prev.subject_name,
+              faculty_name: parsed.faculty_name || prev.faculty_name,
+              class_sections: normalizeClassSections(nextAllocations.flatMap((entry) => entry.class_sections)),
+              faculty_allocations: nextAllocations,
+            };
+          });
+          setSubjectParsedClasses(parsedSections);
+          setSubjectParsedFaculties(parsedFaculties);
+          setSubjectParseError(parsedSections.length ? '' : 'No class sections were detected in the Daily Attendance sheet yet.');
+          setSubjectLastParsedLink(parseKey);
+        } catch (error) {
+          if (subjectParseRequestRef.current !== requestId) return;
+          setSubjectParsedClasses([]);
+          setSubjectParsedFaculties([]);
+          setSubjectParseError(error instanceof Error ? error.message : 'Unable to parse Google Sheet details.');
+        } finally {
+          if (subjectParseRequestRef.current === requestId) {
+            setSubjectParsing(false);
+          }
+        }
+      })();
+    }, 650);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [subjectForm.google_sheet_link, subjectLastParsedLink, subjectsData?.selectedDepartment]);
+
+  useEffect(() => {
+    if (!subjectParsedClasses.length) return;
+    const visibleFaculties = splitFacultyNames(subjectForm.faculty_name || '').length
+      ? splitFacultyNames(subjectForm.faculty_name || '')
+      : subjectParsedFaculties;
+    const nextAllocations = normalizeFacultyAllocations(subjectForm.faculty_allocations, visibleFaculties, subjectParsedClasses);
+    const nextClassSections = normalizeClassSections(nextAllocations.flatMap((entry) => entry.class_sections));
+    const currentAllocations = JSON.stringify(subjectForm.faculty_allocations);
+    const normalizedAllocations = JSON.stringify(nextAllocations);
+    const currentClassSections = JSON.stringify(normalizeClassSections(subjectForm.class_sections));
+    const normalizedClassSections = JSON.stringify(nextClassSections);
+    if (currentAllocations === normalizedAllocations && currentClassSections === normalizedClassSections) {
+      return;
+    }
+    setSubjectForm((prev) => ({
+      ...prev,
+      class_sections: nextClassSections,
+      faculty_allocations: nextAllocations,
+    }));
+  }, [subjectForm.faculty_name, subjectParsedClasses, subjectParsedFaculties]);
+
+  function resetSubjectDraft() {
+    const defaultYear = getDefaultSubjectAttendanceYear();
+    setSubjectEditId(null);
+    setSubjectLastParsedLink('');
+    setSubjectParsedClasses([]);
+    setSubjectParsedFaculties([]);
+    setSubjectParseError('');
+    setSubjectForm({
+      subject_code: '',
+      subject_name: '',
+      faculty_name: '',
+      google_sheet_link: '',
+      academic_start_year: String(defaultYear),
+      academic_end_year: String(defaultYear),
+      class_sections: [],
+      faculty_allocations: [],
+    });
+  }
+
+  async function loadSubjects(department?: string, year?: number | null, semester?: string) {
+    const cacheKey = JSON.stringify({
+      department: String(department || '').trim().toUpperCase(),
+      year: Number(year || 0) || 0,
+      semester: String(semester || '').trim(),
+    });
+    const cached = subjectsOverviewCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) {
+      setSubjectsData(cached.payload);
+      if (!cached.payload.selectedDepartment || !cached.payload.selectedYear || !cached.payload.selectedSemester || (subjectEditId && !cached.payload.records.some((record) => record.id === subjectEditId))) {
+        resetSubjectDraft();
+      }
+      return;
+    }
+    setSubjectsLoading(true);
+    try {
+      const payload = await getSubjectsOverview(department, year, semester);
+      subjectsOverviewCacheRef.current.set(cacheKey, { timestamp: Date.now(), payload });
+      setSubjectsData(payload);
+      if (!payload.selectedDepartment || !payload.selectedYear || !payload.selectedSemester || (subjectEditId && !payload.records.some((record) => record.id === subjectEditId))) {
+        resetSubjectDraft();
+      }
+    } catch (error) {
+      setSubjectsData(null);
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load subjects.' });
+    } finally {
+      setSubjectsLoading(false);
+    }
+  }
+
+  async function loadCdpOverview(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    subject_id?: number | null;
+  }, options?: { preferCache?: boolean }) {
+    const cacheKey = buildCdpOverviewCacheKey(filters);
+    const cached = options?.preferCache === false ? null : readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey);
+    if (cached) {
+      setCdpData(cached.payload);
+      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+    }
+    setCdpLoading(!cached);
+    try {
+      const payload = await getCdpOverview(filters);
+      writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey, payload);
+      setCdpData(payload);
+    } catch (error) {
+      setCdpData(null);
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load CDP overview.' });
+    } finally {
+      setCdpLoading(false);
+    }
+  }
+
+  async function rebuildCdpScopeOverview(filters: {
+    department: string;
+    year: number;
+    semester: string;
+    subject_id?: number | null;
+  }) {
+    setCdpLoading(true);
+    setCdpData(null);
+    try {
+      const payload = await rebuildCdpScope(filters);
+      invalidateOverviewCaches(['cdp']);
+      const cacheKey = buildCdpOverviewCacheKey({
+        department: payload.selectedDepartment,
+        year: payload.selectedYear,
+        semester: payload.selectedSemester,
+        subject_id: payload.selectedSubjectId,
+      });
+      writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey, payload);
+      setCdpData(payload);
+    } catch (error) {
+      setCdpData(null);
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to rebuild CDP scope.' });
+    } finally {
+      setCdpLoading(false);
+    }
+  }
+
+  function beginSubjectEdit(subject: SubjectRecord) {
+    setSubjectEditId(subject.id);
+    setSubjectLastParsedLink('');
+    setSubjectParsedClasses([]);
+    setSubjectParsedFaculties(splitFacultyNames(subject.faculty_name || ''));
+    setSubjectParseError('');
+    setSubjectForm({
+      subject_code: subject.subject_code || '',
+      subject_name: subject.subject_name || '',
+      faculty_name: subject.faculty_name || '',
+      google_sheet_link: subject.google_sheet_link || '',
+      academic_start_year: String(subject.academic_start_year || ''),
+      academic_end_year: String(subject.academic_end_year || ''),
+      class_sections: subject.class_sections || [],
+      faculty_allocations: subject.faculty_allocations || [],
+    });
+  }
+
+  async function handleSaveSubject(event: FormEvent) {
+    event.preventDefault();
+    if (!subjectsData?.selectedDepartment || !subjectsData.selectedYear) return;
+    const academicStartYear = Number(subjectForm.academic_start_year);
+    const academicEndYear = Number(subjectForm.academic_end_year);
+    let effectiveParsedClasses = subjectParsedClasses;
+    let effectiveParsedFaculties = subjectParsedFaculties;
+    if (!effectiveParsedClasses.length && looksLikeGoogleSheetLink(String(subjectForm.google_sheet_link || '').trim())) {
+      try {
+        const parsed = await parseSubjectSheet(String(subjectForm.google_sheet_link || '').trim(), String(subjectsData.selectedDepartment || ''));
+        effectiveParsedClasses = normalizeClassSections(parsed.class_sections || []);
+        effectiveParsedFaculties = splitFacultyNames((parsed.faculty_names || []).join(' / ') || parsed.faculty_name || '');
+        const parsedSuggestedAllocations = normalizeFacultyAllocations(parsed.faculty_allocations || [], effectiveParsedFaculties, effectiveParsedClasses);
+        setSubjectParsedClasses(effectiveParsedClasses);
+        setSubjectParsedFaculties(effectiveParsedFaculties);
+        setSubjectParseError(effectiveParsedClasses.length ? '' : 'No class sections were detected in the Daily Attendance sheet yet.');
+        if (!subjectForm.faculty_allocations.some((entry) => entry.class_sections.length) && parsedSuggestedAllocations.length) {
+          setSubjectForm((prev) => ({
+            ...prev,
+            class_sections: normalizeClassSections(parsedSuggestedAllocations.flatMap((entry) => entry.class_sections)),
+            faculty_allocations: parsedSuggestedAllocations,
+          }));
+        }
+      } catch (error) {
+        setSubjectParseError(error instanceof Error ? error.message : 'Unable to parse Google Sheet details.');
+      }
+    }
+    const resolvedFacultyNames = splitFacultyNames(subjectForm.faculty_name || '').length
+      ? splitFacultyNames(subjectForm.faculty_name || '')
+      : effectiveParsedFaculties;
+    const resolvedAllocations = normalizeFacultyAllocations(subjectForm.faculty_allocations, resolvedFacultyNames, effectiveParsedClasses);
+    const resolvedClassSections = normalizeClassSections(resolvedAllocations.flatMap((entry) => entry.class_sections));
+
+    if (!academicStartYear || !academicEndYear || academicStartYear < 2000 || academicEndYear < academicStartYear || academicEndYear > academicStartYear + 1) {
+      setFlash({ type: 'error', message: 'Enter a valid attendance year range like 2025 and 2026, or use the same year for both fields when the sheet stays in one calendar year.' });
+      return;
+    }
+    if (!resolvedAllocations.length || !resolvedClassSections.length) {
+      setFlash({ type: 'error', message: 'Allocate at least one parsed class to the faculty members for this subject.' });
+      return;
+    }
+    const missingFacultyAllocation = resolvedAllocations.find((entry) => !entry.class_sections.length);
+    if (missingFacultyAllocation) {
+      setFlash({ type: 'error', message: `Allocate at least one class to ${missingFacultyAllocation.faculty_name}.` });
+      return;
+    }
+
+    setSubjectSaving(true);
+    try {
+      setSubjectForm((prev) => ({
+        ...prev,
+        class_sections: resolvedClassSections,
+        faculty_allocations: resolvedAllocations,
+      }));
+      if (subjectEditId) {
+        await updateSubject(subjectEditId, {
+          subject_code: subjectForm.subject_code,
+          subject_name: subjectForm.subject_name,
+          faculty_name: subjectForm.faculty_name,
+          google_sheet_link: subjectForm.google_sheet_link,
+          semester: subjectsData.selectedSemester,
+          academic_start_year: academicStartYear,
+          academic_end_year: academicEndYear,
+          class_sections: resolvedClassSections,
+          faculty_allocations: resolvedAllocations,
+        });
+        setFlash({ type: 'success', message: 'Subject updated successfully.' });
+      } else {
+        await createSubject({
+          subject_code: subjectForm.subject_code,
+          subject_name: subjectForm.subject_name,
+          faculty_name: subjectForm.faculty_name,
+          google_sheet_link: subjectForm.google_sheet_link,
+          department: subjectsData.selectedDepartment,
+          year_level: subjectsData.selectedYear,
+          semester: subjectsData.selectedSemester,
+          academic_start_year: academicStartYear,
+          academic_end_year: academicEndYear,
+          class_sections: resolvedClassSections,
+          faculty_allocations: resolvedAllocations,
+        });
+        setFlash({ type: 'success', message: 'Subject created successfully.' });
+      }
+      subjectsOverviewCacheRef.current.clear();
+      invalidateOverviewCaches(['cdp']);
+      resetSubjectDraft();
+      await loadSubjects(subjectsData.selectedDepartment, subjectsData.selectedYear, subjectsData.selectedSemester);
+      if (activeTab === 'cdp') {
+        await rebuildCdpScopeOverview({
+          department: subjectsData.selectedDepartment,
+          year: subjectsData.selectedYear,
+          semester: subjectsData.selectedSemester,
+        });
+      }
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to save subject.' });
+    } finally {
+      setSubjectSaving(false);
+    }
+  }
+
+  async function handleDeleteSubject(subject: SubjectRecord) {
+    const confirmed = await requestConfirm({
+      title: 'Delete Subject',
+      message: `Delete ${subject.subject_code} from ${subject.department} ${formatYearLevel(subject.year_level)}?`,
+      confirmLabel: 'Delete Subject',
+      confirmClassName: 'btn btn-danger btn-sm',
+      iconClassName: 'fa-trash',
+    });
+    if (!confirmed) return;
+
+    try {
+      await deleteSubject(subject.id);
+      subjectsOverviewCacheRef.current.clear();
+      invalidateOverviewCaches(['cdp']);
+      if (subjectEditId === subject.id) {
+        resetSubjectDraft();
+      }
+      setFlash({ type: 'success', message: 'Subject deleted successfully.' });
+      await loadSubjects(subject.department, subject.year_level, subject.semester);
+      if (cdpData?.selectedDepartment === subject.department && cdpData?.selectedYear === subject.year_level && cdpData?.selectedSemester === subject.semester) {
+        await rebuildCdpScopeOverview({ department: subject.department, year: subject.year_level, semester: subject.semester });
+      }
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to delete subject.' });
+    }
+  }
+
+  async function loadDashboardOverview(options?: { preferCache?: boolean }) {
+    const cacheKey = buildDashboardOverviewCacheKey();
+    const cached = options?.preferCache === false ? null : readOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', cacheKey);
+    if (cached) {
+      setDashboardData(cached.payload);
+      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+    }
+    setDashboardLoading(!cached);
     try {
       const payload = await getDashboardOverview();
+      writeOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', cacheKey, payload);
       setDashboardData(payload);
     } catch (error) {
       setDashboardData(null);
@@ -2628,6 +5275,49 @@ export default function App() {
     }
   }
 
+  function applyActivityOverviewPayload(payload: ActivityOverviewPayload) {
+    const scopeSeedKey = buildActivityScopeSeedKey(payload);
+    if (payload.prefetchedResults?.length && scopeSeedKey && !activityScopeSeededRef.current.has(scopeSeedKey)) {
+      activityScopeSeededRef.current.add(scopeSeedKey);
+      const basePayload = stripActivityPrefetchedResults(payload);
+      for (const entry of payload.prefetchedResults || []) {
+        const cacheKey = buildActivityOverviewCacheKey({
+          department: entry.department,
+          year: entry.year_level,
+          semester: entry.semester,
+          test_name: entry.test_name,
+          q: '',
+          sort: 'pending_first',
+        });
+        writeOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey, {
+          ...basePayload,
+          selectedDepartment: entry.department,
+          selectedYear: entry.year_level,
+          selectedSemester: entry.semester,
+          selectedTestName: entry.test_name,
+          searchQuery: '',
+          sortMode: 'pending_first',
+          showDepartmentPicker: false,
+          showYearPicker: false,
+          showSemesterPicker: false,
+          result: entry,
+        }, false);
+      }
+    }
+    const nextPayload = stripActivityPrefetchedResults(payload);
+    startTransition(() => {
+      setActivityData(nextPayload);
+      setActivityFilters({
+        department: nextPayload.selectedDepartment || '',
+        year: nextPayload.selectedYear ? String(nextPayload.selectedYear) : '',
+        semester: nextPayload.selectedSemester || '',
+        test_name: nextPayload.selectedTestName || '',
+        q: nextPayload.searchQuery || '',
+        sort: nextPayload.sortMode || 'pending_first',
+      });
+    });
+  }
+
   async function loadActivityOverview(filters?: {
     department?: string;
     year?: number | null;
@@ -2635,19 +5325,39 @@ export default function App() {
     test_name?: string;
     q?: string;
     sort?: string;
-  }) {
-    setActivityLoading(true);
+  }, options?: { preferCache?: boolean }) {
+    const normalizedFilters = {
+      department: String(filters?.department || '').trim().toUpperCase(),
+      year: Number(filters?.year || 0) || 0,
+      semester: String(filters?.semester || '').trim(),
+      test_name: String(filters?.test_name || '').trim(),
+      q: String(filters?.q || '').trim(),
+      sort: String(filters?.sort || '').trim() || 'pending_first',
+    };
+    const cacheKey = buildActivityOverviewCacheKey(normalizedFilters);
+    const cached = options?.preferCache === false ? null : readOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey);
+    if (cached) {
+      applyActivityOverviewPayload(cached.payload);
+      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+    }
+    setActivityLoading(!cached);
     try {
-      const payload = await getActivityOverview(filters);
-      setActivityData(payload);
-      setActivityFilters({
-        department: payload.selectedDepartment || '',
-        year: payload.selectedYear ? String(payload.selectedYear) : '',
-        semester: payload.selectedSemester || '',
-        test_name: payload.selectedTestName || '',
-        q: payload.searchQuery || '',
-        sort: payload.sortMode || 'pending_first',
+      const payload = await getActivityOverview({
+        department: normalizedFilters.department || undefined,
+        year: normalizedFilters.year || null,
+        semester: normalizedFilters.semester || undefined,
+        test_name: normalizedFilters.test_name || undefined,
+        q: normalizedFilters.q || undefined,
+        sort: normalizedFilters.sort,
       });
+      writeOverviewCacheEntry(
+        activityOverviewCacheRef,
+        'activity',
+        cacheKey,
+        payload,
+        shouldPersistActivityOverviewPayload(payload),
+      );
+      applyActivityOverviewPayload(payload);
     } catch (error) {
       setActivityData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load counselor activity.' });
@@ -2728,12 +5438,17 @@ export default function App() {
   function applyConfigPayload(payload: ConfigOverviewPayload) {
     setConfigData(payload);
     setEnvDraft(payload.envContent || '');
-    setConfigForm({
+    setConfigPromptPassword('');
+    setConfigPasswordPrompt(null);
+    const nextConfigForm = {
       enable_counselor_batch_send: toBooleanString(payload.appConfig.enable_counselor_batch_send),
       counselor_batch_send_delay_seconds: payload.appConfig.counselor_batch_send_delay_seconds || '4',
+      desktop_send_workspace_enabled: String(payload.appConfig.desktop_send_workspace_enabled || 'true').trim().toLowerCase() !== 'false',
       current_batch_year: payload.appConfig.current_batch_year || '',
       session_timeout_hours: String(Math.max(1, Math.round((Number(payload.appConfig.session_timeout || 86400) || 86400) / 3600))),
       session_heartbeat_interval: payload.appConfig.session_heartbeat_interval || '30',
+      desktop_notification_poll_seconds: payload.appConfig.desktop_notification_poll_seconds || payload.appConfig.desktop_notification_poll_minutes || '30',
+      notification_pending_threshold_days: payload.appConfig.notification_pending_threshold_days || '2',
       allow_concurrent_sessions: toBooleanString(payload.appConfig.allow_concurrent_sessions),
       max_concurrent_sessions: payload.appConfig.max_concurrent_sessions || '1',
       enable_periodic_backups: toBooleanString(payload.appConfig.enable_periodic_backups),
@@ -2747,9 +5462,13 @@ export default function App() {
       tutorial_principal_enabled: toBooleanString(payload.appConfig.tutorial_principal_enabled),
       require_otp_on_password_reset: toBooleanString(payload.appConfig.require_otp_on_password_reset),
       require_otp_on_login: toBooleanString(payload.appConfig.require_otp_on_login),
+      otp_login_lock_hours: payload.appConfig.otp_login_lock_hours || '5',
       counselor_login_otp_enabled: toBooleanString(payload.appConfig.counselor_login_otp_enabled),
       notice_copy_as_image: toBooleanString(payload.appConfig.notice_copy_as_image),
       activity_copy_as_image: toBooleanString(payload.appConfig.activity_copy_as_image),
+      notice_defaulter_copy_template: payload.appConfig.notice_defaulter_copy_template || DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE,
+      activity_defaulter_copy_template: payload.appConfig.activity_defaulter_copy_template || DEFAULT_ACTIVITY_DEFAULTER_COPY_TEMPLATE,
+      cdp_defaulter_copy_template: payload.appConfig.cdp_defaulter_copy_template || DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE,
       backup_storage_mode: payload.appConfig.backup_storage_mode || 'local',
       smtp_server: payload.appConfig.smtp_server || '',
       smtp_port: payload.appConfig.smtp_port || '587',
@@ -2765,7 +5484,9 @@ export default function App() {
       google_oauth_bulk_override_password: '',
       google_drive_refresh_token: '',
       google_drive_folder_id: payload.appConfig.google_drive_folder_id || '',
-    });
+    };
+    setConfigForm(nextConfigForm);
+    setConfigBaselineSnapshot(JSON.stringify(nextConfigForm));
   }
 
   async function loadConfigOverview() {
@@ -2802,6 +5523,7 @@ export default function App() {
       }
       const payload = await getTestDetail(testId);
       setTestDetail(payload);
+      testDetailOriginalMarksRef.current = buildTestDetailMarksSnapshot(payload);
       setTestMetaDraft({
         test_name: payload.meta.test_name || '',
         semester: payload.meta.semester || '',
@@ -2824,12 +5546,16 @@ export default function App() {
     }
   }
 
-  async function openCounselorSendPage(testId: number, mode: 'app' | 'web' = 'app') {
+  async function openCounselorSendPage(testId: number, mode: CounselorSendMode = 'app') {
+    const resolvedMode = mode;
     setActiveTab('test-database');
     setCounselorSendVerify(null);
+    setDesktopWhatsappWorkspaceStarted(false);
+    setDesktopWhatsappActiveTarget(null);
+    setDesktopReportQueueState({});
     setCounselorSendLoading(true);
     try {
-      const payload = await getCounselorSendPage(testId, mode);
+      const payload = await getCounselorSendPage(testId, resolveCounselorSendBackendMode(resolvedMode));
       const defaultOrder = buildDefaultOrderList(payload.rows);
       let storedValues: Partial<typeof counselorSendVars> = {};
       try {
@@ -2838,16 +5564,18 @@ export default function App() {
         storedValues = {};
       }
 
-      setCounselorSendPage(payload);
-      setCounselorDefaultFieldOrder(defaultOrder.map((item) => ({ ...item })));
-      setCounselorFieldOrder(defaultOrder.map((item) => ({ ...item })));
-      setCounselorSendVars({
+      const nextVars = {
         test_name: String(storedValues.test_name || payload.meta.test_name || ''),
         semester: String(storedValues.semester || payload.meta.semester || ''),
         batch_name: String(storedValues.batch_name || payload.meta.batch_name || payload.defaultBatchName || ''),
         template: String(storedValues.template || DEFAULT_REPORT_TEMPLATE),
-        sendMode: payload.sendMode || 'app',
-      });
+        sendMode: resolvedMode,
+      };
+      counselorSendVarsRef.current = nextVars;
+      setCounselorSendPage(payload);
+      setCounselorDefaultFieldOrder(defaultOrder.map((item) => ({ ...item })));
+      setCounselorFieldOrder(defaultOrder.map((item) => ({ ...item })));
+      setCounselorSendVars(nextVars);
       setCounselorBatchIndex(0);
       setCounselorBatchLastStudent('');
       setCounselorIncludeGenerated(false);
@@ -2863,15 +5591,47 @@ export default function App() {
   }
 
   function startCounselorSendFlow(testId: number, testName: string) {
+    setSendResultOpeningId(testId);
+    if (isMobileUi()) {
+      void openCounselorSendPage(testId, 'app').finally(() => setSendResultOpeningId((current) => current === testId ? null : current));
+      return;
+    }
+
+    if (embeddedWhatsappDesktopEnabled) {
+      void (async () => {
+        try {
+          const availability = await getAvailableDesktopSendTargets();
+          setDesktopWhatsappState((prev) => ({ ...prev, availableTargets: availability }));
+          if (!availability.whatsapp_desktop) {
+            setMissingWhatsappPrompt({ kind: 'report', id: testId, title: testName || 'Selected Test' });
+            return;
+          }
+          setActiveTab('test-database');
+          setTestDetail(null);
+          setCounselorSendPage(null);
+          setCounselorSendVerify(null);
+          setDesktopWhatsappWorkspaceStarted(false);
+          setDesktopWhatsappActiveTarget(null);
+          setDesktopReportQueueState({});
+          stopCounselorBatchSend();
+          await openCounselorSendPage(testId, 'app');
+        } catch (error) {
+          setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Unable to check WhatsApp Desktop availability.' });
+        } finally {
+          setSendResultOpeningId((current) => current === testId ? null : current);
+        }
+      })();
+      return;
+    }
+
     setActiveTab('test-database');
     setTestDetail(null);
     setCounselorSendPage(null);
+    setCounselorSendVerify(null);
+    setDesktopWhatsappWorkspaceStarted(false);
+    setDesktopWhatsappActiveTarget(null);
+    setDesktopReportQueueState({});
     stopCounselorBatchSend();
-
-    if (isMobileUi()) {
-      void openCounselorSendPage(testId, 'app');
-      return;
-    }
 
     setCounselorSendVerify({
       testId,
@@ -2882,16 +5642,29 @@ export default function App() {
       title: 'Checking...',
       body: 'Trying to open WhatsApp app using direct app link.',
     });
+    setSendResultOpeningId((current) => current === testId ? null : current);
   }
 
   function installWhatsappAndReturn() {
-    try {
-      window.location.href = 'ms-windows-store://pdp/?ProductId=9NKSQGP7F2NH';
-    } catch {
-      // Ignore navigation failures.
-    }
+    openExternalLink('ms-windows-store://pdp/?ProductId=9NKSQGP7F2NH');
     setActiveTab('recent-tests');
     setCounselorSendVerify(null);
+  }
+
+  function installWhatsappFromPrompt() {
+    void openExternalLink('ms-windows-store://pdp/?ProductId=9NKSQGP7F2NH');
+    setMissingWhatsappPrompt(null);
+  }
+
+  function useWhatsappWebFromPrompt() {
+    const prompt = missingWhatsappPrompt;
+    if (!prompt) return;
+    setMissingWhatsappPrompt(null);
+    if (prompt.kind === 'notice') {
+      void openCounselorNoticeSendPage(prompt.id, 'web');
+      return;
+    }
+    void openCounselorSendPage(prompt.id, 'web');
   }
 
   function stopCounselorNoticeBatchSend() {
@@ -2903,12 +5676,16 @@ export default function App() {
     }
   }
 
-  async function openCounselorNoticeSendPage(noticeId: number, mode: 'app' | 'web' = 'app') {
+  async function openCounselorNoticeSendPage(noticeId: number, mode: CounselorSendMode = 'app') {
+    const resolvedMode = mode;
     setActiveTab('notices');
     setCounselorNoticeSendVerify(null);
+    setDesktopWhatsappWorkspaceStarted(false);
+    setDesktopWhatsappActiveTarget(null);
+    setDesktopNoticeQueueState({});
     setCounselorNoticeSendLoading(true);
     try {
-      const payload = await getCounselorNoticeSendPage(noticeId, mode);
+      const payload = await getCounselorNoticeSendPage(noticeId, resolveCounselorSendBackendMode(resolvedMode));
       let storedValues: Partial<typeof counselorNoticeSendVars> = {};
       try {
         storedValues = JSON.parse(localStorage.getItem(`notice_send_vars_${payload.noticeId}`) || '{}');
@@ -2917,13 +5694,15 @@ export default function App() {
       }
 
       const defaultTemplate = String(storedValues.template || payload.defaultTemplate || '');
-      setCounselorNoticeSendPage(payload);
-      setCounselorNoticeSendVars({
+      const nextVars = {
         title: String(storedValues.title || payload.notice.title || ''),
         text: String(storedValues.text || payload.notice.message_text || ''),
         template: defaultTemplate,
-        sendMode: payload.sendMode || 'app',
-      });
+        sendMode: resolvedMode,
+      };
+      counselorNoticeSendVarsRef.current = nextVars;
+      setCounselorNoticeSendPage(payload);
+      setCounselorNoticeSendVars(nextVars);
       setCounselorNoticeAutoTemplate(payload.defaultTemplate || '');
       setCounselorNoticeTemplateEdited(Boolean(storedValues.template && storedValues.template !== payload.defaultTemplate));
       setCounselorNoticeBatchIndex(0);
@@ -2940,14 +5719,45 @@ export default function App() {
   }
 
   function startCounselorNoticeSendFlow(notice: NoticeRecord) {
-    setActiveTab('notices');
-    setCounselorNoticeSendPage(null);
-    stopCounselorNoticeBatchSend();
-
+    setSendNoticeOpeningId(notice.id);
     if (isMobileUi()) {
-      void openCounselorNoticeSendPage(notice.id, 'app');
+      void openCounselorNoticeSendPage(notice.id, 'app').finally(() => setSendNoticeOpeningId((current) => current === notice.id ? null : current));
       return;
     }
+
+    if (embeddedWhatsappDesktopEnabled) {
+      void (async () => {
+        try {
+          const availability = await getAvailableDesktopSendTargets();
+          setDesktopWhatsappState((prev) => ({ ...prev, availableTargets: availability }));
+          if (!availability.whatsapp_desktop) {
+            setMissingWhatsappPrompt({ kind: 'notice', id: notice.id, title: notice.title_display || notice.title || 'Selected Notice' });
+            return;
+          }
+          setActiveTab('notices');
+          setCounselorNoticeSendPage(null);
+          setCounselorNoticeSendVerify(null);
+          setDesktopWhatsappWorkspaceStarted(false);
+          setDesktopWhatsappActiveTarget(null);
+          setDesktopNoticeQueueState({});
+          stopCounselorNoticeBatchSend();
+          await openCounselorNoticeSendPage(notice.id, 'app');
+        } catch (error) {
+          setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Unable to check WhatsApp Desktop availability.' });
+        } finally {
+          setSendNoticeOpeningId((current) => current === notice.id ? null : current);
+        }
+      })();
+      return;
+    }
+
+    setActiveTab('notices');
+    setCounselorNoticeSendPage(null);
+    setCounselorNoticeSendVerify(null);
+    setDesktopWhatsappWorkspaceStarted(false);
+    setDesktopWhatsappActiveTarget(null);
+    setDesktopNoticeQueueState({});
+    stopCounselorNoticeBatchSend();
 
     setCounselorNoticeSendVerify({
       noticeId: notice.id,
@@ -2958,14 +5768,11 @@ export default function App() {
       title: 'Checking...',
       body: 'Trying to open WhatsApp app using direct app link.',
     });
+    setSendNoticeOpeningId((current) => current === notice.id ? null : current);
   }
 
   function installWhatsappForNoticeAndReturn() {
-    try {
-      window.location.href = 'ms-windows-store://pdp/?ProductId=9NKSQGP7F2NH';
-    } catch {
-      // Ignore navigation failures.
-    }
+    openExternalLink('ms-windows-store://pdp/?ProductId=9NKSQGP7F2NH');
     setActiveTab('notices');
     setCounselorNoticeSendVerify(null);
   }
@@ -2995,18 +5802,217 @@ export default function App() {
     formData.set('reg_no', row.reg_no);
     formData.set('action', 'send');
     formData.set('step', step);
-    formData.set('message_template', counselorSendVars.template || '');
-    formData.set('test_name', counselorSendVars.test_name || '');
-    formData.set('semester', counselorSendVars.semester || '');
-    formData.set('batch_name', counselorSendVars.batch_name || '');
+    formData.set('message_template', counselorSendVarsRef.current.template || '');
+    formData.set('test_name', counselorSendVarsRef.current.test_name || '');
+    formData.set('semester', counselorSendVarsRef.current.semester || '');
+    formData.set('batch_name', counselorSendVarsRef.current.batch_name || '');
     formData.set('section', counselorSendPage.meta.section || '');
     formData.set('department', row.department || counselorSendPage.meta.department || '');
     formData.set('ordered_fields', JSON.stringify(getOrderedFieldPayload()));
-    formData.set('send_mode', isMobileUi() ? 'app' : counselorSendVars.sendMode);
+    formData.set('send_mode', isMobileUi() ? 'app' : resolveCounselorSendBackendMode(counselorSendVarsRef.current.sendMode));
     for (const [key, value] of Object.entries(extra)) {
       formData.set(key, value);
     }
     return formData;
+  }
+
+  function getDesktopWorkspaceTargetPreference() {
+    return getDesktopWorkspaceLaunchTarget();
+  }
+
+  function scrollDesktopWorkspaceIntoView(kind: 'report' | 'notice') {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const queueShell = kind === 'report' ? desktopReportQueueShellRef.current : desktopNoticeQueueShellRef.current;
+        contentAreaRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        mainContentRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        if (queueShell) {
+          queueShell.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        }
+      });
+    });
+  }
+
+  async function runDesktopWorkspaceTransition<T>(
+    phase: 'enter' | 'exit',
+    action: () => Promise<T>,
+  ) {
+    setDesktopWhatsappWorkspaceTransition(phase);
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    });
+    const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    try {
+      return await action();
+    } finally {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const remaining = Math.max(0, 260 - (now - startedAt));
+      if (remaining > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, remaining));
+      }
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            setDesktopWhatsappWorkspaceTransition(null);
+            resolve();
+          });
+        });
+      });
+    }
+  }
+
+  async function startDesktopWhatsappWorkspace(kind: 'report' | 'notice') {
+    if (!embeddedWhatsappDesktopFlowEnabled) return false;
+    const sendMode = kind === 'report' ? counselorSendVarsRef.current.sendMode : counselorNoticeSendVarsRef.current.sendMode;
+    if (kind === 'report') {
+      setCounselorSendVars((prev) => ({ ...prev, ...counselorSendVarsRef.current }));
+    } else {
+      setCounselorNoticeSendVars((prev) => ({ ...prev, ...counselorNoticeSendVarsRef.current }));
+    }
+    setDesktopWhatsappWorkspaceBusy(true);
+    setDesktopWhatsappWorkspaceExiting(false);
+    setDesktopWhatsappActiveTarget(null);
+    setDesktopWhatsappLoadingRow(null);
+    try {
+      const preopened = await preopenDesktopSendTarget(sendMode);
+      setDesktopWhatsappWorkspaceReady(true);
+      setDesktopWhatsappWorkspaceStarted(true);
+      setDesktopWhatsappState((prev) => ({
+        ...prev,
+        supported: true,
+        active: true,
+        loading: false,
+        preferredTarget: preopened?.target || getDesktopWorkspaceTargetPreference(),
+        preferredTargetLabel: preopened?.label || (sendMode === 'web' ? 'Google Chrome' : 'WhatsApp Desktop'),
+        error: '',
+      }));
+      scrollDesktopWorkspaceIntoView(kind);
+      return true;
+    } catch (error) {
+      setDesktopWhatsappWorkspaceReady(false);
+      setDesktopWhatsappWorkspaceStarted(false);
+      setDesktopWhatsappState((prev) => ({
+        ...prev,
+        active: false,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Unable to open WhatsApp before starting workflow.',
+      }));
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Unable to open WhatsApp before starting workflow.' });
+      return false;
+    } finally {
+      setDesktopWhatsappWorkspaceBusy(false);
+    }
+  }
+
+  async function hideDesktopWhatsappWorkspace() {
+    return runDesktopWorkspaceTransition('exit', async () => {
+      const activeKind = desktopWhatsappActiveTarget?.kind || (counselorSendPage ? 'report' : 'notice');
+      setDesktopWhatsappWorkspaceExiting(true);
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
+      setDesktopWhatsappWorkspaceStarted(false);
+      setDesktopWhatsappActiveTarget(null);
+      setDesktopWhatsappState(await hideDesktopSendWorkspace(getDesktopWorkspaceTargetPreference()));
+      scrollDesktopWorkspaceIntoView(activeKind);
+      setDesktopWhatsappWorkspaceExiting(false);
+    });
+  }
+
+  async function stopDesktopWhatsappWorkspaceImmediate() {
+    setDesktopWhatsappWorkspaceBusy(true);
+    try {
+      setDesktopWhatsappWorkspaceExiting(false);
+      setDesktopWhatsappWorkspaceReady(false);
+      setDesktopWhatsappWorkspaceStarted(false);
+      setDesktopWhatsappActiveTarget(null);
+      setDesktopWhatsappLoadingRow(null);
+      setDesktopWhatsappState(await exitDesktopSendWorkspace(getDesktopWorkspaceTargetPreference()));
+    } finally {
+      setDesktopWhatsappWorkspaceBusy(false);
+    }
+  }
+
+  async function stopDesktopWhatsappWorkspace() {
+    return runDesktopWorkspaceTransition('exit', async () => {
+      await stopDesktopWhatsappWorkspaceImmediate();
+    });
+  }
+
+  async function handleCounselorSendModeChange(nextMode: CounselorSendMode) {
+    if (nextMode !== 'app' && desktopWhatsappWorkspaceReady) {
+      await stopDesktopWhatsappWorkspaceImmediate();
+    }
+    counselorSendVarsRef.current = { ...counselorSendVarsRef.current, sendMode: nextMode };
+    setCounselorSendVars((prev) => ({ ...prev, sendMode: nextMode }));
+  }
+
+  async function handleCounselorNoticeSendModeChange(nextMode: CounselorSendMode) {
+    if (nextMode !== 'app' && desktopWhatsappWorkspaceReady) {
+      await stopDesktopWhatsappWorkspaceImmediate();
+    }
+    counselorNoticeSendVarsRef.current = { ...counselorNoticeSendVarsRef.current, sendMode: nextMode };
+    setCounselorNoticeSendVars((prev) => ({ ...prev, sendMode: nextMode }));
+  }
+
+  async function openPreparedDesktopTarget(rawLink: string, mode: CounselorSendMode = 'app') {
+    const appLink = resolveWaLinkByMode(rawLink, 'app');
+    const webLink = resolveWaLinkByMode(rawLink, 'web');
+    const targetPreference: DesktopSendTargetPreference = mode === 'web' ? 'chrome' : getDesktopWorkspaceTargetPreference();
+    const result = await openExternalSendTarget({
+      preference: targetPreference,
+      appUrl: appLink,
+      webUrl: webLink,
+      reuseBrowserSession: mode === 'web',
+    });
+    setDesktopWhatsappState((prev) => ({
+      ...prev,
+      preferredTarget: result.target,
+      preferredTargetLabel: result.label,
+      availableTargets: result.availability,
+      error: result.error || '',
+    }));
+    if (!result.success) {
+      throw new Error(result.error || 'No supported external send target could be opened.');
+    }
+    return result;
+  }
+
+  async function preopenDesktopSendTarget(mode: CounselorSendMode) {
+    if (mode !== 'app' && mode !== 'web') return null;
+    const verificationWebLink = WHATSAPP_VERIFICATION_WEB_LINK;
+    const resolvedVerificationAppLink = resolveWaLinkByMode(verificationWebLink, 'app');
+    const verificationAppLink = /^whatsapp:\/\//i.test(resolvedVerificationAppLink) ? resolvedVerificationAppLink : 'whatsapp://send';
+    if (mode === 'app') {
+      void openExternalLink(verificationAppLink || 'whatsapp://send');
+      return {
+        success: true,
+        target: 'whatsapp_desktop' as DesktopSendTargetPreference,
+        label: 'WhatsApp Desktop',
+        availability: desktopWhatsappState.availableTargets,
+      };
+    }
+    const result = await openExternalSendTarget({
+      preference: 'chrome',
+      appUrl: verificationAppLink || 'whatsapp://send',
+      webUrl: verificationWebLink,
+      reuseBrowserSession: true,
+    });
+    setDesktopWhatsappState((prev) => ({
+      ...prev,
+      preferredTarget: result.target,
+      preferredTargetLabel: result.label,
+      availableTargets: result.availability,
+      error: result.error || '',
+    }));
+    if (!result.success) {
+      throw new Error(result.error || 'No supported WhatsApp target could be opened.');
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    return result;
   }
 
   async function prepareSingleCounselorDelivery(row: CounselorSendReportRow) {
@@ -3026,6 +6032,10 @@ export default function App() {
     );
   }
 
+  function setDesktopReportRowState(regNo: string, state: DesktopSendQueueState) {
+    setDesktopReportQueueState((prev) => ({ ...prev, [regNo]: state }));
+  }
+
   async function handleCounselorSendSingle(row: CounselorSendReportRow) {
     const currentSendPage = counselorSendPage;
     if (!currentSendPage) return false;
@@ -3035,19 +6045,53 @@ export default function App() {
         throw new Error('Parent phone number is missing or invalid for this student.');
       }
 
-      const effectiveSendMode = isMobileUi() ? 'app' : counselorSendVars.sendMode;
-      if (effectiveSendMode === 'web') {
+      const effectiveSendMode: CounselorSendMode = isMobileUi() ? 'app' : counselorSendVarsRef.current.sendMode;
+      if ((effectiveSendMode === 'app' || effectiveSendMode === 'web' || effectiveSendMode === 'embed') && embeddedWhatsappDesktopFlowEnabled && desktopWhatsappWorkspaceStarted) {
+        setDesktopWhatsappActiveTarget({
+          kind: 'report',
+          regNo: row.reg_no,
+          studentName: row.student_name,
+          deliveryToken: prepared.deliveryToken,
+          waLink: prepared.waLink,
+        });
+        setDesktopReportRowState(row.reg_no, 'opened');
+        await openPreparedDesktopTarget(prepared.waLink, effectiveSendMode);
         await confirmSingleCounselorDelivery(row, prepared.deliveryToken, 'sent');
         markCounselorRowGenerated(row.reg_no);
-        saveSendReturnState({
-          kind: 'report',
-          id: currentSendPage.testId,
-          mode: 'web',
-          timestamp: Date.now(),
-        });
-        if (!openWhatsAppWebDirect(prepared.waLink)) {
-          throw new Error('Unable to open WhatsApp Web link.');
+        setDesktopReportRowState(row.reg_no, 'sent');
+        return true;
+      }
+      if (effectiveSendMode === 'web' || effectiveSendMode === 'embed') {
+        if (effectiveSendMode === 'embed' && embeddedWhatsappDesktopFlowEnabled) {
+          if (!desktopWhatsappWorkspaceStarted) {
+            throw new Error('Start the desktop workspace before selecting a student.');
+          }
+          setDesktopWhatsappActiveTarget({
+            kind: 'report',
+            regNo: row.reg_no,
+            studentName: row.student_name,
+            deliveryToken: prepared.deliveryToken,
+            waLink: prepared.waLink,
+          });
+          setDesktopReportRowState(row.reg_no, 'opened');
+          await openPreparedDesktopTarget(prepared.waLink);
+          await confirmSingleCounselorDelivery(row, prepared.deliveryToken, 'sent');
+          markCounselorRowGenerated(row.reg_no);
+          setDesktopReportRowState(row.reg_no, 'sent');
+          return true;
+        } else {
+          saveSendReturnState({
+            kind: 'report',
+            id: currentSendPage.testId,
+            mode: 'web',
+            timestamp: Date.now(),
+          });
+          if (!openWhatsAppWebDirect(prepared.waLink)) {
+            throw new Error('Unable to open WhatsApp Web link.');
+          }
         }
+        await confirmSingleCounselorDelivery(row, prepared.deliveryToken, 'sent');
+        markCounselorRowGenerated(row.reg_no);
         return true;
       }
 
@@ -3060,6 +6104,44 @@ export default function App() {
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : `Unable to send for ${row.reg_no}.` });
       return false;
+    }
+  }
+
+  async function confirmDesktopReportDelivery(outcome: 'sent' | 'failed' | 'skipped') {
+    const activeTarget = desktopWhatsappActiveTarget;
+    const currentPage = counselorSendPage;
+    if (!activeTarget || activeTarget.kind !== 'report' || !currentPage) return;
+    const row = currentPage.rows.find((item) => item.reg_no === activeTarget.regNo);
+    if (!row) return;
+    try {
+      await confirmSingleCounselorDelivery(row, activeTarget.deliveryToken, outcome);
+      if (outcome === 'sent') {
+        markCounselorRowGenerated(activeTarget.regNo);
+        setDesktopReportRowState(activeTarget.regNo, 'sent');
+      } else {
+        setDesktopReportRowState(activeTarget.regNo, outcome);
+      }
+      setDesktopWhatsappActiveTarget(null);
+      if (outcome === 'sent') {
+        setFlash({ type: 'success', message: `Marked ${activeTarget.studentName} as sent.` });
+      } else if (outcome === 'failed') {
+        setFlash({ type: 'warning', message: `Marked ${activeTarget.studentName} as failed. You can reopen the message anytime.` });
+      } else {
+        setFlash({ type: 'info', message: `Skipped ${activeTarget.studentName} for now.` });
+      }
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to update delivery state.' });
+    }
+  }
+
+  function moveToNextDesktopReportRow() {
+    const currentPage = counselorSendPage;
+    if (!currentPage) return;
+    const nextRow = currentPage.rows.find((row) => row.status !== 'Generated' && row.reg_no !== desktopWhatsappActiveTarget?.regNo);
+    if (nextRow) {
+      void handleCounselorSendSingle(nextRow);
+    } else {
+      setFlash({ type: 'info', message: 'No more pending students in this queue.' });
     }
   }
 
@@ -3107,6 +6189,10 @@ export default function App() {
 
   async function startCounselorBatchSend() {
     if (!counselorSendPage) return;
+    if (embeddedWhatsappDesktopFlowEnabled) {
+      setFlash({ type: 'info', message: 'Desktop send workspace uses one-at-a-time sending only. Batch send is disabled here.' });
+      return;
+    }
     const queue = counselorSendPage.rows.filter((row) => counselorIncludeGenerated || row.status !== 'Generated');
     if (!queue.length) {
       setFlash({ type: 'warning', message: 'No students found to batch send.' });
@@ -3130,6 +6216,22 @@ export default function App() {
     void processNextCounselorBatchItem();
   }
 
+  async function handleCounselorDesktopQueuePick(row: CounselorSendReportRow) {
+    setDesktopWhatsappLoadingRow(row.reg_no);
+    if (!desktopWhatsappWorkspaceStarted) {
+      const started = await startDesktopWhatsappWorkspace('report');
+      if (!started) {
+        setDesktopWhatsappLoadingRow(null);
+        return;
+      }
+    }
+    try {
+      await handleCounselorSendSingle(row);
+    } finally {
+      setDesktopWhatsappLoadingRow(null);
+    }
+  }
+
   function markCounselorNoticeRowGenerated(regNo: string) {
     setCounselorNoticeSendPage((prev) => {
       if (!prev) return prev;
@@ -3147,10 +6249,10 @@ export default function App() {
     formData.set('reg_no', row.reg_no);
     formData.set('action', 'send');
     formData.set('step', step);
-    formData.set('message_template', counselorNoticeSendVars.template || '');
-    formData.set('notice_title', counselorNoticeSendVars.title || '');
-    formData.set('notice_text', counselorNoticeSendVars.text || '');
-    formData.set('send_mode', isMobileUi() ? 'app' : counselorNoticeSendVars.sendMode);
+    formData.set('message_template', counselorNoticeSendVarsRef.current.template || '');
+    formData.set('notice_title', counselorNoticeSendVarsRef.current.title || '');
+    formData.set('notice_text', counselorNoticeSendVarsRef.current.text || '');
+    formData.set('send_mode', isMobileUi() ? 'app' : resolveCounselorSendBackendMode(counselorNoticeSendVarsRef.current.sendMode));
     for (const [key, value] of Object.entries(extra)) {
       formData.set(key, value);
     }
@@ -3174,6 +6276,10 @@ export default function App() {
     );
   }
 
+  function setDesktopNoticeRowState(regNo: string, state: DesktopSendQueueState) {
+    setDesktopNoticeQueueState((prev) => ({ ...prev, [regNo]: state }));
+  }
+
   async function handleCounselorNoticeSendSingle(row: CounselorSendNoticeRow) {
     const currentSendPage = counselorNoticeSendPage;
     if (!currentSendPage) return false;
@@ -3183,19 +6289,53 @@ export default function App() {
         throw new Error('Parent phone number is missing or invalid for this student.');
       }
 
-      const effectiveSendMode = isMobileUi() ? 'app' : counselorNoticeSendVars.sendMode;
-      if (effectiveSendMode === 'web') {
+      const effectiveSendMode: CounselorSendMode = isMobileUi() ? 'app' : counselorNoticeSendVarsRef.current.sendMode;
+      if ((effectiveSendMode === 'app' || effectiveSendMode === 'web' || effectiveSendMode === 'embed') && embeddedWhatsappDesktopFlowEnabled && desktopWhatsappWorkspaceStarted) {
+        setDesktopWhatsappActiveTarget({
+          kind: 'notice',
+          regNo: row.reg_no,
+          studentName: row.student_name,
+          deliveryToken: prepared.deliveryToken,
+          waLink: prepared.waLink,
+        });
+        setDesktopNoticeRowState(row.reg_no, 'opened');
+        await openPreparedDesktopTarget(prepared.waLink, effectiveSendMode);
         await confirmSingleCounselorNoticeDelivery(row, prepared.deliveryToken, 'sent');
         markCounselorNoticeRowGenerated(row.reg_no);
-        saveSendReturnState({
-          kind: 'notice',
-          id: currentSendPage.noticeId,
-          mode: 'web',
-          timestamp: Date.now(),
-        });
-        if (!openWhatsAppWebDirect(prepared.waLink)) {
-          throw new Error('Unable to open WhatsApp Web link.');
+        setDesktopNoticeRowState(row.reg_no, 'sent');
+        return true;
+      }
+      if (effectiveSendMode === 'web' || effectiveSendMode === 'embed') {
+        if (effectiveSendMode === 'embed' && embeddedWhatsappDesktopFlowEnabled) {
+          if (!desktopWhatsappWorkspaceStarted) {
+            throw new Error('Start the desktop workspace before selecting a student.');
+          }
+          setDesktopWhatsappActiveTarget({
+            kind: 'notice',
+            regNo: row.reg_no,
+            studentName: row.student_name,
+            deliveryToken: prepared.deliveryToken,
+            waLink: prepared.waLink,
+          });
+          setDesktopNoticeRowState(row.reg_no, 'opened');
+          await openPreparedDesktopTarget(prepared.waLink);
+          await confirmSingleCounselorNoticeDelivery(row, prepared.deliveryToken, 'sent');
+          markCounselorNoticeRowGenerated(row.reg_no);
+          setDesktopNoticeRowState(row.reg_no, 'sent');
+          return true;
+        } else {
+          saveSendReturnState({
+            kind: 'notice',
+            id: currentSendPage.noticeId,
+            mode: 'web',
+            timestamp: Date.now(),
+          });
+          if (!openWhatsAppWebDirect(prepared.waLink)) {
+            throw new Error('Unable to open WhatsApp Web link.');
+          }
         }
+        await confirmSingleCounselorNoticeDelivery(row, prepared.deliveryToken, 'sent');
+        markCounselorNoticeRowGenerated(row.reg_no);
         return true;
       }
 
@@ -3208,6 +6348,55 @@ export default function App() {
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : `Unable to send notice for ${row.reg_no}.` });
       return false;
+    }
+  }
+
+  async function confirmDesktopNoticeDelivery(outcome: 'sent' | 'failed' | 'skipped') {
+    const activeTarget = desktopWhatsappActiveTarget;
+    const currentPage = counselorNoticeSendPage;
+    if (!activeTarget || activeTarget.kind !== 'notice' || !currentPage) return;
+    const row = currentPage.rows.find((item) => item.reg_no === activeTarget.regNo);
+    if (!row) return;
+    try {
+      await confirmSingleCounselorNoticeDelivery(row, activeTarget.deliveryToken, outcome);
+      if (outcome === 'sent') {
+        markCounselorNoticeRowGenerated(activeTarget.regNo);
+        setDesktopNoticeRowState(activeTarget.regNo, 'sent');
+      } else {
+        setDesktopNoticeRowState(activeTarget.regNo, outcome);
+      }
+      setDesktopWhatsappActiveTarget(null);
+      if (outcome === 'sent') {
+        setFlash({ type: 'success', message: `Marked ${activeTarget.studentName} as sent.` });
+      } else if (outcome === 'failed') {
+        setFlash({ type: 'warning', message: `Marked ${activeTarget.studentName} as failed. You can reopen the message anytime.` });
+      } else {
+        setFlash({ type: 'info', message: `Skipped ${activeTarget.studentName} for now.` });
+      }
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to update delivery state.' });
+    }
+  }
+
+  async function reopenDesktopActiveTarget() {
+    const activeTarget = desktopWhatsappActiveTarget;
+    if (!activeTarget?.waLink) return;
+    try {
+      await openPreparedDesktopTarget(activeTarget.waLink);
+      setFlash({ type: 'info', message: `Reopened ${activeTarget.studentName} in ${desktopWhatsappState.preferredTargetLabel || 'the selected send target'}.` });
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Unable to reopen the selected send target.' });
+    }
+  }
+
+  function moveToNextDesktopNoticeRow() {
+    const currentPage = counselorNoticeSendPage;
+    if (!currentPage) return;
+    const nextRow = currentPage.rows.find((row) => row.status !== 'Generated' && row.reg_no !== desktopWhatsappActiveTarget?.regNo);
+    if (nextRow) {
+      void handleCounselorNoticeSendSingle(nextRow);
+    } else {
+      setFlash({ type: 'info', message: 'No more pending students in this queue.' });
     }
   }
 
@@ -3243,6 +6432,10 @@ export default function App() {
 
   async function startCounselorNoticeBatchSend() {
     if (!counselorNoticeSendPage) return;
+    if (embeddedWhatsappDesktopFlowEnabled) {
+      setFlash({ type: 'info', message: 'Desktop send workspace uses one-at-a-time sending only. Batch send is disabled here.' });
+      return;
+    }
     const queue = counselorNoticeSendPage.rows.filter((row) => counselorNoticeIncludeGenerated || row.status !== 'Generated');
     if (!queue.length) {
       setFlash({ type: 'warning', message: 'No students found to batch send.' });
@@ -3266,6 +6459,22 @@ export default function App() {
     void processNextCounselorNoticeBatchItem();
   }
 
+  async function handleCounselorNoticeDesktopQueuePick(row: CounselorSendNoticeRow) {
+    setDesktopWhatsappLoadingRow(row.reg_no);
+    if (!desktopWhatsappWorkspaceStarted) {
+      const started = await startDesktopWhatsappWorkspace('notice');
+      if (!started) {
+        setDesktopWhatsappLoadingRow(null);
+        return;
+      }
+    }
+    try {
+      await handleCounselorNoticeSendSingle(row);
+    } finally {
+      setDesktopWhatsappLoadingRow(null);
+    }
+  }
+
   function updateLocalMark(regNo: string, subject: string, value: string) {
     setTestDetail((prev) => {
       if (!prev) return prev;
@@ -3280,16 +6489,51 @@ export default function App() {
     });
   }
 
+  function isTestDetailRowDirty(regNo: string) {
+    if (!testDetail) return false;
+    const student = testDetail.students.find((item) => item.reg_no === regNo);
+    if (!student) return false;
+    const baseline = testDetailOriginalMarksRef.current[regNo] || {};
+    return testDetail.subjects.some((subject) => String(student.marks[subject] || '').trim() !== String(baseline[subject] || '').trim());
+  }
+
   async function handleSaveMeta(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!testDetail) return;
+    const nextTestName = String(testMetaDraft.test_name || testDetail.meta.test_name || '').trim().toUpperCase();
+    const nextSemester = String(testMetaDraft.semester || testDetail.meta.semester || '').trim();
+    const nextBatchName = String(testMetaDraft.batch_name || testDetail.meta.batch_name || '').trim();
+    const conflictingTest = (reportsData?.tests || []).find((entry) =>
+      entry.id !== testDetail.testId
+      && String(entry.department || '').trim().toUpperCase() === String(testDetail.meta.department || '').trim().toUpperCase()
+      && Number(entry.year_level || 1) === Number(testDetail.meta.year_level || 1)
+      && String(entry.test_name || '').trim().toUpperCase() === nextTestName
+      && String(entry.semester || '').trim() === nextSemester
+      && String(entry.batch_name || '').trim().toLowerCase() === nextBatchName.toLowerCase(),
+    );
+    let overwriteExisting = false;
+    if (conflictingTest) {
+      const confirmed = await requestConfirm({
+        title: 'Overwrite Existing Test',
+        message: `This will overwrite the existing ${nextTestName} in Semester ${nextSemester}. Continue?`,
+        confirmLabel: 'Overwrite',
+        confirmClassName: 'btn btn-danger btn-sm',
+        iconClassName: 'fas fa-triangle-exclamation',
+      });
+      if (!confirmed) return;
+      overwriteExisting = true;
+    }
     setSavingMeta(true);
     try {
-      await saveTestMeta(testDetail.testId, testMetaDraft);
-      setFlash({ type: 'success', message: 'Test metadata updated successfully.' });
+      await saveTestMeta(testDetail.testId, {
+        ...testMetaDraft,
+        overwrite_existing: overwriteExisting,
+      });
+      invalidateOverviewCaches(['reports', 'dashboard', 'activity', 'activity-scope']);
+      setFlash({ type: 'success', message: overwriteExisting ? 'Test metadata updated and existing target test overwritten successfully.' : 'Test metadata updated successfully.' });
       await loadTestDetail(testDetail.testId);
       if (reportsData?.selectedDepartment && reportsData.selectedYear) {
-        await loadReports(reportsData.selectedDepartment, reportsData.selectedYear);
+        await loadReports(reportsData.selectedDepartment, reportsData.selectedYear, { preferCache: false });
       }
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to update test metadata.' });
@@ -3307,6 +6551,10 @@ export default function App() {
         reg_no: regNo,
         marks: Object.fromEntries(testDetail.subjects.map((subject) => [subject, student.marks[subject] || ''])),
       });
+      testDetailOriginalMarksRef.current[regNo] = Object.fromEntries(
+        testDetail.subjects.map((subject) => [subject, String(student.marks[subject] || '').trim()]),
+      );
+      invalidateOverviewCaches(['dashboard', 'activity', 'activity-scope']);
       setFlash({ type: 'success', message: `Marks updated for ${regNo}.` });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : `Failed to update ${regNo}.` });
@@ -3326,6 +6574,7 @@ export default function App() {
     setSavingMarks(true);
     let successCount = 0;
     let failCount = 0;
+    const savedRegNos: string[] = [];
     for (const student of testDetail.students) {
       try {
         await saveTestMarks(testDetail.testId, {
@@ -3333,11 +6582,20 @@ export default function App() {
           marks: Object.fromEntries(testDetail.subjects.map((subject) => [subject, student.marks[subject] || ''])),
         });
         successCount += 1;
+        savedRegNos.push(student.reg_no);
       } catch {
         failCount += 1;
       }
     }
     setSavingMarks(false);
+    for (const regNo of savedRegNos) {
+      const student = testDetail.students.find((item) => item.reg_no === regNo);
+      if (!student) continue;
+      testDetailOriginalMarksRef.current[regNo] = Object.fromEntries(
+        testDetail.subjects.map((subject) => [subject, String(student.marks[subject] || '').trim()]),
+      );
+    }
+    invalidateOverviewCaches(['dashboard', 'activity', 'activity-scope']);
     if (failCount === 0) {
       setFlash({ type: 'success', message: `Saved marks for ${successCount} students.` });
     } else {
@@ -3348,9 +6606,18 @@ export default function App() {
   async function handleToggleTestBlock(test: ReportTestRecord) {
     try {
       await toggleTestBlock(test.id);
+      setReportsData((prev) => (
+        prev
+          ? {
+              ...prev,
+              tests: prev.tests.map((entry) => (entry.id === test.id ? { ...entry, is_blocked: entry.is_blocked ? 0 : 1 } : entry)),
+            }
+          : prev
+      ));
+      invalidateOverviewCaches(['reports', 'dashboard', 'activity', 'activity-scope']);
       setFlash({ type: 'success', message: test.is_blocked ? 'Test unblocked.' : 'Test blocked.' });
       if (reportsData?.selectedDepartment && reportsData.selectedYear) {
-        await loadReports(reportsData.selectedDepartment, reportsData.selectedYear);
+        await loadReports(reportsData.selectedDepartment, reportsData.selectedYear, { preferCache: false });
       }
       if (testDetail?.testId === test.id) {
         await loadTestDetail(test.id);
@@ -3371,12 +6638,21 @@ export default function App() {
     if (!confirmed) return;
     try {
       await deleteReportTest(test.id);
+      setReportsData((prev) => (
+        prev
+          ? {
+              ...prev,
+              tests: prev.tests.filter((entry) => entry.id !== test.id),
+            }
+          : prev
+      ));
+      invalidateOverviewCaches(['reports', 'dashboard', 'activity', 'activity-scope']);
       setFlash({ type: 'success', message: 'Test deleted successfully.' });
       if (testDetail?.testId === test.id) {
         setTestDetail(null);
       }
       if (reportsData?.selectedDepartment && reportsData.selectedYear) {
-        await loadReports(reportsData.selectedDepartment, reportsData.selectedYear);
+        await loadReports(reportsData.selectedDepartment, reportsData.selectedYear, { preferCache: false });
       }
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to delete test.' });
@@ -3386,6 +6662,14 @@ export default function App() {
   async function handleUploadReport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!reportsData?.selectedDepartment || !reportsData.selectedYear) return;
+    if (!reportUploadDraft.test_name) {
+      setFlash({ type: 'error', message: 'Select a test name before uploading the marksheet.' });
+      return;
+    }
+    if (!reportUploadDraft.semester) {
+      setFlash({ type: 'error', message: 'Select a semester before uploading the marksheet.' });
+      return;
+    }
     if (!reportUploadDraft.file) {
       setFlash({ type: 'error', message: 'Please choose a marks file to upload.' });
       return;
@@ -3394,15 +6678,15 @@ export default function App() {
     setUploadingReport(true);
     try {
       const batchName = reportUploadDraft.batch_name || getDefaultBatchNameForYearLevel(reportsData.selectedYear, bootstrap?.appConfig || null);
-      const formData = new FormData();
+      const formData = new FormData(event.currentTarget);
       formData.set('marks_file', reportUploadDraft.file);
-      formData.set('department', reportsData.selectedDepartment);
+      formData.set('department', String(reportsData.selectedDepartment || '').trim().toUpperCase());
       formData.set('year_level', String(reportsData.selectedYear));
-      formData.set('semester', reportUploadDraft.semester);
+      formData.set('semester', String(reportUploadDraft.semester || '1'));
       formData.set('batch_name', batchName);
-      formData.set('section', reportUploadDraft.section);
-      formData.set('test_name', reportUploadDraft.test_name);
-      formData.set('upload_mode', reportUploadDraft.upload_mode);
+      formData.set('section', String(reportUploadDraft.section || '').trim());
+      formData.set('test_name', String(reportUploadDraft.test_name || '').trim());
+      formData.set('upload_mode', reportUploadDraft.upload_mode === 'replace' ? 'replace' : 'new');
 
       const result = await uploadMarksheet(formData);
       setFlash({
@@ -3411,11 +6695,12 @@ export default function App() {
           ? `${result.message} Parser warnings: ${result.parserWarnings.join(' | ')}`
           : result.message,
       });
-      await loadReports(reportsData.selectedDepartment, reportsData.selectedYear);
+      invalidateOverviewCaches(['reports', 'dashboard', 'activity', 'activity-scope']);
+      await loadReports(reportsData.selectedDepartment, reportsData.selectedYear, { preferCache: false });
       await loadTestDetail(result.testId);
       setReportUploadDraft({
         test_name: '',
-        semester: '',
+        semester: '1',
         batch_name: '',
         section: '',
         upload_mode: 'new',
@@ -3458,16 +6743,35 @@ export default function App() {
     event.preventDefault();
     setSavingNotice(true);
     try {
-      const formData = new FormData();
-      if (noticeForm.notice_id) formData.set('notice_id', String(noticeForm.notice_id));
-      formData.set('notice_title', noticeForm.notice_title);
-      formData.set('notice_message_text', noticeForm.notice_message_text);
-      if (noticeForm.notice_send_to_all) formData.set('notice_send_to_all', 'on');
-      for (const scopeValue of noticeForm.scope_pairs) formData.append('notice_scope_pairs', scopeValue);
-      for (const attachmentId of noticeForm.remove_attachment_ids) formData.append('remove_attachment_ids', String(attachmentId));
-      for (const file of noticeForm.files) formData.append('notice_attachments', file);
+      const buildNoticeFormData = (options?: { noticeId?: number | null; deferAttachments?: boolean; includeRemovals?: boolean }) => {
+        const formData = new FormData();
+        const resolvedNoticeId = Number(options?.noticeId || noticeForm.notice_id || 0) || 0;
+        if (resolvedNoticeId) formData.set('notice_id', String(resolvedNoticeId));
+        formData.set('notice_title', noticeForm.notice_title);
+        formData.set('notice_message_text', noticeForm.notice_message_text);
+        if (noticeForm.notice_send_to_all) formData.set('notice_send_to_all', 'on');
+        if (options?.deferAttachments) formData.set('defer_attachments', '1');
+        for (const scopeValue of noticeForm.scope_pairs) formData.append('notice_scope_pairs', scopeValue);
+        if (options?.includeRemovals !== false) {
+          for (const attachmentId of noticeForm.remove_attachment_ids) formData.append('remove_attachment_ids', String(attachmentId));
+        }
+        return formData;
+      };
 
-      await saveNotice(formData);
+      let targetNoticeId = Number(noticeForm.notice_id || 0) || 0;
+      const pendingFiles = [...noticeForm.files];
+
+      if (!targetNoticeId) {
+        const result = await saveNotice(buildNoticeFormData({ deferAttachments: pendingFiles.length > 0 }));
+        targetNoticeId = Number(result.noticeId || 0) || 0;
+      } else {
+        await saveNotice(buildNoticeFormData({ noticeId: targetNoticeId }));
+      }
+
+      for (const file of pendingFiles) {
+        await uploadNoticeAttachmentInChunks(targetNoticeId, file);
+      }
+
       setFlash({ type: 'success', message: noticeForm.notice_id ? 'Notice updated successfully.' : 'Notice created successfully.' });
       await loadNotices({
         department: noticeFilters.department || undefined,
@@ -3534,21 +6838,41 @@ export default function App() {
   }
 
   function resetUserCreateForm(nextRole?: Role) {
-    setUserCreateForm({
+    const resolvedRole = nextRole || userAssignableRoles[0] || (currentUser?.role === 'deo' ? 'counselor' : 'counselor');
+    const nextState = {
       name: '',
       email: '',
       password: '',
       confirm_password: '',
-      role: nextRole || userAssignableRoles[0] || (currentUser?.role === 'deo' ? 'counselor' : 'counselor'),
+      role: resolvedRole,
+      designation: resolvedRole === 'principal' ? 'Higher Official' : '',
       department: '',
       year_level: '1',
       max_students: '30',
       scope_pairs: [],
-    });
+    };
+    setUserCreateForm(nextState);
+    try {
+      window.localStorage.removeItem(USER_CREATE_DRAFT_STORAGE_KEY);
+    } catch {
+      // Ignore localStorage cleanup failures.
+    }
+  }
+
+  function handleClearUserCreateDraft() {
+    resetUserCreateForm();
   }
 
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!userCreateEmailDomainValid) {
+      setFlash({ type: 'error', message: `Only ${managedUserDomain} email accounts are allowed.` });
+      return;
+    }
+    if (userCreateEmailExists && !userCreateAvailableRoles.length) {
+      setFlash({ type: 'error', message: 'This email already has all assignable roles.' });
+      return;
+    }
     setUserSaving(true);
     try {
       await createUserAccount({
@@ -3558,7 +6882,7 @@ export default function App() {
       });
       setFlash({ type: 'success', message: 'User created successfully.' });
       resetUserCreateForm();
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to create user.' });
     } finally {
@@ -3568,11 +6892,12 @@ export default function App() {
 
   function openEditUserModal(user: UserRecord) {
     setUserEditDraft({
-      original_email: user.email,
+      original_email: user.account_email || user.email,
       name: user.name,
       email: user.email,
       password: '',
       role: user.role,
+      designation: user.role === 'principal' ? String(user.designation || '').trim() || 'Higher Official' : '',
       department: user.department || '',
       year_level: String(user.year_level || 1),
       max_students: String(user.max_students || 30),
@@ -3583,6 +6908,8 @@ export default function App() {
   async function handleSaveUserEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!userEditDraft) return;
+    const originalEmail = String(userEditDraft.original_email || '').trim().toLowerCase();
+    const nextEmail = String(userEditDraft.email || '').trim().toLowerCase();
     setUserSaving(true);
     try {
       await updateUserAccount(userEditDraft.original_email, {
@@ -3592,7 +6919,10 @@ export default function App() {
       });
       setUserEditDraft(null);
       setFlash({ type: 'success', message: 'User updated successfully.' });
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
+      if (originalEmail === String(currentUser?.email || '').trim().toLowerCase() || nextEmail !== originalEmail) {
+        await refreshBootstrap({ targetTab: activeTab });
+      }
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to update user.' });
     } finally {
@@ -3605,11 +6935,11 @@ export default function App() {
     setUserActionLoading(true);
     try {
       if (userActionTarget.kind === 'lock') {
-        await lockUserAccount(userActionTarget.user.email);
+        await lockUserAccount(userActionTarget.user.account_email || userActionTarget.user.email);
       } else if (userActionTarget.kind === 'unlock') {
-        await unlockUserAccount(userActionTarget.user.email);
+        await unlockUserAccount(userActionTarget.user.account_email || userActionTarget.user.email);
       } else {
-        await deleteUserAccount(userActionTarget.user.email);
+        await deleteUserAccount(userActionTarget.user.account_email || userActionTarget.user.email);
       }
       setFlash({
         type: 'success',
@@ -3621,7 +6951,7 @@ export default function App() {
               : 'User unlocked successfully.',
       });
       setUserActionTarget(null);
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to update user.' });
     } finally {
@@ -3644,7 +6974,7 @@ export default function App() {
       setFlash({ type: 'success', message: result.message || 'Bulk counselor upload completed.' });
       setBulkCounselorForm({ year_level: '1', file: null });
       setBulkCounselorUploadKey((value) => value + 1);
-      await refreshUsersOverview();
+      await refreshUsersOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to upload counselors.' });
     } finally {
@@ -3781,8 +7111,9 @@ export default function App() {
       test_name?: string;
     },
   ) {
+    setActivityCopying(true);
     try {
-      const payload = await getActivityScopeReport(filters);
+      const payload = await getCachedActivityScopeReport(filters);
       const pendingCount = (payload.sections || []).reduce(
         (sum, section) => sum + section.rows.filter((row) => Number(row.pending_count || 0) > 0).length,
         0,
@@ -3791,15 +7122,24 @@ export default function App() {
         setFlash({ type: 'warning', message: 'No defaulters were found for the selected counselor activity scope.' });
         return;
       }
-      const lines = buildActivityCopyLines(payload.sections || [], mode);
+      const renderedText = renderCopyTemplate(
+        String(bootstrap?.appConfig?.activity_defaulter_copy_template || DEFAULT_ACTIVITY_DEFAULTER_COPY_TEMPLATE),
+        {
+          count: String(pendingCount),
+          mode,
+          entries: buildActivityCopyEntries(payload.sections || []),
+        },
+      );
       await handleCopyPreparedLines(
-        lines,
+        plainTextToCopyLines(renderedText),
         'Counselor Activity Defaulters',
         `Copied ${pendingCount} pending counselor entr${pendingCount === 1 ? 'y' : 'ies'} from counselor activity.`,
         String(bootstrap?.appConfig?.activity_copy_as_image || 'false').toLowerCase() === 'true',
       );
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to prepare activity defaulters list.' });
+    } finally {
+      setActivityCopying(false);
     }
   }
 
@@ -3809,6 +7149,7 @@ export default function App() {
     semester?: string;
     test_name?: string;
   }) {
+    setActivityPdfLoading(true);
     try {
       const result = await downloadActivityScopeReportPdf(filters);
       const objectUrl = URL.createObjectURL(result.blob);
@@ -3821,6 +7162,8 @@ export default function App() {
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to export counselor activity PDF.' });
+    } finally {
+      setActivityPdfLoading(false);
     }
   }
 
@@ -3870,8 +7213,15 @@ export default function App() {
       setFlash({ type: 'warning', message: 'No pending counselors found for the current completion filters.' });
       return;
     }
+    const renderedText = renderCopyTemplate(
+      String(bootstrap?.appConfig?.notice_defaulter_copy_template || DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE),
+      {
+        count: String(pendingRows.length),
+        entries: buildNoticeCopyEntries(pendingRows),
+      },
+    );
     await handleCopyPreparedLines(
-      buildNoticeCopyLines(pendingRows),
+      plainTextToCopyLines(renderedText),
       'Notice Defaulters',
       `Copied ${pendingRows.length} pending counselor entr${pendingRows.length === 1 ? 'y' : 'ies'} from notices.`,
       String(bootstrap?.appConfig?.notice_copy_as_image || 'false').toLowerCase() === 'true',
@@ -3886,8 +7236,15 @@ export default function App() {
         setFlash({ type: 'warning', message: 'No pending counselors found for the current notice scope.' });
         return;
       }
+      const renderedText = renderCopyTemplate(
+        String(bootstrap?.appConfig?.notice_defaulter_copy_template || DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE),
+        {
+          count: String(pendingRows.length),
+          entries: buildNoticeCopyEntries(pendingRows),
+        },
+      );
       await handleCopyPreparedLines(
-        buildNoticeCopyLines(pendingRows),
+        plainTextToCopyLines(renderedText),
         'Notice Defaulters',
         `Copied ${pendingRows.length} pending counselor entr${pendingRows.length === 1 ? 'y' : 'ies'} from notices.`,
         String(bootstrap?.appConfig?.notice_copy_as_image || 'false').toLowerCase() === 'true',
@@ -3926,8 +7283,8 @@ export default function App() {
     if (!confirmed) return;
     try {
       await forceLogoutSession(email);
-      setFlash({ type: 'success', message: `${email} was logged out.` });
       await loadMonitoringOverview();
+      setFlash({ type: 'success', message: `${email} was logged out.` });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to force logout user.' });
     }
@@ -3945,13 +7302,22 @@ export default function App() {
 
   async function handleCreateBackup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setDatabaseBackupCreating(true);
     try {
+      setDatabaseProgress({
+        title: 'Creating Backup',
+        body: `Creating backup ${String(databaseBatchName || '').trim() || 'for the current batch'}. Please wait while the rebuild saves the database snapshot.`,
+      });
       const result = await createDatabaseBackup(databaseBatchName, databaseOverwrite);
       setFlash({ type: 'success', message: result.message });
       setDatabaseOverwrite(false);
       await loadDatabaseOverview();
+      setDatabaseProgress(null);
     } catch (error) {
+      setDatabaseProgress(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to create backup.' });
+    } finally {
+      setDatabaseBackupCreating(false);
     }
   }
 
@@ -3960,9 +7326,71 @@ export default function App() {
     if (!databaseBackupAction) return;
     setDatabaseActionLoading(true);
     try {
+      if (databaseBackupAction.kind === 'archive') {
+        setDatabaseProgress({
+          title: 'Archiving Academic Year',
+          body: `Creating archive_${archiveYearLabel.replace(/[^0-9A-Za-z_-]/g, '_')}.db and resetting the active workspace. Please wait...`,
+        });
+        const result = await archiveAcademicYear(archiveYearLabel, databaseActionPassword, archiveYearOverwrite);
+        if (result.reload) {
+          window.setTimeout(() => reloadCurrentApp(), 350);
+          return;
+        }
+        setFlash({ type: 'success', message: 'Academic year archived successfully.' });
+        setDatabaseBackupAction(null);
+        setDatabaseActionPassword('');
+        setArchiveYearStart('');
+        setArchiveYearEnd('');
+        setArchiveYearOverwrite(false);
+        await loadDatabaseOverview();
+        return;
+      }
+
+      if (databaseBackupAction.kind === 'delete-archive') {
+        await deleteArchiveYear(databaseBackupAction.backupName, databaseActionPassword);
+        setFlash({ type: 'success', message: `Deleted archive ${databaseBackupAction.backupName}.` });
+        setDatabaseBackupAction(null);
+        setDatabaseActionPassword('');
+        await loadDatabaseOverview();
+        return;
+      }
+
+      if (databaseBackupAction.kind === 'clear') {
+        const result = await clearExamDatabase(databaseActionPassword);
+        if (result.relogin) {
+          window.setTimeout(() => reloadCurrentApp(), 350);
+          return;
+        }
+        invalidateOverviewCaches(['dashboard', 'reports', 'cdp', 'activity', 'activity-scope', 'users']);
+        subjectsOverviewCacheRef.current.clear();
+        setTestDetail(null);
+        setFlash({ type: 'success', message: 'Active database cleared successfully.' });
+        setDatabaseBackupAction(null);
+        setDatabaseActionPassword('');
+        await loadDatabaseOverview();
+        return;
+      }
+
       if (databaseBackupAction.kind === 'delete') {
         await deleteDatabaseBackup(databaseBackupAction.backupName, databaseActionPassword);
         setFlash({ type: 'success', message: `Deleted backup ${databaseBackupAction.backupName}.` });
+        setDatabaseBackupAction(null);
+        setDatabaseActionPassword('');
+        await loadDatabaseOverview();
+        return;
+      }
+
+      if (databaseBackupAction.kind === 'restore-archive') {
+        setDatabaseProgress({
+          title: 'Restoring Archive',
+          body: `Restoring ${databaseBackupAction.backupName}. Please wait while the rebuild reconnects to the archived academic year.`,
+        });
+        const result = await restoreArchiveYear(databaseBackupAction.backupName, databaseActionPassword);
+        if (result.relogin || result.reload) {
+          window.setTimeout(() => reloadCurrentApp(), 350);
+          return;
+        }
+        setFlash({ type: 'success', message: `Restored archive ${databaseBackupAction.backupName}.` });
         setDatabaseBackupAction(null);
         setDatabaseActionPassword('');
         await loadDatabaseOverview();
@@ -3975,7 +7403,7 @@ export default function App() {
       });
       const result = await restoreDatabaseBackup(databaseBackupAction.backupName, databaseActionPassword);
       if (result.relogin || result.reload) {
-        window.setTimeout(() => window.location.reload(), 350);
+        window.setTimeout(() => reloadCurrentApp(), 350);
         return;
       }
       setFlash({ type: 'success', message: `Restored backup ${databaseBackupAction.backupName}.` });
@@ -3992,43 +7420,64 @@ export default function App() {
 
   async function handleArchiveYear(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const confirmed = await requestConfirm({
-      title: 'Archive Year',
-      message: 'Archive the current active year and clear operational data to start fresh? Admin and Principal accounts stay available.',
-      confirmLabel: 'Archive And Clear',
-      confirmClassName: 'btn btn-danger btn-sm',
-      iconClassName: 'fas fa-box-archive',
+    if (!String(archiveYearLabel || '').trim()) {
+      setFlash({ type: 'error', message: 'Enter the academic year range to archive.' });
+      return;
+    }
+    setDatabaseActionPassword('');
+    setDatabaseBackupAction({
+      kind: 'archive',
+      backupName: `archive_${archiveYearLabel.replace(/[^0-9A-Za-z_-]/g, '_')}.db`,
     });
-    if (!confirmed) return;
-    setArchiveYearLoading(true);
+  }
+
+  async function handleEnterArchiveView(archiveName: string) {
     try {
       setDatabaseProgress({
-        title: 'Archiving Academic Year',
-        body: `Creating archive_${archiveYearLabel.replace(/[^0-9A-Za-z_-]/g, '_')}.db and resetting the active workspace. Please wait...`,
+        title: 'Opening Archive View',
+        body: `Loading ${archiveName} in read-only mode. The workspace will refresh into archive view.`,
       });
-      const result = await archiveAcademicYear(archiveYearLabel, clearExamPassword, archiveYearOverwrite);
+      const result = await enterArchiveView(archiveName);
       if (result.reload) {
-        window.setTimeout(() => window.location.reload(), 350);
+        window.setTimeout(() => reloadCurrentApp(), 250);
         return;
       }
-      setFlash({ type: 'success', message: 'Academic year archived successfully.' });
-      setClearExamPassword('');
-      setArchiveYearLabel('');
-      setArchiveYearOverwrite(false);
+      setDatabaseProgress(null);
+      await refreshBootstrap({ targetTab: activeTab });
       await loadDatabaseOverview();
     } catch (error) {
       setDatabaseProgress(null);
-      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to archive academic year.' });
-    } finally {
-      setArchiveYearLoading(false);
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to open archive view.' });
     }
   }
 
-  async function handleSaveConfig(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleExitArchiveView() {
+    try {
+      setDatabaseProgress({
+        title: 'Leaving Archive View',
+        body: 'Restoring the live workspace and refreshing your current session.',
+      });
+      const result = await exitArchiveView();
+      if (result.reload) {
+        window.setTimeout(() => reloadCurrentApp(), 250);
+        return;
+      }
+      setDatabaseProgress(null);
+      await refreshBootstrap({ targetTab: activeTab });
+      await loadDatabaseOverview();
+    } catch (error) {
+      setDatabaseProgress(null);
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to exit archive view.' });
+    }
+  }
+
+  async function persistConfig(adminPassword = '') {
     setConfigSaving(true);
     try {
-      const result = await updateConfig(configForm);
+      const result = await updateConfig({
+        ...configForm,
+        admin_password: otpPolicyChanged ? adminPassword : '',
+      });
       const nextConfigData: ConfigOverviewPayload = {
         appConfig: result.appConfig,
         envContent: envDraft,
@@ -4039,11 +7488,74 @@ export default function App() {
       applyConfigPayload(nextConfigData);
       setBootstrap((prev) => (prev ? { ...prev, appConfig: result.appConfig } : prev));
       applyThemeColors(result.appConfig);
+      if (result.relogin) {
+        clearRememberedAuthState();
+        setFlash({ type: 'success', message: 'OTP login policy changed. All users were logged out and you have been returned to sign in.' });
+        await refreshBootstrap();
+        return { relogin: true };
+      }
       setFlash({ type: 'success', message: 'Settings saved successfully.' });
+      return { relogin: false };
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to save settings.' });
+      return null;
     } finally {
       setConfigSaving(false);
+    }
+  }
+
+  async function handleSaveConfig(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (otpPolicyChanged) {
+      setConfigPromptPassword('');
+      setConfigPasswordPrompt({ nextTab: null });
+      return;
+    }
+    await persistConfig('');
+  }
+
+  async function handleConfirmConfigPassword() {
+    if (otpPolicyChanged && !String(configPromptPassword || '').trim()) {
+      setFlash({ type: 'error', message: 'Enter your admin password to change the OTP login policy.' });
+      return;
+    }
+    const nextTab = configPasswordPrompt?.nextTab || null;
+    const result = await persistConfig(configPromptPassword);
+    if (!result) return;
+    setConfigPasswordPrompt(null);
+    setConfigPromptPassword('');
+    setPendingConfigTab(null);
+    if (!result.relogin && nextTab) {
+      setActiveTab(nextTab);
+      setMobileSidebarOpen(false);
+    }
+  }
+
+  function discardConfigChanges(nextTab?: string | null) {
+    if (configData) {
+      applyConfigPayload(configData);
+    }
+    setPendingConfigTab(null);
+    if (nextTab) {
+      setActiveTab(nextTab);
+      setMobileSidebarOpen(false);
+    }
+  }
+
+  function handleSidebarTabNavigation(tab: string) {
+    if (activeTab === 'config' && configFormDirty && tab !== 'config') {
+      setPendingConfigTab(tab);
+      return;
+    }
+    setActiveTab(tab);
+    setMobileSidebarOpen(false);
+    if (tab === 'reports') {
+      void loadReports();
+    }
+    if (tab === 'test-database') {
+      setTestDetail(null);
+      setCounselorSendPage(null);
+      setCounselorSendVerify(null);
     }
   }
 
@@ -4148,7 +7660,16 @@ export default function App() {
             <div className="login-banner-wrap">
               <img src="/assets/banner.png" alt="RMKCET Banner" className="login-banner-image" />
             </div>
-            <p>Loading Shine rebuild...</p>
+            <p>RMKCET SHINE : RMKCET Science and Humanities Internal Notification Engine</p>
+          </div>
+          <div className="boot-loader-block" aria-live="polite">
+            <div className="spinner-ring boot-loader-ring" aria-hidden="true"></div>
+            <div className="boot-loader-text">Loading workspace</div>
+            <div className="boot-loader-dots" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
           </div>
         </div>
       </main>
@@ -4157,6 +7678,7 @@ export default function App() {
 
   if (!currentUser) {
     return (
+      <>
       <main className="login-layout">
         <div className="login-box">
           <div className="login-logo">
@@ -4177,27 +7699,123 @@ export default function App() {
                 <p><i className="fas fa-map-marker-alt"></i> <strong>IP:</strong> {loginState.conflict.ip_address || 'Unknown'}</p>
                 <p><i className="fas fa-clock"></i> <strong>Logged in:</strong> {loginState.conflict.login_time?.slice(0, 16) || 'Unknown'}</p>
               </div>
+              {loginState.conflictAuthMethod === 'google' && loginConflictHasUnknownDetails(loginState.conflict) ? (
+                <div className="flash flash-info" style={{ marginBottom: 14 }}>
+                  <i className="fas fa-circle-info"></i>
+                  <span>We found the active Google session, but its device details were not available. Continuing will still log it out.</span>
+                </div>
+              ) : null}
               <p className="conflict-question">Do you want to logout from the other device and continue here?</p>
               <div className="conflict-buttons">
                 <button
                   type="button"
                   className="btn btn-primary"
                   onClick={() => {
+                    if (loginRoleSelectionState?.selectedAccountEmail) {
+                      void handleCompleteLoginRoleSelection(true);
+                      return;
+                    }
+                    if (loginState.conflictAuthMethod === 'google') {
+                      void handleResolveGoogleLoginConflict();
+                      return;
+                    }
                     const fakeEvent = { preventDefault() {} } as FormEvent<HTMLFormElement>;
                     void handleLogin(fakeEvent, true);
                   }}
+                  disabled={loginState.loading}
                 >
-                  <i className="fas fa-sign-out-alt"></i> Yes, Logout Other Device
+                  <i className={`fas ${loginState.loading ? 'fa-spinner fa-spin' : 'fa-sign-out-alt'}`}></i>{' '}
+                  {loginState.loading ? 'Continuing...' : 'Yes, Logout Other Device'}
                 </button>
                 <button
                   type="button"
                   className="btn btn-outline"
-                  onClick={() => setLoginState((prev) => ({ ...prev, conflict: null }))}
+                  onClick={() => {
+                    setLoginConflictInfoOpen(false);
+                    setLoginState((prev) => ({ ...prev, conflict: null, conflictAuthMethod: null, error: '' }));
+                  }}
+                  disabled={loginState.loading}
                 >
                   <i className="fas fa-times"></i> Cancel
                 </button>
               </div>
             </div>
+          ) : loginRoleSelectionState ? (
+            <>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleCompleteLoginRoleSelection(false);
+                }}
+              >
+                <div className="form-group">
+                  <label className="form-label">Select Role</label>
+                  <div className="card" style={{ padding: 12, marginBottom: 12 }}>
+                    <div style={{ fontSize: '.82rem', color: 'var(--text-dim)', marginBottom: 10 }}>
+                      This email is linked to multiple SHINE roles. Choose the workspace you want to open for <strong>{loginRoleSelectionState.loginEmail}</strong>.
+                    </div>
+                    <div style={{ display: 'grid', gap: 8 }}>
+                      {loginRoleSelectionState.options.map((option) => (
+                        <label
+                          key={option.accountEmail}
+                          className="scope-chip"
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            padding: '12px 14px',
+                            borderRadius: 12,
+                            border: option.accountEmail === loginRoleSelectionState.selectedAccountEmail ? '1px solid var(--primary)' : '1px solid var(--border)',
+                            background: option.accountEmail === loginRoleSelectionState.selectedAccountEmail ? 'rgba(102,126,234,.12)' : 'var(--bg-input)',
+                          }}
+                        >
+                          <input
+                            type="radio"
+                            name="login-role-selection"
+                            checked={option.accountEmail === loginRoleSelectionState.selectedAccountEmail}
+                            onChange={() => setLoginRoleSelectionState((prev) => prev ? { ...prev, selectedAccountEmail: option.accountEmail } : prev)}
+                          />
+                          <span style={{ display: 'grid', gap: 3 }}>
+                            <strong>{getRoleOptionLabel(option.role, option.designation)}</strong>
+                            <span className="inline-muted">
+                              {option.name}
+                              {option.department ? ` • ${option.department}` : ''}
+                              {option.role === 'counselor' ? ` • ${formatYearLevel(option.year_level || 1)}` : ''}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {loginState.error ? (
+                  <div className="flash flash-error" style={{ marginBottom: 14 }}>
+                    <i className="fas fa-times-circle"></i>
+                    <span>{loginState.error}</span>
+                  </div>
+                ) : null}
+
+                <button type="submit" className="btn btn-primary" style={{ marginTop: 8 }} disabled={loginState.loading}>
+                  <i className={`fas ${loginState.loading ? 'fa-spinner fa-spin' : 'fa-right-to-bracket'}`}></i> {loginState.loading ? 'Opening...' : 'Continue'}
+                </button>
+              </form>
+
+              <div className="d-flex" style={{ gap: 10, marginTop: 10 }}>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  style={{ flex: 1 }}
+                  onClick={() => {
+                    setLoginRoleSelectionState(null);
+                    setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null }));
+                  }}
+                  disabled={loginState.loading}
+                >
+                  <i className="fas fa-arrow-left"></i> Back
+                </button>
+              </div>
+            </>
           ) : loginOtpState ? (
             <>
               <form onSubmit={(event) => void handleVerifyLoginOtp(event)} autoComplete="off">
@@ -4205,13 +7823,16 @@ export default function App() {
                   <label className="form-label" htmlFor="loginOtpCode">Login OTP</label>
                   <input
                     type="text"
-                    className="form-control"
+                    className="form-control otp-code-input"
                     id="loginOtpCode"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    pattern="\d{6}"
                     placeholder="Enter 6-digit OTP"
                     minLength={6}
                     maxLength={6}
                     value={loginState.otp_code}
-                    onChange={(event) => setLoginState((prev) => ({ ...prev, otp_code: event.target.value }))}
+                    onChange={(event) => setLoginState((prev) => ({ ...prev, otp_code: normalizeOtpCode(event.target.value) }))}
                     required
                     autoFocus
                   />
@@ -4303,11 +7924,14 @@ export default function App() {
                 style={{ marginTop: 8 }}
                 disabled={loginState.loading}
               >
-                <i className={`fas ${bootstrap?.authUi?.standardOtpLoginEnabled ? 'fa-paper-plane' : 'fa-sign-in-alt'}`}></i>{' '}
-                {loginState.loading
-                  ? (bootstrap?.authUi?.standardOtpLoginEnabled ? 'Sending OTP...' : 'Signing In...')
-                  : (bootstrap?.authUi?.standardOtpLoginEnabled ? 'Send OTP & Continue' : 'Sign In')}
+                <i className={`fas ${loginState.loading ? 'fa-spinner fa-spin' : 'fa-sign-in-alt'}`}></i>{' '}
+                {loginState.loading ? 'Signing In...' : 'Sign In'}
               </button>
+              {bootstrap?.authUi?.standardOtpLoginEnabled ? (
+                <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', marginTop: 8, display: 'block' }}>
+                  After sign in, an OTP will be sent to your registered email.
+                </small>
+              ) : null}
 
               {bootstrap?.authUi?.googleOauthEnabled ? (
                 <>
@@ -4316,13 +7940,14 @@ export default function App() {
                     <span style={{ fontSize: '.76rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.08em' }}>or</span>
                     <div style={{ flex: 1, height: 1, background: 'var(--border)' }}></div>
                   </div>
-                  <a
-                    href="/auth/google/start"
+                  <button
+                    type="button"
                     className="btn btn-outline"
                     style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                    onClick={handleGoogleLoginStart}
                   >
                     <i className="fab fa-google"></i> Sign in with Google
-                  </a>
+                  </button>
                 </>
               ) : null}
 
@@ -4338,6 +7963,7 @@ export default function App() {
                   </button>
                 </div>
               ) : null}
+
             </form>
           )}
 
@@ -4348,12 +7974,385 @@ export default function App() {
           </div>
         </div>
       </main>
+      {loginConflictInfoOpen ? (
+        <div className="modal-overlay open" onClick={() => setLoginConflictInfoOpen(false)}>
+          <div className="modal" style={{ maxWidth: 440 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-circle-info"></i> Session Details Unavailable</h3>
+              <button className="modal-close" type="button" onClick={() => setLoginConflictInfoOpen(false)}>
+                <i className="fas fa-times"></i>
+              </button>
+            </div>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+              We detected another active Google sign-in for this account, but that session did not expose browser or device details.
+            </p>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 18 }}>
+              If you continue, SHINE will still log out that active session and sign you in here safely.
+            </p>
+            <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-primary" onClick={() => setLoginConflictInfoOpen(false)}>
+                Understood
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {sessionEndNotice ? (
+        <div className="modal-overlay open" onClick={() => setSessionEndNotice(null)}>
+          <div className="modal" style={{ maxWidth: 440 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-circle-info"></i> {sessionEndNotice.title || 'Logged Out'}</h3>
+            </div>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 18 }}>
+              {sessionEndNotice.message}
+            </p>
+            <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-primary" onClick={() => setSessionEndNotice(null)}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {forgotPasswordState.open ? (
+        <div
+          className="modal-overlay open"
+          onClick={() => {
+            if (forgotPasswordState.loading) return;
+            closeForgotPasswordModal();
+          }}
+        >
+          <div className="modal" style={{ maxWidth: 480 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-key"></i> Forgot Password</h3>
+              <button
+                className="modal-close"
+                type="button"
+                onClick={closeForgotPasswordModal}
+                disabled={forgotPasswordState.loading}
+              >
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+
+            {forgotPasswordState.stage === 'request' ? (
+              <form onSubmit={(event) => void handleForgotPasswordRequest(event)} autoComplete="off">
+                <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+                  Enter your email or full name. We&apos;ll send a password reset OTP to your registered email address.
+                </p>
+                <div className="form-group">
+                  <label className="form-label">Email or Name</label>
+                  <input
+                    className="form-control"
+                    autoComplete="off"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    value={forgotPasswordState.identifier}
+                    onChange={(event) => setForgotPasswordState((prev) => ({ ...prev, identifier: event.target.value }))}
+                    placeholder="Enter your email or full name"
+                    required
+                    autoFocus
+                  />
+                </div>
+                {forgotPasswordState.error ? (
+                  <div className="flash flash-error" style={{ marginBottom: 14 }}>
+                    <i className="fas fa-times-circle"></i>
+                    <span>{forgotPasswordState.error}</span>
+                  </div>
+                ) : null}
+                <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={closeForgotPasswordModal}
+                    disabled={forgotPasswordState.loading}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={forgotPasswordState.loading}>
+                    <i className={`fas ${forgotPasswordState.loading ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i>
+                    {forgotPasswordState.loading ? 'Sending...' : 'Send OTP'}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+
+            {forgotPasswordState.stage === 'verify' ? (
+              <form onSubmit={(event) => void handleForgotPasswordVerify(event)} autoComplete="off">
+                <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+                  OTP sent to {forgotPasswordState.maskedEmail || 'your email'}.
+                </p>
+                <div className="form-group">
+                  <label className="form-label">Reset OTP</label>
+                  <input
+                    className="form-control otp-code-input"
+                    autoComplete="off"
+                    inputMode="numeric"
+                    pattern="\d{6}"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    value={forgotPasswordState.otp_code}
+                    onChange={(event) => setForgotPasswordState((prev) => ({ ...prev, otp_code: normalizeOtpCode(event.target.value) }))}
+                    placeholder="Enter 6-digit OTP"
+                    minLength={6}
+                    maxLength={6}
+                    required
+                    autoFocus
+                  />
+                </div>
+                {forgotPasswordState.error ? (
+                  <div className="flash flash-error" style={{ marginBottom: 14 }}>
+                    <i className="fas fa-times-circle"></i>
+                    <span>{forgotPasswordState.error}</span>
+                  </div>
+                ) : null}
+                <div className="btn-group" style={{ justifyContent: 'space-between' }}>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => setForgotPasswordState((prev) => ({
+                      ...prev,
+                      stage: 'request',
+                      otp_code: '',
+                      error: '',
+                      loading: false,
+                    }))}
+                    disabled={forgotPasswordState.loading}
+                  >
+                    <i className="fas fa-arrow-left"></i> Back
+                  </button>
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={forgotPasswordState.loading}>
+                    <i className={`fas ${forgotPasswordState.loading ? 'fa-spinner fa-spin' : 'fa-shield-halved'}`}></i>
+                    {forgotPasswordState.loading ? 'Verifying...' : 'Verify OTP'}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+
+            {forgotPasswordState.stage === 'reset' ? (
+              <form onSubmit={(event) => void handleForgotPasswordComplete(event)} autoComplete="off">
+                <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+                  Set a new password for {forgotPasswordState.maskedEmail || 'your account'}.
+                </p>
+                <div className="form-group">
+                  <label className="form-label">New Password</label>
+                  <input
+                    className="form-control"
+                    type="password"
+                    autoComplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    value={forgotPasswordState.new_password}
+                    onChange={(event) => setForgotPasswordState((prev) => ({ ...prev, new_password: event.target.value }))}
+                    placeholder="Enter new password"
+                    required
+                    autoFocus
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Confirm Password</label>
+                  <input
+                    className="form-control"
+                    type="password"
+                    autoComplete="new-password"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    value={forgotPasswordState.confirm_password}
+                    onChange={(event) => setForgotPasswordState((prev) => ({ ...prev, confirm_password: event.target.value }))}
+                    placeholder="Re-enter new password"
+                    required
+                  />
+                </div>
+                {forgotPasswordState.error ? (
+                  <div className="flash flash-error" style={{ marginBottom: 14 }}>
+                    <i className="fas fa-times-circle"></i>
+                    <span>{forgotPasswordState.error}</span>
+                  </div>
+                ) : null}
+                <div className="btn-group" style={{ justifyContent: 'space-between' }}>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => setForgotPasswordState((prev) => ({
+                      ...prev,
+                      stage: 'verify',
+                      new_password: '',
+                      confirm_password: '',
+                      error: '',
+                      loading: false,
+                    }))}
+                    disabled={forgotPasswordState.loading}
+                  >
+                    <i className="fas fa-arrow-left"></i> Back
+                  </button>
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={forgotPasswordState.loading}>
+                    <i className={`fas ${forgotPasswordState.loading ? 'fa-spinner fa-spin' : 'fa-key'}`}></i>
+                    {forgotPasswordState.loading ? 'Updating...' : 'Reset Password'}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      </>
     );
   }
 
+  const renderDesktopAppSettingsPanel = () => (
+    <div className="card mb-3" style={{ maxWidth: 1120 }}>
+      <div className="card-title"><i className="fas fa-desktop"></i> Desktop App Settings</div>
+      {!runtimeConfig.isDesktop ? (
+        <div className="panel-placeholder">Desktop settings are available inside the Windows app.</div>
+      ) : (
+        <>
+          <div className="detail-display-panel" style={{ marginBottom: 14 }}>
+            <div className="detail-display-grid">
+              <div><div className="detail-display-label">Server Status</div><div className="detail-display-value is-strong">{desktopConnectivity?.online ? 'Online' : 'Recovery Mode'}</div></div>
+              <div><div className="detail-display-label">App Version</div><div className="detail-display-value">{runtimeConfig.appVersion || '-'}</div></div>
+            </div>
+          </div>
+          {desktopConnectivity?.error ? <div className="alert alert-warning" style={{ marginBottom: 14 }}>{desktopConnectivity.error}</div> : null}
+          {[
+            ['launchAtWindowsStartup', 'Start With Windows', 'Launch Shine into the tray on login.'],
+            ['startMinimizedToTrayOnLogin', 'Startup Minimized To Tray', 'Keep startup quiet until the app is opened manually.'],
+            ['minimizeToTrayOnClose', 'Close Minimizes To Tray', 'Use the tray Quit action to fully exit.'],
+            ['desktopNotificationsEnabled', 'Desktop Notifications', 'Show update and counselor alert notifications.'],
+            ...(currentUser?.role === 'admin'
+              ? [
+                ['updateChecksEnabled', 'Update Checks', 'Check the hosted desktop release channel.'],
+                ['autoInstallUpdatesWhenIdle', 'Install Updates When Idle', 'Defer installs while marks or notice sending is open.'],
+              ]
+              : []),
+          ].map(([key, label, detail]) => (
+            <div className="settings-slider-row" key={key}>
+              <div><div className="form-label">{label}</div><div className="inline-muted">{detail}</div></div>
+              <label className="settings-slider">
+                <input
+                  type="checkbox"
+                  checked={Boolean(desktopAppSettings?.[key as keyof DesktopAppSettings])}
+                  disabled={desktopSettingsSaving}
+                  onChange={(event) => {
+                    const nextValue = event.target.checked;
+                    setDesktopAppSettings((prev) => prev ? { ...prev, [key]: nextValue } : prev);
+                    void saveDesktopSettingPatch({ [key]: nextValue } as Partial<DesktopAppSettings>);
+                  }}
+                />
+                <span className="settings-slider-track" aria-hidden="true"></span>
+              </label>
+            </div>
+          ))}
+          {(currentUser?.role === 'hod' || currentUser?.role === 'principal') ? (
+            <div className="card mt-3" style={{ padding: 14, background: 'rgba(148,163,184,.055)', border: '1px solid var(--border)' }}>
+              <div className="card-title" style={{ fontSize: '.92rem', marginBottom: 10 }}><i className="fas fa-list-check"></i> Pending Counselor Digest</div>
+              <div className="form-row">
+                <div className="form-group" style={{ maxWidth: 220 }}>
+                  <label className="form-label">Digest Day</label>
+                  <select
+                    className="form-control"
+                    value={desktopAppSettings?.higherOfficialDigestDay || 'monday'}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      setDesktopAppSettings((prev) => prev ? { ...prev, higherOfficialDigestDay: nextValue } : prev);
+                      void saveDesktopSettingPatch({ higherOfficialDigestDay: nextValue } as Partial<DesktopAppSettings>);
+                    }}
+                  >
+                    {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map((day) => (
+                      <option key={day} value={day}>{day[0].toUpperCase() + day.slice(1)}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group" style={{ maxWidth: 220 }}>
+                  <label className="form-label">Digest Scope</label>
+                  <select
+                    className="form-control"
+                    value={desktopAppSettings?.higherOfficialDigestScope || 'allocated'}
+                    onChange={(event) => {
+                      const nextValue = event.target.value === 'all' ? 'all' : 'allocated';
+                      setDesktopAppSettings((prev) => prev ? { ...prev, higherOfficialDigestScope: nextValue } : prev);
+                      void saveDesktopSettingPatch({ higherOfficialDigestScope: nextValue } as Partial<DesktopAppSettings>);
+                    }}
+                  >
+                    <option value="allocated">Allocated Scope</option>
+                    <option value="all">All</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {desktopUpdateInfo ? <div className="ui-preview-note" style={{ marginTop: 14 }}>Update status: {desktopUpdateInfo.available ? `Version ${desktopUpdateInfo.version} available` : (desktopUpdateInfo.error || 'No update available')}</div> : null}
+          <div className="btn-group" style={{ marginTop: 14 }}>
+            <button type="button" className="btn btn-outline" onClick={() => void loadDesktopRuntimeState()}><i className="fas fa-rotate"></i> Refresh Status</button>
+            {currentUser?.role === 'admin' ? (
+              <>
+                <button type="button" className="btn btn-outline" disabled={desktopUpdateChecking} onClick={() => void handleDesktopUpdateCheck()}><i className={`fas ${desktopUpdateChecking ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></i> {desktopUpdateChecking ? 'Checking...' : 'Check Updates'}</button>
+                {desktopUpdateInfo?.available ? <button type="button" className="btn btn-warning" onClick={() => void handleDesktopUpdateInstall()}><i className="fas fa-download"></i> Install Update</button> : null}
+              </>
+            ) : null}
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  const renderNotificationCenterPage = () => (
+    <section className="notification-page">
+      <div className="card mb-3">
+        <div className="notification-page-header">
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => setNotificationCenterOpen(false)}>
+            <i className="fas fa-arrow-left"></i> Back
+          </button>
+          <div>
+            <div className="card-title" style={{ marginBottom: 2 }}><i className="fas fa-bell"></i> Notification Center</div>
+            <div className="inline-muted">{unreadNotificationCount} unread notification{unreadNotificationCount === 1 ? '' : 's'}</div>
+          </div>
+          {appNotifications.length ? (
+            <button type="button" className="btn btn-outline btn-sm" onClick={() => markNotificationsRead(appNotifications.map((item) => item.key))}>
+              <i className="fas fa-check-double"></i> Mark All Read
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {appNotifications.length ? (
+        <div className="notification-page-list">
+          {appNotifications.map((item) => {
+            const unread = !seenNotificationKeys.has(item.key);
+            return (
+              <article key={item.key} className={`notification-page-item ${unread ? 'unread' : ''} notification-${item.severity}`}>
+                <button
+                  type="button"
+                  className="notification-page-main"
+                  onClick={() => {
+                    markNotificationsRead([item.key]);
+                    if (item.actionTab) {
+                      setActiveTab(item.actionTab);
+                      setNotificationCenterOpen(false);
+                    }
+                  }}
+                >
+                  <span className="notification-dot" aria-hidden="true"></span>
+                  <span className="notification-content">
+                    <strong>{item.title}</strong>
+                    <span>{item.body}</span>
+                    {item.createdAt ? <small>{formatUtcSqlDateTime(item.createdAt)}</small> : null}
+                  </span>
+                </button>
+                <button type="button" className="btn btn-outline btn-sm" onClick={() => deleteNotifications([item.key])}>
+                  <i className="fas fa-trash"></i> Delete
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="card"><div className="panel-placeholder">No notifications right now.</div></div>
+      )}
+    </section>
+  );
+
   return (
     <>
-      <aside className={`sidebar ${mobileSidebarOpen ? 'open' : ''}`} id="sidebar">
+      <aside className={`sidebar ${mobileSidebarOpen ? 'open' : ''} ${embeddedWhatsappSidepaneLayoutActive ? 'embed-sidepanel-sidebar' : ''}`} id="sidebar">
         <div className="sidebar-header">
           <button className="sidebar-close" type="button" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)}>
             <i className="fas fa-xmark"></i>
@@ -4372,18 +8371,7 @@ export default function App() {
               key={tab}
               type="button"
               className={`nav-link tab-nav ${activeTab === tab ? 'active' : ''}`}
-              onClick={() => {
-                setActiveTab(tab);
-                setMobileSidebarOpen(false);
-                if (tab === 'reports') {
-                  void loadReports();
-                }
-                if (tab === 'test-database') {
-                  setTestDetail(null);
-                  setCounselorSendPage(null);
-                  setCounselorSendVerify(null);
-                }
-              }}
+              onClick={() => handleSidebarTabNavigation(tab)}
               style={{ width: '100%', border: 'none', background: activeTab === tab ? undefined : 'transparent', textAlign: 'left', fontFamily: 'inherit', fontSize: 'inherit' }}
             >
               <i className={`fas ${getNavIcon(tab)}`}></i><span>{getNavLabel(tab, currentUser)}</span>
@@ -4395,7 +8383,20 @@ export default function App() {
           <div className="user-info">
             <div className="user-avatar">{currentUser.name[0] || '?'}</div>
             <div className="user-details">
-              <span className="user-name">{currentUser.name}</span>
+              <div className="user-name-row">
+                <span className="user-name">{currentUser.name}</span>
+                {canSwitchRoles ? (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm icon-btn role-switch-icon-btn"
+                    onClick={handleOpenRoleSwitchModal}
+                    title="Change role"
+                    aria-label="Change role"
+                  >
+                    <i className="fas fa-right-left"></i>
+                  </button>
+                ) : null}
+              </div>
               <span className="user-role">{getRoleBadgeLabel(currentUser)}</span>
             </div>
           </div>
@@ -4408,19 +8409,40 @@ export default function App() {
               ))}
             </div>
           ) : null}
-          <button type="button" className={isTestMode ? 'logout-btn test-mode-btn' : 'logout-btn'} onClick={() => void handleLogout()}>
-            <i className={`fas ${isTestMode ? 'fa-door-open' : 'fa-sign-out-alt'}`}></i> {isTestMode ? 'Exit Test Mode' : 'Logout'}
+          <button
+            type="button"
+            className={(isTestMode || archiveViewActive) ? 'logout-btn test-mode-btn' : 'logout-btn'}
+            onClick={() => void handleLogout()}
+          >
+            <i className={`fas ${isTestMode || archiveViewActive ? 'fa-door-open' : 'fa-sign-out-alt'}`}></i> {isTestMode ? 'Exit Test Mode' : archiveViewActive ? 'Exit Archive View' : 'Logout'}
           </button>
         </div>
       </aside>
       {mobileSidebarOpen ? <div className="sidebar-overlay" onClick={() => setMobileSidebarOpen(false)}></div> : null}
 
-      <main className="main-content" id="mainContent">
-        <header className="top-header">
-          <button className="mobile-toggle" type="button" onClick={() => setMobileSidebarOpen(true)}><i className="fas fa-bars"></i></button>
-          <h1 className="page-title">{getPageTitle(activeTab, currentUser)}</h1>
+      <main className={`main-content ${embeddedWhatsappSidepaneLayoutActive ? 'embed-sidepanel-active' : ''} ${desktopWhatsappWorkspaceExiting ? 'embed-sidepanel-exiting' : ''}`} id="mainContent" ref={mainContentRef}>
+        <header className={`top-header ${embeddedWhatsappSidepaneLayoutActive ? 'embed-sidepanel-header' : ''} ${desktopWhatsappWorkspaceExiting ? 'embed-sidepanel-header-exiting' : ''}`}>
+          {embeddedWhatsappSidepaneLayoutActive ? null : (
+            <button className="mobile-toggle" type="button" onClick={() => setMobileSidebarOpen(true)}><i className="fas fa-bars"></i></button>
+          )}
+          <h1 className="page-title">{notificationCenterOpen ? 'Notification Center' : getPageTitle(activeTab, currentUser)}</h1>
           <div className="header-actions">
             <div className="icon-group">
+              {archiveViewActive ? (
+                <span className="header-badge" style={{ color: 'var(--warning)', borderColor: 'rgba(245,158,11,.35)', background: 'rgba(245,158,11,.12)' }}>
+                  <i className="fas fa-eye"></i> Archive {bootstrap?.archiveView?.academicYear || bootstrap?.archiveView?.archiveName}
+                </span>
+              ) : null}
+              {embeddedWhatsappSidepaneLayoutActive ? (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm icon-btn"
+                  onClick={() => void hideDesktopWhatsappWorkspace()}
+                >
+                  <i className="fas fa-arrow-left"></i>
+                  <span>Back To Template</span>
+                </button>
+              ) : null}
               {currentUser.role === 'admin' ? (
                 <button
                   className={`btn btn-outline btn-sm icon-btn smtp-status-btn smtp-${smtpIndicator.state}`}
@@ -4440,22 +8462,34 @@ export default function App() {
                 <span>Theme</span>
               </button>
               <button
+                className="btn btn-outline btn-sm icon-btn notification-center-btn"
                 type="button"
-                className="btn btn-outline btn-sm icon-btn"
-                onClick={() => {
-                  setSelfPasswordModalOpen(true);
-                  setSelfPasswordDraft({
-                    current_password: '',
-                    otp_code: '',
-                    new_password: '',
-                    confirm_password: '',
-                  });
-                  setSelfPasswordOtpSentTo('');
-                }}
+                title="Notification Center"
+                onClick={openNotificationCenter}
               >
-                <i className="fas fa-key"></i>
-                <span>Reset Password</span>
+                <i className="fas fa-bell"></i>
+                <span>Notifications</span>
+                {unreadNotificationCount > 0 ? <span className="notification-count-badge">{unreadNotificationCount}</span> : null}
               </button>
+              {!embeddedWhatsappSidepaneLayoutActive ? (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm icon-btn"
+                  onClick={() => {
+                    setSelfPasswordModalOpen(true);
+                    setSelfPasswordDraft({
+                      current_password: '',
+                      otp_code: '',
+                      new_password: '',
+                      confirm_password: '',
+                    });
+                    setSelfPasswordOtpSentTo('');
+                  }}
+                >
+                  <i className="fas fa-key"></i>
+                  <span>Reset Password</span>
+                </button>
+              ) : null}
               {currentUser.role === 'admin' ? (
                 <button
                   type="button"
@@ -4467,6 +8501,25 @@ export default function App() {
                 >
                   <i className="fas fa-cog"></i>
                   <span>Settings</span>
+                </button>
+              ) : runtimeConfig.isDesktop ? (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm icon-btn"
+                  onClick={() => {
+                    setDesktopSettingsPanelOpen(true);
+                    void loadDesktopRuntimeState();
+                    openDesktopSettings();
+                  }}
+                >
+                  <i className="fas fa-cog"></i>
+                  <span>Settings</span>
+                </button>
+              ) : null}
+              {archiveViewActive ? (
+                <button className="btn btn-outline btn-sm icon-btn" type="button" onClick={() => void handleExitArchiveView()}>
+                  <i className="fas fa-arrow-right-from-bracket"></i>
+                  <span>Exit View</span>
                 </button>
               ) : null}
             </div>
@@ -4483,9 +8536,26 @@ export default function App() {
             </div>
           </div>
         ) : null}
+        {desktopWhatsappWorkspaceTransition ? (
+          <div className={`desktop-embed-transition-overlay ${desktopWhatsappWorkspaceTransition === 'exit' ? 'is-exit' : ''}`} role="status" aria-live="polite">
+            <div className="desktop-embed-transition-card">
+              <div className="spinner-ring"></div>
+              <div className="desktop-embed-transition-title">
+                {desktopWhatsappWorkspaceTransition === 'enter' ? 'Opening WhatsApp workspace' : 'Returning to template'}
+              </div>
+              <div className="desktop-embed-transition-copy">
+                {desktopWhatsappWorkspaceTransition === 'enter'
+                  ? 'Preparing the split send workspace.'
+                  : 'Closing the compact send queue.'}
+              </div>
+            </div>
+          </div>
+        ) : null}
 
-        <div className="content-area">
-          {currentUser.role === 'counselor' && activeTab === 'test-database' && counselorSendVerify ? (
+        <div className={`content-area ${embeddedWhatsappSidepaneLayoutActive ? 'embed-sidepanel-content' : ''} ${desktopWhatsappWorkspaceExiting ? 'embed-sidepanel-content-exiting' : ''}`} ref={contentAreaRef}>
+          {notificationCenterOpen ? (
+            renderNotificationCenterPage()
+          ) : currentUser.role === 'counselor' && activeTab === 'test-database' && counselorSendVerify ? (
             <>
               <div className="report-sticky-toolbar mb-2">
                 <div className="report-toolbar-balanced">
@@ -4557,25 +8627,232 @@ export default function App() {
               </div>
             ) : counselorSendPage ? (
               <>
-                <div className="report-sticky-toolbar mb-2">
-                  <div className="report-toolbar-balanced">
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      onClick={() => {
-                        stopCounselorBatchSend();
-                        setCounselorSendPage(null);
-                      }}
-                    >
-                      <i className="fas fa-arrow-left"></i> Back To Reports
-                    </button>
-                    <div className="report-toolbar-center">
-                      <span className="badge badge-info">{counselorSendPage.meta.test_name || 'Selected Test'}</span>
+                {!embeddedWhatsappSidepaneLayoutActive ? (
+                  <div className="report-sticky-toolbar mb-2">
+                    <div className="report-toolbar-balanced">
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => {
+                          stopCounselorBatchSend();
+                          void stopDesktopWhatsappWorkspaceImmediate();
+                          setCounselorSendPage(null);
+                        }}
+                      >
+                        <i className="fas fa-arrow-left"></i> Back To Reports
+                      </button>
+                      <div className="report-toolbar-center">
+                        <span className="badge badge-info">{counselorSendPage.meta.test_name || 'Selected Test'}</span>
+                      </div>
+                      <div></div>
                     </div>
-                    <div></div>
                   </div>
-                </div>
+                ) : null}
 
+                {counselorSendEmbeddedWhatsappActive ? (
+                  <div
+                    className={`desktop-send-workspace-layout ${embeddedWhatsappSidepaneLayoutActive ? 'is-compact' : ''}`}
+                    ref={desktopReportWorkspaceRef}
+                  >
+                    <div className="desktop-send-workspace-main">
+                      <div className="card mb-3">
+                        <div className="card-title"><i className="fas fa-sliders"></i> Common Variables</div>
+                        <div className="form-row">
+                          <div className="form-group">
+                            <label className="form-label">Test</label>
+                            <input
+                              className="form-control"
+                              defaultValue={counselorSendVars.test_name}
+                              onChange={(event) => { counselorSendVarsRef.current = { ...counselorSendVarsRef.current, test_name: event.target.value }; }}
+                              onBlur={() => setCounselorSendVars((prev) => ({ ...prev, test_name: counselorSendVarsRef.current.test_name }))}
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label className="form-label">Semester</label>
+                            <input
+                              className="form-control"
+                              defaultValue={counselorSendVars.semester}
+                              onChange={(event) => { counselorSendVarsRef.current = { ...counselorSendVarsRef.current, semester: event.target.value }; }}
+                              onBlur={() => setCounselorSendVars((prev) => ({ ...prev, semester: counselorSendVarsRef.current.semester }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="form-row">
+                          <div className="form-group">
+                            <label className="form-label">Batch</label>
+                            <input
+                              className="form-control"
+                              defaultValue={counselorSendVars.batch_name}
+                              onChange={(event) => { counselorSendVarsRef.current = { ...counselorSendVarsRef.current, batch_name: event.target.value }; }}
+                              onBlur={() => setCounselorSendVars((prev) => ({ ...prev, batch_name: counselorSendVarsRef.current.batch_name }))}
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label className="form-label">Send Mode</label>
+                            <div className="segmented-switch send-mode-switch" data-count={2} data-mode={counselorSendVars.sendMode === 'embed' ? 'app' : counselorSendVars.sendMode}>
+                              <div className="segmented-switch-thumb" aria-hidden="true"></div>
+                              <button
+                                type="button"
+                                className={`segmented-switch-option ${counselorSendVars.sendMode === 'app' || counselorSendVars.sendMode === 'embed' ? 'active' : ''}`}
+                                onClick={() => void handleCounselorSendModeChange('app')}
+                              >
+                                App
+                              </button>
+                              <button
+                                type="button"
+                                className={`segmented-switch-option ${counselorSendVars.sendMode === 'web' ? 'active' : ''}`}
+                                onClick={() => void handleCounselorSendModeChange('web')}
+                              >
+                                Web
+                              </button>
+                            </div>
+                            <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
+                              {counselorSendVars.sendMode === 'web'
+                                  ? 'Web mode keeps the normal WhatsApp Web flow.'
+                                  : 'App mode opens the floating student list after you start the workflow.'}
+                            </small>
+                          </div>
+                        </div>
+                        <div className="form-group">
+                          <label className="form-label">Message Template</label>
+                          <textarea
+                            className="form-control"
+                            rows={8}
+                            defaultValue={counselorSendVars.template}
+                            onChange={(event) => { counselorSendVarsRef.current = { ...counselorSendVarsRef.current, template: event.target.value }; }}
+                            onBlur={() => setCounselorSendVars((prev) => ({ ...prev, template: counselorSendVarsRef.current.template }))}
+                          />
+                        </div>
+                        <div className="form-group" style={{ marginTop: 14 }}>
+                          <label className="form-label">Subject/Metric Order for Message</label>
+                          <div className="text-muted" style={{ fontSize: '.82rem', marginBottom: 8 }}>
+                            Arrange subject order for message body. Pending: {counselorSendRowCounts.pending}, Generated: {counselorSendRowCounts.generated}.
+                          </div>
+                          <div className="field-order-list">
+                            {counselorFieldOrder.map((entry, index) => (
+                              <div key={`${entry.type}-${entry.type === 'subject' ? entry.normalizedKey : entry.metricKey}`} className="field-order-tab">
+                                <div className="field-order-tab-label">{entry.label}</div>
+                                <div className="field-order-tab-actions">
+                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => moveCounselorFieldOrder(index, -1)} disabled={index === 0}>
+                                    <i className="fas fa-arrow-up"></i>
+                                  </button>
+                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => moveCounselorFieldOrder(index, 1)} disabled={index === counselorFieldOrder.length - 1}>
+                                    <i className="fas fa-arrow-down"></i>
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="btn-group mt-1">
+                            <button type="button" className="btn btn-outline btn-sm" onClick={() => setCounselorFieldOrder(counselorDefaultFieldOrder.map((item) => ({ ...item })))}>
+                              <i className="fas fa-rotate-left"></i> Reset Default Order
+                            </button>
+                          </div>
+                        </div>
+                        {(counselorSendVars.sendMode === 'app' || counselorSendVars.sendMode === 'web' || counselorSendVars.sendMode === 'embed') && !desktopWhatsappWorkspaceStarted ? (
+                          <div className="desktop-send-template-footer">
+                            <button
+                              type="button"
+                              className="btn btn-success desktop-send-start-btn"
+                              disabled={desktopWhatsappWorkspaceBusy}
+                              onClick={() => void startDesktopWhatsappWorkspace('report')}
+                            >
+                              <i className={`fas ${desktopWhatsappWorkspaceBusy ? 'fa-spinner fa-spin' : 'fa-play'}`}></i> {desktopWhatsappWorkspaceBusy ? 'Opening...' : 'Start Workflow'}
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {counselorSendDesktopWorkspaceMode ? (
+                        <div className="desktop-send-lite-summary">
+                          <span className="badge badge-info">{counselorSendRowCounts.total} students loaded</span>
+                          <span className="badge badge-warning">{counselorSendRowCounts.pending} pending</span>
+                          <span className="badge badge-success">{counselorSendRowCounts.generated} generated</span>
+                        </div>
+                      ) : (
+                        <div className="table-wrapper table-scroll-lg">
+                          <table className="sticky-table">
+                            <thead>
+                              <tr>
+                                <th>Reg No</th>
+                                <th>Name</th>
+                                <th>Phone</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {counselorSendPage.rows.length ? counselorSendPage.rows.map((row) => (
+                                <tr key={row.reg_no}>
+                                  <td><strong>{row.reg_no}</strong></td>
+                                  <td>{row.student_name}</td>
+                                  <td>{row.parent_phone || '-'}</td>
+                                  <td>
+                                    <span className={`badge ${row.status === 'Generated' ? 'badge-success' : 'badge-warning'}`}>{row.status}</span>
+                                  </td>
+                                  <td>
+                                    <button
+                                      type="button"
+                                      className={`btn btn-primary btn-sm ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
+                                      onClick={() => void handleCounselorSendSingle(row)}
+                                    >
+                                      <i className="fab fa-whatsapp"></i> Send To WhatsApp
+                                    </button>
+                                  </td>
+                                </tr>
+                              )) : (
+                                <tr><td colSpan={5} className="text-center text-muted" style={{ padding: 18 }}>No students available for this test.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {embeddedWhatsappSidepaneLayoutActive && counselorSendDesktopWorkspaceMode ? (
+                    <aside className="desktop-send-workspace-pane">
+                      <div className="desktop-send-sidepane-panel">
+                        <div className={`desktop-send-student-list-shell ${desktopWhatsappWorkspaceExiting ? 'is-exiting' : ''}`} ref={desktopReportQueueShellRef}>
+                          <div className="card-title"><i className="fas fa-user-group"></i> Student Send List</div>
+                          {desktopWhatsappWorkspaceBusy ? (
+                            <div className="desktop-send-workspace-loader">
+                              <div className="spinner-ring" aria-hidden="true"></div>
+                              <div className="desktop-send-workspace-loader-copy">Preparing WhatsApp workspace...</div>
+                            </div>
+                          ) : (
+                            <div className="desktop-send-student-list">
+                              {counselorSendPage.rows.length ? counselorSendPage.rows.map((row) => (
+                                <div
+                                  key={row.reg_no}
+                                  className={`desktop-send-student-item ${row.status === 'Generated' ? 'is-generated' : ''} ${desktopWhatsappActiveTarget?.kind === 'report' && desktopWhatsappActiveTarget.regNo === row.reg_no ? 'is-active' : ''}`}
+                                >
+                                  <div className="desktop-send-student-main">
+                                  <div className="desktop-send-student-name">{row.student_name}</div>
+                                    {desktopWhatsappActiveTarget?.kind === 'report' && desktopWhatsappActiveTarget.regNo === row.reg_no ? null : desktopReportQueueState[row.reg_no] ? (
+                                      <span className="desktop-send-student-active">{desktopReportQueueState[row.reg_no].toUpperCase()}</span>
+                                    ) : null}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className={`btn btn-primary btn-sm desktop-send-student-button ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
+                                    disabled={desktopWhatsappLoadingRow === row.reg_no}
+                                    onClick={() => void handleCounselorDesktopQueuePick(row)}
+                                  >
+                                    <i className={desktopWhatsappLoadingRow === row.reg_no ? 'fas fa-spinner fa-spin' : 'fab fa-whatsapp'}></i> {desktopWhatsappLoadingRow === row.reg_no ? 'Opening...' : 'Send To WhatsApp'}
+                                  </button>
+                                </div>
+                              )) : (
+                                <div className="text-muted" style={{ fontSize: '.84rem' }}>No students available for this test.</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </aside>
+                    ) : null}
+                  </div>
+                ) : (
+                <>
                 <div className="card mb-3">
                   <div className="card-title"><i className="fas fa-sliders"></i> Common Variables</div>
                   <div className="form-row">
@@ -4588,37 +8865,48 @@ export default function App() {
                       <input className="form-control" value={counselorSendVars.semester} onChange={(event) => setCounselorSendVars((prev) => ({ ...prev, semester: event.target.value }))} />
                     </div>
                   </div>
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label className="form-label">Batch</label>
-                      <input className="form-control" value={counselorSendVars.batch_name} onChange={(event) => setCounselorSendVars((prev) => ({ ...prev, batch_name: event.target.value }))} />
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">WhatsApp Link Mode</label>
-                      <div className="btn-group" style={{ justifyContent: 'flex-start' }}>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${counselorSendVars.sendMode === 'app' ? 'btn-primary' : 'btn-outline'}`}
-                          onClick={() => void openCounselorSendPage(counselorSendPage.testId, 'app')}
-                        >
-                          App
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${counselorSendVars.sendMode === 'web' ? 'btn-primary' : 'btn-outline'}`}
-                          onClick={() => void openCounselorSendPage(counselorSendPage.testId, 'web')}
-                          disabled={isMobileUi()}
-                        >
-                          Web
-                        </button>
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label className="form-label">Batch</label>
+                        <input className="form-control" value={counselorSendVars.batch_name} onChange={(event) => setCounselorSendVars((prev) => ({ ...prev, batch_name: event.target.value }))} />
                       </div>
-                      <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
-                        {isMobileUi()
-                          ? 'Mobile UI uses WhatsApp app mode only.'
-                          : counselorSendVars.sendMode === 'web'
-                            ? 'Web mode opens WhatsApp Web in this same tab.'
-                            : 'App mode opens the WhatsApp app link directly.'}
-                      </small>
+                      <div className="form-group">
+                        <label className="form-label">{counselorSendEmbeddedWhatsappActive ? 'Desktop Send Flow' : 'WhatsApp Link Mode'}</label>
+                      {counselorSendEmbeddedWhatsappActive ? (
+                        <>
+                          <div className="badge badge-info" style={{ width: 'fit-content' }}>Desktop WhatsApp Workspace</div>
+                          <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
+                            Desktop sends keep the floating student list active while opening WhatsApp Desktop.
+                          </small>
+                        </>
+                      ) : (
+                        <>
+                          <div className="btn-group" style={{ justifyContent: 'flex-start' }}>
+                            <button
+                              type="button"
+                              className={`btn btn-sm ${counselorSendVars.sendMode === 'app' ? 'btn-primary' : 'btn-outline'}`}
+                              onClick={() => void openCounselorSendPage(counselorSendPage.testId, 'app')}
+                            >
+                              App
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn btn-sm ${counselorSendVars.sendMode === 'web' ? 'btn-primary' : 'btn-outline'}`}
+                              onClick={() => void openCounselorSendPage(counselorSendPage.testId, 'web')}
+                              disabled={isMobileUi()}
+                            >
+                              Web
+                            </button>
+                          </div>
+                          <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
+                            {isMobileUi()
+                              ? 'Mobile UI uses WhatsApp app mode only.'
+                              : counselorSendVars.sendMode === 'web'
+                                ? 'Web mode opens WhatsApp Web in this same tab.'
+                                : 'App mode opens the WhatsApp app link directly.'}
+                          </small>
+                        </>
+                      )}
                     </div>
                   </div>
                   <div className="form-group">
@@ -4658,38 +8946,46 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="table-wrapper">
-                  <table>
+                <div className="table-wrapper table-scroll-lg">
+                  <table className={counselorSendEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted ? 'sticky-table desktop-send-queue-table' : 'sticky-table'}>
                     <thead>
                       <tr>
                         <th>Reg No</th>
                         <th>Name</th>
                         <th>Phone</th>
                         <th>Status</th>
-                        <th>Action</th>
+                        {(!counselorSendEmbeddedWhatsappActive || !desktopWhatsappWorkspaceStarted) ? <th>Action</th> : null}
                       </tr>
                     </thead>
                     <tbody>
                       {counselorSendPage.rows.length ? counselorSendPage.rows.map((row) => (
-                        <tr key={row.reg_no}>
+                        <tr
+                          key={row.reg_no}
+                          className={counselorSendEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted
+                            ? `desktop-send-queue-row ${row.status === 'Generated' ? 'is-generated' : ''} ${desktopWhatsappActiveTarget?.kind === 'report' && desktopWhatsappActiveTarget.regNo === row.reg_no ? 'is-active' : ''}`
+                            : ''}
+                          onClick={counselorSendEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted ? (() => void handleCounselorDesktopQueuePick(row)) : undefined}
+                        >
                           <td><strong>{row.reg_no}</strong></td>
                           <td>{row.student_name}</td>
                           <td>{row.parent_phone || '-'}</td>
                           <td>
                             <span className={`badge ${row.status === 'Generated' ? 'badge-success' : 'badge-warning'}`}>{row.status}</span>
                           </td>
-                          <td>
-                            <button
-                              type="button"
-                              className={`btn btn-primary btn-sm ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
-                              onClick={() => void handleCounselorSendSingle(row)}
-                            >
-                              <i className="fab fa-whatsapp"></i> Send to WhatsApp
-                            </button>
-                          </td>
+                          {(!counselorSendEmbeddedWhatsappActive || !desktopWhatsappWorkspaceStarted) ? (
+                            <td>
+                              <button
+                                type="button"
+                                className={`btn btn-primary btn-sm ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
+                                onClick={() => void (counselorSendEmbeddedWhatsappActive ? handleCounselorDesktopQueuePick(row) : handleCounselorSendSingle(row))}
+                              >
+                                <i className="fab fa-whatsapp"></i> Send To WhatsApp
+                              </button>
+                            </td>
+                          ) : null}
                         </tr>
                       )) : (
-                        <tr><td colSpan={5} className="text-center text-muted" style={{ padding: 18 }}>No students available for this test.</td></tr>
+                        <tr><td colSpan={counselorSendEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted ? 4 : 5} className="text-center text-muted" style={{ padding: 18 }}>No students available for this test.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -4697,7 +8993,14 @@ export default function App() {
 
                 <div style={{ height: 48 }}></div>
 
-                {counselorSendPage.batchSendEnabled && !isMobileUi() ? (
+                {counselorSendEmbeddedWhatsappActive ? (
+                    <div className="card" id="batchSendCard">
+                      <div className="card-title"><i className="fas fa-list-check"></i> Desktop Send Queue</div>
+                      <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 0 }}>
+                      Desktop workspace mode keeps the split send layout active. Open each student from the list and continue through the queue without leaving the workspace.
+                      </p>
+                    </div>
+                ) : counselorSendPage.batchSendEnabled && !isMobileUi() ? (
                   <div className="card" id="batchSendCard">
                     <div className="card-title d-flex justify-between align-center">
                       <span><i className="fas fa-layer-group"></i> Batch Send Controls</span>
@@ -4745,6 +9048,8 @@ export default function App() {
                     ) : null}
                   </div>
                 ) : null}
+                </>
+                )}
               </>
             ) : null
           ) : currentUser.role === 'counselor' && activeTab === 'notices' && counselorNoticeSendVerify ? (
@@ -4819,62 +9124,299 @@ export default function App() {
               </div>
             ) : counselorNoticeSendPage ? (
               <>
-                <div className="report-sticky-toolbar mb-2">
-                  <div className="report-toolbar-balanced">
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      onClick={() => {
-                        stopCounselorNoticeBatchSend();
-                        setCounselorNoticeSendPage(null);
-                      }}
-                    >
-                      <i className="fas fa-arrow-left"></i> Back To Notices
-                    </button>
-                    <div className="report-toolbar-center">
-                      <span className="badge badge-info">{counselorNoticeSendPage.notice.title_display || 'Selected Notice'}</span>
+                {!embeddedWhatsappSidepaneLayoutActive ? (
+                  <div className="report-sticky-toolbar mb-2">
+                    <div className="report-toolbar-balanced">
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => {
+                          stopCounselorNoticeBatchSend();
+                          void stopDesktopWhatsappWorkspaceImmediate();
+                          setCounselorNoticeSendPage(null);
+                        }}
+                      >
+                        <i className="fas fa-arrow-left"></i> Back To Notices
+                      </button>
+                      <div className="report-toolbar-center">
+                        <span className="badge badge-info">{counselorNoticeSendPage.notice.title_display || 'Selected Notice'}</span>
+                      </div>
+                      <div></div>
                     </div>
-                    <div></div>
                   </div>
-                </div>
+                ) : null}
 
+                {counselorNoticeEmbeddedWhatsappActive ? (
+                  <div
+                    className={`desktop-send-workspace-layout ${embeddedWhatsappSidepaneLayoutActive ? 'is-compact' : ''}`}
+                    ref={desktopNoticeWorkspaceRef}
+                  >
+                    <div className="desktop-send-workspace-main">
+                      <div className="card mb-3">
+                        <div className="card-title"><i className="fas fa-pen-to-square"></i> Message Template</div>
+                        <div className="form-row">
+                          <div className="form-group">
+                            <label className="form-label">Notice Title</label>
+                            <input
+                              className="form-control"
+                              defaultValue={counselorNoticeSendVars.title}
+                              onChange={(event) => { counselorNoticeSendVarsRef.current = { ...counselorNoticeSendVarsRef.current, title: event.target.value }; }}
+                              onBlur={() => setCounselorNoticeSendVars((prev) => ({ ...prev, title: counselorNoticeSendVarsRef.current.title }))}
+                            />
+                          </div>
+                    <div className="form-group">
+                            <label className="form-label">Send Mode</label>
+                            <div className="segmented-switch send-mode-switch" data-count={2} data-mode={counselorNoticeSendVars.sendMode === 'embed' ? 'app' : counselorNoticeSendVars.sendMode}>
+                              <div className="segmented-switch-thumb" aria-hidden="true"></div>
+                              <button
+                                type="button"
+                                className={`segmented-switch-option ${counselorNoticeSendVars.sendMode === 'app' || counselorNoticeSendVars.sendMode === 'embed' ? 'active' : ''}`}
+                                onClick={() => void handleCounselorNoticeSendModeChange('app')}
+                              >
+                                App
+                              </button>
+                              <button
+                                type="button"
+                                className={`segmented-switch-option ${counselorNoticeSendVars.sendMode === 'web' ? 'active' : ''}`}
+                                onClick={() => void handleCounselorNoticeSendModeChange('web')}
+                              >
+                                Web
+                              </button>
+                            </div>
+                            <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
+                              {counselorNoticeSendVars.sendMode === 'web'
+                                  ? 'Web mode keeps the normal WhatsApp Web flow.'
+                                  : 'App mode opens the floating student list after you start the workflow.'}
+                            </small>
+                          </div>
+                        </div>
+                        <div className="form-group">
+                          <label className="form-label">Notice Caption / Text</label>
+                          <textarea
+                            className="form-control"
+                            rows={4}
+                            defaultValue={counselorNoticeSendVars.text}
+                            onChange={(event) => { counselorNoticeSendVarsRef.current = { ...counselorNoticeSendVarsRef.current, text: event.target.value }; }}
+                            onBlur={() => setCounselorNoticeSendVars((prev) => ({ ...prev, text: counselorNoticeSendVarsRef.current.text }))}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label className="form-label">Message Template</label>
+                          <textarea
+                            className="form-control"
+                            rows={7}
+                            defaultValue={counselorNoticeSendVars.template}
+                            onChange={(event) => {
+                              setCounselorNoticeTemplateEdited(true);
+                              counselorNoticeSendVarsRef.current = { ...counselorNoticeSendVarsRef.current, template: event.target.value };
+                            }}
+                            onBlur={() => setCounselorNoticeSendVars((prev) => ({ ...prev, template: counselorNoticeSendVarsRef.current.template }))}
+                          />
+                          <small style={{ color: 'var(--text-dim)', fontSize: '.76rem', display: 'block', marginTop: 6 }}>
+                            This starts with the default parent message format. You can edit it locally for this send session, and optional placeholders like <code>{'{student_name}'}</code> and <code>{'{reg_no}'}</code> still work if you add them manually.
+                          </small>
+                        </div>
+                        {(counselorNoticeSendVars.sendMode === 'app' || counselorNoticeSendVars.sendMode === 'web' || counselorNoticeSendVars.sendMode === 'embed') && !desktopWhatsappWorkspaceStarted ? (
+                          <div className="desktop-send-template-footer">
+                            <button
+                              type="button"
+                              className="btn btn-success desktop-send-start-btn"
+                              disabled={desktopWhatsappWorkspaceBusy}
+                              onClick={() => void startDesktopWhatsappWorkspace('notice')}
+                            >
+                              <i className={`fas ${desktopWhatsappWorkspaceBusy ? 'fa-spinner fa-spin' : 'fa-play'}`}></i> {desktopWhatsappWorkspaceBusy ? 'Opening...' : 'Start Workflow'}
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="card mb-3" id="noticeAttachmentsCard">
+                        <div className="card-title"><i className="fas fa-paperclip"></i> Attachments</div>
+                        {counselorNoticeSendPage.attachments.length ? (
+                          <div className="table-wrapper">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>File</th>
+                                  <th>Type</th>
+                                  <th>Size</th>
+                                  <th>Preview</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {counselorNoticeSendPage.attachments.map((attachment) => (
+                                  <tr key={attachment.id}>
+                                    <td><strong>{attachment.original_name}</strong></td>
+                                    <td>{attachment.mime_type || 'Document'}</td>
+                                    <td>{`${(((attachment.file_size || 0) / 1024) || 0).toFixed(1)} KB`}</td>
+                                    <td>
+                                      {(() => {
+                                        const previewUrl = buildNoticeAttachmentPreviewUrl(attachment);
+                                        return (
+                                      <a
+                                        className="btn btn-outline btn-sm"
+                                        href={previewUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(event) => {
+                                          if (!runtimeConfig.isDesktop) return;
+                                          event.preventDefault();
+                                          openExternalLink(previewUrl);
+                                        }}
+                                      >
+                                        <i className="fas fa-eye"></i> Open
+                                      </a>
+                                        );
+                                      })()}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <p className="text-muted" style={{ fontSize: '.84rem', margin: 0 }}>This notice has no attachments. Text-only sending is enabled.</p>
+                        )}
+                      </div>
+
+                      {counselorNoticeDesktopWorkspaceMode ? (
+                        <div className="desktop-send-lite-summary">
+                          <span className="badge badge-info">{counselorNoticeRowCounts.total} students loaded</span>
+                          <span className="badge badge-warning">{counselorNoticeRowCounts.pending} pending</span>
+                          <span className="badge badge-success">{counselorNoticeRowCounts.generated} generated</span>
+                        </div>
+                      ) : (
+                        <div className="table-wrapper" id="noticeSendTable">
+                          <table className="sticky-table">
+                            <thead>
+                              <tr>
+                                <th>Reg No</th>
+                                <th>Name</th>
+                                <th>Phone</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {counselorNoticeSendPage.rows.length ? counselorNoticeSendPage.rows.map((row) => (
+                                <tr key={row.reg_no}>
+                                  <td><strong>{row.reg_no}</strong></td>
+                                  <td>{row.student_name}</td>
+                                  <td>{row.parent_phone || '-'}</td>
+                                  <td>
+                                    <span className={`badge ${row.status === 'Generated' ? 'badge-success' : 'badge-warning'}`}>{row.status}</span>
+                                  </td>
+                                  <td>
+                                    <button
+                                      type="button"
+                                      className={`btn btn-primary btn-sm ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
+                                      onClick={() => void handleCounselorNoticeSendSingle(row)}
+                                    >
+                                      <i className="fab fa-whatsapp"></i> Send To WhatsApp
+                                    </button>
+                                  </td>
+                                </tr>
+                              )) : (
+                                <tr><td colSpan={5} className="text-center text-muted" style={{ padding: 18 }}>No students are assigned to your account yet.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {embeddedWhatsappSidepaneLayoutActive && counselorNoticeDesktopWorkspaceMode ? (
+                    <aside className="desktop-send-workspace-pane">
+                      <div className="desktop-send-sidepane-panel">
+                        <div className={`desktop-send-student-list-shell ${desktopWhatsappWorkspaceExiting ? 'is-exiting' : ''}`} ref={desktopNoticeQueueShellRef}>
+                          <div className="card-title"><i className="fas fa-user-group"></i> Student Send List</div>
+                          {desktopWhatsappWorkspaceBusy ? (
+                            <div className="desktop-send-workspace-loader">
+                              <div className="spinner-ring" aria-hidden="true"></div>
+                              <div className="desktop-send-workspace-loader-copy">Preparing WhatsApp workspace...</div>
+                            </div>
+                          ) : (
+                            <div className="desktop-send-student-list">
+                              {counselorNoticeSendPage.rows.length ? counselorNoticeSendPage.rows.map((row) => (
+                                <div
+                                  key={row.reg_no}
+                                  className={`desktop-send-student-item ${row.status === 'Generated' ? 'is-generated' : ''} ${desktopWhatsappActiveTarget?.kind === 'notice' && desktopWhatsappActiveTarget.regNo === row.reg_no ? 'is-active' : ''}`}
+                                >
+                                  <div className="desktop-send-student-main">
+                                  <div className="desktop-send-student-name">{row.student_name}</div>
+                                    {desktopWhatsappActiveTarget?.kind === 'notice' && desktopWhatsappActiveTarget.regNo === row.reg_no ? null : desktopNoticeQueueState[row.reg_no] ? (
+                                      <span className="desktop-send-student-active">{desktopNoticeQueueState[row.reg_no].toUpperCase()}</span>
+                                    ) : null}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className={`btn btn-primary btn-sm desktop-send-student-button ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
+                                    disabled={desktopWhatsappLoadingRow === row.reg_no}
+                                    onClick={() => void handleCounselorNoticeDesktopQueuePick(row)}
+                                  >
+                                    <i className={desktopWhatsappLoadingRow === row.reg_no ? 'fas fa-spinner fa-spin' : 'fab fa-whatsapp'}></i> {desktopWhatsappLoadingRow === row.reg_no ? 'Opening...' : 'Send To WhatsApp'}
+                                  </button>
+                                </div>
+                              )) : (
+                                <div className="text-muted" style={{ fontSize: '.84rem' }}>No students are assigned to your account yet.</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </aside>
+                    ) : null}
+                  </div>
+                ) : (
+                <>
                 <div className="card mb-3">
                   <div className="card-title"><i className="fas fa-pen-to-square"></i> Message Template</div>
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label className="form-label">Notice Title</label>
-                      <input
-                        className="form-control"
+                    <div className="form-row">
+                      <div className="form-group">
+                        <label className="form-label">Notice Title</label>
+                        <input
+                          className="form-control"
                         value={counselorNoticeSendVars.title}
                         onChange={(event) => setCounselorNoticeSendVars((prev) => ({ ...prev, title: event.target.value }))}
                       />
                     </div>
                     <div className="form-group">
-                      <label className="form-label">WhatsApp Link Mode</label>
-                      <div className="btn-group" style={{ justifyContent: 'flex-start' }}>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${counselorNoticeSendVars.sendMode === 'app' ? 'btn-primary' : 'btn-outline'}`}
-                          onClick={() => void openCounselorNoticeSendPage(counselorNoticeSendPage.noticeId, 'app')}
-                        >
-                          App
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${counselorNoticeSendVars.sendMode === 'web' ? 'btn-primary' : 'btn-outline'}`}
-                          onClick={() => void openCounselorNoticeSendPage(counselorNoticeSendPage.noticeId, 'web')}
-                          disabled={isMobileUi()}
-                        >
-                          Web
-                        </button>
-                      </div>
-                      <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
-                        {isMobileUi()
-                          ? 'Mobile UI uses WhatsApp app mode only.'
-                          : counselorNoticeSendVars.sendMode === 'web'
-                            ? 'Web mode opens WhatsApp Web in this same tab.'
-                            : 'App mode opens the WhatsApp app link directly.'}
-                      </small>
+                      <label className="form-label">{counselorNoticeEmbeddedWhatsappActive ? 'Desktop Send Flow' : 'WhatsApp Link Mode'}</label>
+                      {counselorNoticeEmbeddedWhatsappActive ? (
+                        <>
+                          <div className="badge badge-info" style={{ width: 'fit-content' }}>Desktop WhatsApp Workspace</div>
+                          <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
+                            Desktop sends keep the floating student list active while opening WhatsApp Desktop.
+                          </small>
+                        </>
+                      ) : (
+                        <>
+                          <div className="btn-group" style={{ justifyContent: 'flex-start' }}>
+                            <button
+                              type="button"
+                              className={`btn btn-sm ${counselorNoticeSendVars.sendMode === 'app' ? 'btn-primary' : 'btn-outline'}`}
+                              onClick={() => void openCounselorNoticeSendPage(counselorNoticeSendPage.noticeId, 'app')}
+                            >
+                              App
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn btn-sm ${counselorNoticeSendVars.sendMode === 'web' ? 'btn-primary' : 'btn-outline'}`}
+                              onClick={() => void openCounselorNoticeSendPage(counselorNoticeSendPage.noticeId, 'web')}
+                              disabled={isMobileUi()}
+                            >
+                              Web
+                            </button>
+                          </div>
+                          <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', display: 'block', marginTop: 6 }}>
+                            {isMobileUi()
+                              ? 'Mobile UI uses WhatsApp app mode only.'
+                              : counselorNoticeSendVars.sendMode === 'web'
+                                ? 'Web mode opens WhatsApp Web in this same tab.'
+                                : 'App mode opens the WhatsApp app link directly.'}
+                          </small>
+                        </>
+                      )}
                     </div>
                   </div>
                   <div className="form-group">
@@ -4923,9 +9465,24 @@ export default function App() {
                               <td>{attachment.mime_type || 'Document'}</td>
                               <td>{`${(((attachment.file_size || 0) / 1024) || 0).toFixed(1)} KB`}</td>
                               <td>
-                                <a className="btn btn-outline btn-sm" href={`/notice-files/${attachment.public_token}`} target="_blank" rel="noreferrer">
+                                {(() => {
+                                  const previewUrl = buildNoticeAttachmentPreviewUrl(attachment);
+                                  return (
+                                <a
+                                  className="btn btn-outline btn-sm"
+                                  href={previewUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(event) => {
+                                    if (!runtimeConfig.isDesktop) return;
+                                    event.preventDefault();
+                                    openExternalLink(previewUrl);
+                                  }}
+                                >
                                   <i className="fas fa-eye"></i> Open
                                 </a>
+                                  );
+                                })()}
                               </td>
                             </tr>
                           ))}
@@ -4938,37 +9495,45 @@ export default function App() {
                 </div>
 
                 <div className="table-wrapper" id="noticeSendTable">
-                  <table>
+                  <table className={counselorNoticeEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted ? 'desktop-send-queue-table' : ''}>
                     <thead>
                       <tr>
                         <th>Reg No</th>
                         <th>Name</th>
                         <th>Phone</th>
                         <th>Status</th>
-                        <th>Action</th>
+                        {(!counselorNoticeEmbeddedWhatsappActive || !desktopWhatsappWorkspaceStarted) ? <th>Action</th> : null}
                       </tr>
                     </thead>
                     <tbody>
                       {counselorNoticeSendPage.rows.length ? counselorNoticeSendPage.rows.map((row) => (
-                        <tr key={row.reg_no}>
+                        <tr
+                          key={row.reg_no}
+                          className={counselorNoticeEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted
+                            ? `desktop-send-queue-row ${row.status === 'Generated' ? 'is-generated' : ''} ${desktopWhatsappActiveTarget?.kind === 'notice' && desktopWhatsappActiveTarget.regNo === row.reg_no ? 'is-active' : ''}`
+                            : ''}
+                          onClick={counselorNoticeEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted ? (() => void handleCounselorNoticeDesktopQueuePick(row)) : undefined}
+                        >
                           <td><strong>{row.reg_no}</strong></td>
                           <td>{row.student_name}</td>
                           <td>{row.parent_phone || '-'}</td>
                           <td>
                             <span className={`badge ${row.status === 'Generated' ? 'badge-success' : 'badge-warning'}`}>{row.status}</span>
                           </td>
-                          <td>
-                            <button
-                              type="button"
-                              className={`btn btn-primary btn-sm ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
-                              onClick={() => void handleCounselorNoticeSendSingle(row)}
-                            >
-                              <i className="fab fa-whatsapp"></i> Send Notice
-                            </button>
-                          </td>
+                          {(!counselorNoticeEmbeddedWhatsappActive || !desktopWhatsappWorkspaceStarted) ? (
+                            <td>
+                              <button
+                                type="button"
+                                className={`btn btn-primary btn-sm ${row.status === 'Generated' ? 'send-btn-generated' : ''}`}
+                                onClick={() => void (counselorNoticeEmbeddedWhatsappActive ? handleCounselorNoticeDesktopQueuePick(row) : handleCounselorNoticeSendSingle(row))}
+                              >
+                                <i className="fab fa-whatsapp"></i> Send To WhatsApp
+                              </button>
+                            </td>
+                          ) : null}
                         </tr>
                       )) : (
-                        <tr><td colSpan={5} className="text-center text-muted" style={{ padding: 18 }}>No students are assigned to your account yet.</td></tr>
+                        <tr><td colSpan={counselorNoticeEmbeddedWhatsappActive && desktopWhatsappWorkspaceStarted ? 4 : 5} className="text-center text-muted" style={{ padding: 18 }}>No students are assigned to your account yet.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -4976,7 +9541,14 @@ export default function App() {
 
                 <div style={{ height: 48 }}></div>
 
-                {counselorNoticeSendPage.batchSendEnabled && !isMobileUi() ? (
+                {counselorNoticeEmbeddedWhatsappActive ? (
+                  <div className="card" id="noticeBatchSendCard">
+                    <div className="card-title"><i className="fas fa-list-check"></i> Desktop Send Queue</div>
+                    <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 0 }}>
+                      Desktop workspace mode keeps the split send layout active. Open each notice from the list and continue through the queue without leaving the workspace.
+                    </p>
+                  </div>
+                ) : counselorNoticeSendPage.batchSendEnabled && !isMobileUi() ? (
                   <div className="card" id="noticeBatchSendCard">
                     <div className="card-title d-flex justify-between align-center">
                       <span><i className="fas fa-layer-group"></i> Batch Send Controls</span>
@@ -5024,6 +9596,8 @@ export default function App() {
                     ) : null}
                   </div>
                 ) : null}
+                </>
+                )}
               </>
             ) : null
           ) : currentUser.role === 'counselor' && activeTab === 'recent-tests' ? (
@@ -5146,8 +9720,8 @@ export default function App() {
                             <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadTestDetail(test.id)}>
                               <i className="fas fa-eye"></i> View/Edit
                             </button>
-                            <button type="button" className="btn btn-primary btn-sm" onClick={() => startCounselorSendFlow(test.id, test.test_name)}>
-                              <i className="fas fa-paper-plane"></i> Send Results
+                            <button type="button" className="btn btn-primary btn-sm" disabled={sendResultOpeningId === test.id} onClick={() => startCounselorSendFlow(test.id, test.test_name)}>
+                              <i className={`fas ${sendResultOpeningId === test.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendResultOpeningId === test.id ? 'Opening...' : 'Send Results'}
                             </button>
                           </div>
                         </td>
@@ -5162,8 +9736,8 @@ export default function App() {
               <div className="card mt-3" id="dashboardPendingNoticesCard">
                 <div className="card-title"><i className="fas fa-bullhorn"></i> Pending Notices</div>
                 {counselorDashboardPendingNotices.length ? (
-                  <div className="table-wrapper">
-                    <table>
+                  <div className="table-wrapper table-scroll-lg">
+                    <table className="sticky-table">
                       <thead>
                         <tr>
                           <th>Notice</th>
@@ -5186,8 +9760,8 @@ export default function App() {
                               <span className="badge badge-warning">{notice.sent_students || 0}/{notice.student_count || notice.total_students || 0} sent</span>
                             </td>
                             <td>
-                              <button type="button" className="btn btn-primary btn-sm" onClick={() => startCounselorNoticeSendFlow(notice)}>
-                                <i className="fas fa-paper-plane"></i> Send Notice
+                              <button type="button" className="btn btn-primary btn-sm" disabled={sendNoticeOpeningId === notice.id} onClick={() => startCounselorNoticeSendFlow(notice)}>
+                                <i className={`fas ${sendNoticeOpeningId === notice.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendNoticeOpeningId === notice.id ? 'Opening...' : 'Send Notice'}
                               </button>
                             </td>
                           </tr>
@@ -5202,224 +9776,18 @@ export default function App() {
 
             </>
           ) : ['admin', 'principal', 'hod'].includes(currentUser.role) && activeTab === 'dashboard' ? (
-            dashboardLoading && !dashboardData ? (
-              <div className="card">
-                <div className="panel-placeholder">Loading dashboard...</div>
-              </div>
-            ) : (
-              <>
-                <div className="d-flex justify-between align-center flex-wrap mb-3" style={{ gap: 12 }}>
-                  <h3 className="section-title" style={{ marginBottom: 0 }}>
-                    <i className="fas fa-gauge"></i> Dashboard
-                  </h3>
-                  <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadDashboardOverview()}>
-                    <i className="fas fa-rotate"></i> Refresh
-                  </button>
-                </div>
-
-                {currentUser.role === 'admin' && dashboardData?.admin_status ? (
-                  <>
-                    <div className="metrics-grid mb-3">
-                      <div className="metric-card">
-                        <div className="metric-label">Active Sessions</div>
-                        <div className="metric-value">{dashboardData.admin_status.sessions.active_sessions}</div>
-                        <div className="metric-icon"><i className="fas fa-signal"></i></div>
-                      </div>
-                      <div className="metric-card">
-                        <div className="metric-label">Today Sessions</div>
-                        <div className="metric-value">{dashboardData.admin_status.sessions.today_sessions}</div>
-                        <div className="metric-icon"><i className="fas fa-calendar-day"></i></div>
-                      </div>
-                      <div className="metric-card">
-                        <div className="metric-label">Backups</div>
-                        <div className="metric-value">{dashboardData.admin_status.backup.backup_count + dashboardData.admin_status.backup.auto_backup_count}</div>
-                        <div className="metric-icon"><i className="fas fa-database"></i></div>
-                      </div>
-                      <div className="metric-card">
-                        <div className="metric-label">Archives</div>
-                        <div className="metric-value">{dashboardData.admin_status.backup.archive_count}</div>
-                        <div className="metric-icon"><i className="fas fa-box-archive"></i></div>
-                      </div>
-                    </div>
-
-                    <div className="dashboard-dual-grid mb-3">
-                      <div className="card dashboard-status-card">
-                        <div className="card-title"><i className="fas fa-envelope"></i> SMTP Status</div>
-                        <div className="dashboard-summary-row">
-                          <span className={`badge ${dashboardData.admin_status.smtp.state === 'ready' ? 'badge-success' : 'badge-warning'}`}>{dashboardData.admin_status.smtp.label}</span>
-                        </div>
-                        <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.smtp.detail}</p>
-                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                          <div><strong>Server:</strong> {dashboardData.admin_status.smtp.config.server || '--'}</div>
-                          <div><strong>Username:</strong> {dashboardData.admin_status.smtp.config.username || '--'}</div>
-                          <div><strong>From:</strong> {dashboardData.admin_status.smtp.config.email_from || '--'}</div>
-                          <div><strong>Port:</strong> {dashboardData.admin_status.smtp.config.port || '--'}</div>
-                        </div>
-                      </div>
-
-                      <div className="card dashboard-status-card">
-                        <div className="card-title"><i className="fas fa-hard-drive"></i> Backup Status</div>
-                        <div className="dashboard-summary-row">
-                          <span className={`badge ${dashboardData.admin_status.backup.health === 'healthy' ? 'badge-success' : dashboardData.admin_status.backup.health === 'warning' ? 'badge-warning' : 'badge-danger'}`}>{dashboardData.admin_status.backup.label}</span>
-                          <span className="badge badge-primary">{dashboardData.admin_status.backup.storage_mode === 'gdrive' ? 'Google Drive' : 'Local'}</span>
-                        </div>
-                        <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.backup.detail}</p>
-                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                          <div><strong>Auto Backups:</strong> {dashboardData.admin_status.backup.auto_backup_count}</div>
-                          <div><strong>Manual Backups:</strong> {dashboardData.admin_status.backup.backup_count}</div>
-                          <div><strong>Archives:</strong> {dashboardData.admin_status.backup.archive_count}</div>
-                          <div><strong>Periodic Backups:</strong> {dashboardData.admin_status.backup.periodic_enabled ? 'Enabled' : 'Disabled'}</div>
-                          <div><strong>Drive Configured:</strong> {dashboardData.admin_status.backup.drive_configured ? 'Yes' : 'No'}</div>
-                          <div><strong>Latest Backup:</strong> {dashboardData.admin_status.backup.latest_backup_name ? `${dashboardData.admin_status.backup.latest_backup_name} (${dashboardData.admin_status.backup.latest_backup_modified})` : '--'}</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="dashboard-dual-grid mb-3">
-                      <div className="card dashboard-status-card">
-                        <div className="card-title"><i className="fab fa-google"></i> OAuth Status</div>
-                        <div className="dashboard-summary-row">
-                          <span className={`badge ${dashboardData.admin_status.oauth.enabled && dashboardData.admin_status.oauth.healthy ? 'badge-success' : dashboardData.admin_status.oauth.enabled ? 'badge-warning' : 'badge-muted'}`}>{dashboardData.admin_status.oauth.label}</span>
-                        </div>
-                        <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.oauth.detail}</p>
-                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                          <div><strong>Allowed Domain:</strong> {dashboardData.admin_status.oauth.allowed_domain || 'Any verified email'}</div>
-                          <div><strong>Redirect Base URL:</strong> {dashboardData.admin_status.oauth.redirect_base_url || '--'}</div>
-                        </div>
-                      </div>
-
-                      <div className="card dashboard-status-card">
-                        <div className="card-title"><i className="fas fa-user-shield"></i> Session Health</div>
-                        <div className="dashboard-summary-row">
-                          <span className="badge badge-success">Peak {dashboardData.admin_status.sessions.peak_concurrent}</span>
-                          <span className="badge badge-warning">Forced {dashboardData.admin_status.sessions.forced_logouts}</span>
-                        </div>
-                        <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                          <div><strong>Active Sessions:</strong> {dashboardData.admin_status.sessions.active_sessions}</div>
-                          <div><strong>Today Logins:</strong> {dashboardData.admin_status.sessions.today_sessions}</div>
-                          <div><strong>Peak Concurrent:</strong> {dashboardData.admin_status.sessions.peak_concurrent}</div>
-                          <div><strong>Forced Logouts:</strong> {dashboardData.admin_status.sessions.forced_logouts}</div>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                ) : null}
-
-                <div className="dashboard-dual-grid mb-3">
-                  <div className="card dashboard-status-card">
-                    <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
-                      <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-file-lines"></i> Counsellor Completion Status For Marks</div>
-                      {currentUser.role === 'hod' ? (
-                        <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleCopyActivityDefaulters('scope')}>
-                          <i className="fas fa-copy"></i> Copy Defaulters
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="dashboard-summary-row">
-                      <span className="badge badge-warning">Pending {dashboardData?.completion_overview.pending_counselors ?? 0}</span>
-                      <span className="badge badge-success">Overall {dashboardData?.completion_overview.overall ?? 0}%</span>
-                    </div>
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Department</th>
-                            <th>Completion %</th>
-                            <th>Year Breakdown</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(dashboardData?.completion_overview.department_labels || []).length ? dashboardData!.completion_overview.department_labels.map((department, index) => (
-                            <tr key={department}>
-                              <td><strong>{department}</strong></td>
-                              <td>{dashboardData!.completion_overview.department_values[index] ?? 0}%</td>
-                              <td style={{ fontSize: '.8rem', color: 'var(--text-dim)' }}>
-                                {Object.entries(dashboardData!.completion_overview.department_year_breakdown[department] || {})
-                                  .map(([year, value]) => `${formatYearLevel(Number(year))}: ${value}%`)
-                                  .join(' | ') || '--'}
-                              </td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={3} className="text-center text-muted" style={{ padding: 20 }}>No counselor completion data available yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  <div className="card dashboard-status-card">
-                    <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
-                      <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-bullhorn"></i> Notice Completion Status</div>
-                      {currentUser.role === 'hod' ? (
-                        <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleCopyDashboardNoticeDefaulters()}>
-                          <i className="fas fa-copy"></i> Copy Defaulters
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="dashboard-summary-row">
-                      <span className="badge badge-warning">Pending {dashboardData?.notice_completion_overview.pending_counselors ?? 0}</span>
-                      <span className="badge badge-success">Overall {dashboardData?.notice_completion_overview.overall ?? 0}%</span>
-                    </div>
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Department</th>
-                            <th>Completion %</th>
-                            <th>Year Breakdown</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(dashboardData?.notice_completion_overview.department_labels || []).length ? dashboardData!.notice_completion_overview.department_labels.map((department, index) => (
-                            <tr key={`notice-${department}`}>
-                              <td><strong>{department}</strong></td>
-                              <td>{dashboardData!.notice_completion_overview.department_values[index] ?? 0}%</td>
-                              <td style={{ fontSize: '.8rem', color: 'var(--text-dim)' }}>
-                                {Object.entries(dashboardData!.notice_completion_overview.department_year_breakdown[department] || {})
-                                  .map(([year, value]) => `${formatYearLevel(Number(year))}: ${value}%`)
-                                  .join(' | ') || '--'}
-                              </td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={3} className="text-center text-muted" style={{ padding: 20 }}>No notice completion data available yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="card">
-                  <div className="card-title"><i className="fas fa-trophy"></i> Top Counselors (Completion)</div>
-                  <div className="table-wrapper">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Name</th>
-                          <th>Department</th>
-                          <th>Students</th>
-                          <th>Reached</th>
-                          <th>Completion</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(dashboardData?.leaderboard || []).length ? dashboardData!.leaderboard.map((row) => (
-                          <tr key={row.email}>
-                            <td><strong>{row.name}</strong><br /><span className="inline-muted">{row.email}</span></td>
-                            <td>{row.department}</td>
-                            <td>{row.student_count}</td>
-                            <td>{row.unique_students_messaged}</td>
-                            <td><span className="badge badge-success">{row.completion_pct}%</span></td>
-                          </tr>
-                        )) : (
-                          <tr><td colSpan={5} className="text-center text-muted" style={{ padding: 20 }}>No counselor activity yet.</td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </>
-            )
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading dashboard workspace...</div></div>}>
+              <DashboardTab
+                currentUser={currentUser}
+                dashboardLoading={dashboardLoading}
+                dashboardData={dashboardData}
+                formatDateTime={formatDateTime}
+                formatYearLevel={formatYearLevel}
+                onRefreshDashboard={() => void loadDashboardOverview()}
+                onCopyActivityDefaulters={() => void handleCopyActivityDefaulters('scope')}
+                onCopyDashboardNoticeDefaulters={() => void handleCopyDashboardNoticeDefaulters()}
+              />
+            </Suspense>
           ) : activeTab === 'notices' ? (
             <>
               <h3 className="section-title"><i className="fas fa-bullhorn"></i> Notices</h3>
@@ -5492,11 +9860,11 @@ export default function App() {
                       />
                     </div>
 
-                    {noticesData?.editNotice?.attachments?.length ? (
+                    {activeNoticeEdit?.attachments?.length ? (
                       <div className="card mb-2" style={{ padding: 12, background: 'rgba(59,130,246,.06)', border: '1px solid rgba(59,130,246,.2)' }}>
                         <div className="card-title" style={{ fontSize: '.86rem', marginBottom: 10 }}><i className="fas fa-link"></i> Existing Attachments</div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                          {noticesData.editNotice.attachments.map((attachment) => (
+                          {activeNoticeEdit.attachments.map((attachment) => (
                             <label key={attachment.id} className="scope-chip" style={{ maxWidth: '100%', alignItems: 'flex-start' }}>
                               <input
                                 type="checkbox"
@@ -5512,7 +9880,7 @@ export default function App() {
                               />
                               <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                                 <strong style={{ fontSize: '.78rem' }}>Remove {attachment.original_name}</strong>
-                                <a href={`/notice-files/${attachment.public_token}`} target="_blank" rel="noreferrer" style={{ fontSize: '.75rem' }}>Preview current file</a>
+                                <a href={buildNoticeAttachmentPreviewUrl(attachment)} target="_blank" rel="noreferrer" style={{ fontSize: '.75rem' }}>Preview current file</a>
                               </span>
                             </label>
                           ))}
@@ -5637,12 +10005,14 @@ export default function App() {
 
               {currentUser.role === 'counselor' ? (
                 <div className="card" id="noticeRecordsCard">
-                <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
+                <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12, marginBottom: 14 }}>
                   <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list"></i> Notice Records</div>
-                  <div className="btn-group">
+                </div>
+                <div className="d-flex align-center flex-wrap" style={{ gap: 10, marginBottom: 12 }}>
+                  <div style={{ flex: '1 1 320px', minWidth: 260 }}>
                     <input
                       className="form-control"
-                      style={{ minWidth: 260 }}
+                      style={{ width: '100%' }}
                       autoComplete="off"
                       data-lpignore="true"
                       data-1p-ignore="true"
@@ -5650,20 +10020,39 @@ export default function App() {
                       onChange={(event) => setNoticeRecordSearch(event.target.value)}
                       placeholder="Search notice title, creator or scope"
                     />
-                    <select className="form-control" style={{ minWidth: 190 }} value={noticeRecordSort} onChange={(event) => setNoticeRecordSort(event.target.value)}>
+                  </div>
+                  <div className="btn-group">
+                    <button type="button" className="btn btn-outline btn-sm" onClick={() => setNoticeRecordSortOpen((prev) => !prev)}>
+                      <i className="fas fa-arrow-down-wide-short"></i> Sort
+                    </button>
+                  </div>
+                </div>
+                {noticeRecordSortOpen ? (
+                  <div className="filter-tray" style={{ marginBottom: 14 }}>
+                    <select className="form-control" value={noticeRecordSort} onChange={(event) => setNoticeRecordSort(event.target.value)} style={{ maxWidth: 220 }}>
                       <option value="latest">Latest First</option>
                       <option value="progress_desc">Highest Progress</option>
                       <option value="attachments_desc">Most Attachments</option>
                       <option value="title_asc">Title A-Z</option>
                       <option value="title_desc">Title Z-A</option>
                     </select>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={() => {
+                        setNoticeRecordSearch('');
+                        setNoticeRecordSort('latest');
+                      }}
+                    >
+                      <i className="fas fa-rotate-left"></i> Reset
+                    </button>
                   </div>
-                </div>
+                ) : null}
                 <div className="inline-muted" style={{ marginBottom: 12 }}>
                   Showing {visibleNoticeRecords.length} notice record{visibleNoticeRecords.length === 1 ? '' : 's'}
                 </div>
-                <div className="table-wrapper">
-                  <table>
+                <div className="table-wrapper table-scroll-lg">
+                  <table className="sticky-table">
                     <thead>
                       <tr>
                         <th>Notice</th>
@@ -5718,8 +10107,8 @@ export default function App() {
                           <td>
                             <div className="btn-group">
                               {currentUser.role === 'counselor' ? (
-                                <button type="button" className="btn btn-primary btn-sm" onClick={() => startCounselorNoticeSendFlow(notice)}>
-                                  <i className="fas fa-paper-plane"></i> Send Notice
+                                <button type="button" className="btn btn-primary btn-sm" disabled={sendNoticeOpeningId === notice.id} onClick={() => startCounselorNoticeSendFlow(notice)}>
+                                  <i className={`fas ${sendNoticeOpeningId === notice.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendNoticeOpeningId === notice.id ? 'Opening...' : 'Send Notice'}
                                 </button>
                               ) : notice.can_manage_fully ? (
                                 <>
@@ -5749,17 +10138,9 @@ export default function App() {
                 <div className="card mt-3" id="noticeCompletionCard">
                   <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
                     <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list-check"></i> Notice Completion List</div>
-                    <div className="btn-group">
-                      <button type="button" className="btn btn-outline btn-sm" onClick={() => setNoticeCompletionSortOpen((prev) => !prev)}>
-                        <i className="fas fa-arrow-down-wide-short"></i> Sort
-                      </button>
-                      <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleCopyNoticeDefaulters()}>
-                        <i className="fas fa-copy"></i> Copy Defaulters
-                      </button>
-                    </div>
                   </div>
-                  <div className="form-group" style={{ marginBottom: 12 }}>
-                    <label className="form-label">Search Counselors</label>
+                  <div className="d-flex align-center flex-wrap" style={{ gap: 10, marginBottom: 12 }}>
+                    <div style={{ flex: '1 1 340px', minWidth: 260 }}>
                     <input
                       className="form-control"
                       autoComplete="off"
@@ -5769,6 +10150,15 @@ export default function App() {
                       onChange={(event) => setNoticeCompletionSearch(event.target.value)}
                       placeholder="Type counselor name, email, department or notice title"
                     />
+                    </div>
+                    <div className="btn-group">
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => setNoticeCompletionSortOpen((prev) => !prev)}>
+                        <i className="fas fa-arrow-down-wide-short"></i> Sort
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleCopyNoticeDefaulters()}>
+                        <i className="fas fa-copy"></i> Copy Defaulters
+                      </button>
+                    </div>
                   </div>
                   {noticeCompletionSortOpen ? (
                     <div className="filter-tray" style={{ marginBottom: 14 }}>
@@ -5810,8 +10200,8 @@ export default function App() {
                   <div className="inline-muted" style={{ marginBottom: 12 }}>
                     Showing {noticeCompletionRows.length} counselor row{noticeCompletionRows.length === 1 ? '' : 's'}
                   </div>
-                  <div className="table-wrapper">
-                    <table>
+                  <div className="table-wrapper table-scroll-lg">
+                    <table className="sticky-table">
                       <thead>
                         <tr>
                           <th>Counselor</th>
@@ -5853,10 +10243,12 @@ export default function App() {
                   <div className="card mt-3" id="noticeRecordsCard">
                     <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
                       <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list"></i> Notice Records</div>
-                      <div className="btn-group">
+                    </div>
+                    <div className="d-flex align-center flex-wrap" style={{ gap: 10, marginBottom: 12 }}>
+                      <div style={{ flex: '1 1 340px', minWidth: 260 }}>
                         <input
                           className="form-control"
-                          style={{ minWidth: 260 }}
+                          style={{ width: '100%' }}
                           autoComplete="off"
                           data-lpignore="true"
                           data-1p-ignore="true"
@@ -5864,67 +10256,59 @@ export default function App() {
                           onChange={(event) => setNoticeRecordSearch(event.target.value)}
                           placeholder="Search notice title, creator or scope"
                         />
-                        <select className="form-control" style={{ minWidth: 190 }} value={noticeRecordSort} onChange={(event) => setNoticeRecordSort(event.target.value)}>
-                          <option value="latest">Latest First</option>
-                          <option value="progress_desc">Highest Progress</option>
-                          <option value="attachments_desc">Most Attachments</option>
-                          <option value="title_asc">Title A-Z</option>
-                          <option value="title_desc">Title Z-A</option>
-                        </select>
                       </div>
-                    </div>
-                    <form className="form-row" style={{ alignItems: 'end', marginBottom: 14 }}>
-                      <div className="form-group">
-                        <label className="form-label">Department</label>
-                        <select className="form-control" value={noticeFilters.department} onChange={(event) => setNoticeFilters((prev) => ({ ...prev, department: event.target.value }))}>
-                          <option value="">All Departments</option>
-                          {(noticesData?.departments || []).map((department) => (
-                            <option key={department.code} value={department.code}>{department.code}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Year</label>
-                        <select className="form-control" value={noticeFilters.year} onChange={(event) => setNoticeFilters((prev) => ({ ...prev, year: event.target.value }))}>
-                          <option value="">All Years</option>
-                          {(noticesData?.availableYears || []).map((year) => (
-                            <option key={year} value={year}>{formatYearLevel(year)}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Status</label>
-                        <select className="form-control" value={noticeFilters.status} onChange={(event) => setNoticeFilters((prev) => ({ ...prev, status: event.target.value }))}>
-                          <option value="">All Status</option>
-                          <option value="pending">Pending</option>
-                          <option value="completed">Completed</option>
-                        </select>
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">From Date</label>
-                        <SmartDateInput value={noticeFilters.date_from} onChange={(nextValue) => setNoticeFilters((prev) => ({ ...prev, date_from: nextValue }))} />
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">To Date</label>
-                        <SmartDateInput value={noticeFilters.date_to} onChange={(nextValue) => setNoticeFilters((prev) => ({ ...prev, date_to: nextValue }))} />
-                      </div>
-                      <div className="btn-group" style={{ marginBottom: 2 }}>
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() => {
-                            setNoticeFilters({ department: '', year: '', status: '', date_from: '', date_to: '' });
-                          }}
-                        >
-                          <i className="fas fa-rotate-left"></i> Reset
+                      <div className="btn-group">
+                        <button type="button" className="btn btn-outline btn-sm" onClick={() => setNoticeRecordSortOpen((prev) => !prev)}>
+                          <i className="fas fa-arrow-down-wide-short"></i> Sort
                         </button>
                       </div>
-                    </form>
+                    </div>
+                    {noticeRecordSortOpen ? (
+                    <div className="filter-tray" style={{ marginBottom: 14 }}>
+                      <select className="form-control" value={noticeRecordSort} onChange={(event) => setNoticeRecordSort(event.target.value)} style={{ maxWidth: 220 }}>
+                        <option value="latest">Latest First</option>
+                        <option value="progress_desc">Highest Progress</option>
+                        <option value="attachments_desc">Most Attachments</option>
+                        <option value="title_asc">Title A-Z</option>
+                        <option value="title_desc">Title Z-A</option>
+                      </select>
+                      <select className="form-control" value={noticeFilters.department} onChange={(event) => setNoticeFilters((prev) => ({ ...prev, department: event.target.value }))} style={{ maxWidth: 180 }}>
+                        <option value="">All Departments</option>
+                        {(noticesData?.departments || []).map((department) => (
+                          <option key={department.code} value={department.code}>{department.code}</option>
+                        ))}
+                      </select>
+                      <select className="form-control" value={noticeFilters.year} onChange={(event) => setNoticeFilters((prev) => ({ ...prev, year: event.target.value }))} style={{ maxWidth: 160 }}>
+                        <option value="">All Years</option>
+                        {(noticesData?.availableYears || []).map((year) => (
+                          <option key={year} value={year}>{formatYearLevel(year)}</option>
+                        ))}
+                      </select>
+                      <select className="form-control" value={noticeFilters.status} onChange={(event) => setNoticeFilters((prev) => ({ ...prev, status: event.target.value }))} style={{ maxWidth: 170 }}>
+                        <option value="">All Status</option>
+                        <option value="pending">Pending</option>
+                        <option value="completed">Completed</option>
+                      </select>
+                      <SmartDateInput value={noticeFilters.date_from} onChange={(nextValue) => setNoticeFilters((prev) => ({ ...prev, date_from: nextValue }))} placeholder="09 Jun 2026" />
+                      <SmartDateInput value={noticeFilters.date_to} onChange={(nextValue) => setNoticeFilters((prev) => ({ ...prev, date_to: nextValue }))} placeholder="20 Jun 2026" />
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => {
+                          setNoticeRecordSearch('');
+                          setNoticeRecordSort('latest');
+                          setNoticeFilters({ department: '', year: '', status: '', date_from: '', date_to: '' });
+                        }}
+                      >
+                        <i className="fas fa-rotate-left"></i> Reset
+                      </button>
+                    </div>
+                    ) : null}
                     <div className="inline-muted" style={{ marginBottom: 12 }}>
                       Showing {visibleNoticeRecords.length} notice record{visibleNoticeRecords.length === 1 ? '' : 's'}
                     </div>
-                    <div className="table-wrapper">
-                      <table>
+                    <div className="table-wrapper table-scroll-lg">
+                      <table className="sticky-table">
                         <thead>
                           <tr>
                             <th>Notice</th>
@@ -6057,616 +10441,142 @@ export default function App() {
               </div>
             </>
           ) : ['admin', 'hod', 'deo'].includes(currentUser.role) && activeTab === 'messages' ? (
-            <div className="messages-tab-surface">
-              <div className="metrics-grid mb-3">
-                <div className="metric-card">
-                  <div className="metric-label">Total Messages</div>
-                  <div className="metric-value">{adminMessagesData?.stats.total ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-envelope"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Today</div>
-                  <div className="metric-value">{adminMessagesData?.stats.today ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-calendar-day"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Active Counselors</div>
-                  <div className="metric-value">{adminMessagesData?.stats.active_counselors ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-user-group"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Visible Days</div>
-                  <div className="metric-value">{adminMessagesData?.messageDays.length ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-calendar-alt"></i></div>
-                </div>
-              </div>
-
-              <div className="card mb-3">
-                <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
-                  <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-envelope-open-text"></i> Message Logs</div>
-                  <button type="button" className="btn btn-outline btn-sm" disabled={adminMessagesLoading} onClick={() => void reloadAdminMessages(adminMessageFilters)}>
-                    <i className={`fas ${adminMessagesLoading ? 'fa-spinner fa-spin' : 'fa-rotate'}`}></i> Refresh
-                  </button>
-                </div>
-                <div>
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label className="form-label">Date</label>
-                      <SmartDateInput
-                        value={adminMessageFilters.day}
-                        onChange={(nextValue) => setAdminMessageFilters((prev) => ({
-                          ...prev,
-                          day: nextValue,
-                          year: '',
-                          month: '',
-                          day_num: '',
-                        }))}
-                      />
-                    </div>
-                    <div className="form-group" style={{ minWidth: 240 }}>
-                      <label className="form-label">Search Counselor</label>
-                      <input
-                        className="form-control"
-                        autoComplete="off"
-                        data-lpignore="true"
-                        data-1p-ignore="true"
-                        value={adminMessageSearch}
-                        onChange={(event) => {
-                          const nextValue = event.target.value;
-                          setAdminMessageSearch(nextValue);
-                          setAdminMessageFilters((prev) => ({ ...prev, q: nextValue.trim() }));
-                        }}
-                        placeholder="Type counselor name or email"
-                      />
-                    </div>
-                  </div>
-                  {filteredAdminMessageSuggestions.length ? (
-                    <div className="table-wrapper" style={{ maxHeight: 180, marginBottom: 12 }}>
-                      <table>
-                        <tbody>
-                          {filteredAdminMessageSuggestions.map((suggestion) => (
-                            <tr key={`message-suggestion:${suggestion.email}`}>
-                              <td>
-                                <strong>{suggestion.name || suggestion.email}</strong><br />
-                                <span className="inline-muted">{suggestion.email}</span>
-                              </td>
-                              <td style={{ textAlign: 'right' }}>
-                                <button
-                                  type="button"
-                                  className={`btn btn-sm ${adminMessageFilters.q === (suggestion.name || suggestion.email) ? 'btn-primary' : 'btn-outline'}`}
-                                  onClick={() => {
-                                    const selected = suggestion.name || suggestion.email;
-                                    setAdminMessageSearch(selected);
-                                    setAdminMessageFilters((prev) => ({ ...prev, q: selected }));
-                                  }}
-                                >
-                                  Select
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : null}
-                  {selectedAdminMessageSuggestion ? (
-                    <div className="detail-display-panel" style={{ marginBottom: 12 }}>
-                      <div className="detail-display-grid">
-                        <div>
-                          <div className="detail-display-label">Selected Counselor</div>
-                          <div className="detail-display-value is-strong">{selectedAdminMessageSuggestion.name || selectedAdminMessageSuggestion.email}</div>
-                        </div>
-                        <div>
-                          <div className="detail-display-label">Email</div>
-                          <div className="detail-display-value">{selectedAdminMessageSuggestion.email}</div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : null}
-                  <div className="btn-group">
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      onClick={() => {
-                        const next = { day: '', q: '', year: '', month: '', day_num: '' };
-                        setAdminMessageFilters(next);
-                        setAdminMessageSearch('');
-                        void reloadAdminMessages(next);
-                      }}
-                    >
-                      <i className="fas fa-rotate-left"></i> Reset
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {(adminMessagesData?.messageDays || []).length ? (
-                <div className="card mb-3" style={{ padding: 12 }}>
-                  <div className="d-flex flex-wrap" style={{ gap: 8 }}>
-                    {adminMessagesData!.messageDays.map((day) => (
-                      <button
-                        key={day.day}
-                        type="button"
-                        className={`badge ${adminMessageFilters.day === day.day ? 'badge-primary' : 'badge-info'}`}
-                        style={{ border: 'none', cursor: 'pointer' }}
-                        onClick={() => {
-                          const next = { ...adminMessageFilters, day: day.day };
-                          setAdminMessageFilters(next);
-                          void reloadAdminMessages(next);
-                        }}
-                      >
-                        {day.day}: {day.total} msg
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="card">
-                <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
-                  <label className="form-check" style={{ margin: 0 }}>
-                    <input
-                      type="checkbox"
-                      checked={!!adminMessagesData?.messages.length && selectedAdminMessageIds.length === adminMessagesData.messages.length}
-                      disabled={adminMessagesLoading && !adminMessagesData}
-                      onChange={(event) =>
-                        setSelectedAdminMessageIds(
-                          event.target.checked ? (adminMessagesData?.messages || []).map((message) => message.id) : [],
-                        )
-                      }
-                    />
-                    <span>Select all on current view</span>
-                  </label>
-                  <button type="button" className="btn btn-danger btn-sm" disabled={adminMessagesLoading && !adminMessagesData} onClick={() => void handleDeleteSelectedAdminMessages()}>
-                    <i className="fas fa-trash"></i> Delete Selected
-                  </button>
-                </div>
-
-                <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 8 }}>
-                  <span className="inline-muted">
-                    Showing {adminMessagesData?.loadedCount ?? adminMessagesData?.messages.length ?? 0} message logs
-                    {adminMessagesData?.hasMore ? ' (more available)' : ''}
-                  </span>
-                  {adminMessagesLoading && adminMessagesData ? (
-                    <span className="badge badge-info">Updating...</span>
-                  ) : null}
-                </div>
-
-                {adminMessagesLoading && !adminMessagesData ? (
-                  <div className="panel-placeholder">Loading message logs...</div>
-                ) : (adminMessagesData?.groups || []).length ? (
-                  adminMessagesData!.groups.map((group) => (
-                    <div key={group.day} className="card mb-2" style={{ padding: 12 }}>
-                      <div className="d-flex justify-between align-center mb-1" style={{ gap: 8 }}>
-                        <strong>Day: {group.day}</strong>
-                        <span className="badge badge-info">{group.total} messages</span>
-                      </div>
-                      <div className="table-wrapper">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th style={{ width: 34 }}></th>
-                              <th>Time</th>
-                              <th>Counselor</th>
-                              <th>Student</th>
-                              <th>Reg No</th>
-                              <th>Mode</th>
-                              <th>Status</th>
-                              <th>Action</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {group.messages.map((message) => (
-                              <tr key={message.id}>
-                                <td>
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedAdminMessageIdSet.has(message.id)}
-                                    onChange={(event) =>
-                                      setSelectedAdminMessageIds((prev) =>
-                                        event.target.checked ? [...prev, message.id] : prev.filter((id) => id !== message.id),
-                                      )
-                                    }
-                                  />
-                                </td>
-                                <td style={{ fontSize: '.82rem' }}>{String(message.sent_at || '').slice(11, 19) || '--'}</td>
-                                <td>{message.counselor_name || message.counselor_email || '-'}</td>
-                                <td>{message.student_name || '-'}</td>
-                                <td><strong>{message.reg_no || '-'}</strong></td>
-                                <td>
-                                  <span className={`badge ${String(message.send_mode || 'app').toLowerCase() === 'web' ? 'badge-info' : 'badge-primary'}`}>
-                                    {String(message.send_mode || 'app').toUpperCase()}
-                                  </span>
-                                </td>
-                                <td>
-                                  <span className={`badge ${String(message.status || '').toLowerCase() === 'sent' ? 'badge-success' : 'badge-warning'}`}>
-                                    {message.status || 'Pending'}
-                                  </span>
-                                </td>
-                                <td>
-                                  <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleDeleteAdminMessage(message.id)}>
-                                    <i className="fas fa-trash"></i>
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="panel-placeholder">No message activity found for the selected filters.</div>
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading messages workspace...</div></div>}>
+              <MessagesTab
+                adminMessagesLoading={adminMessagesLoading}
+                adminMessagesData={adminMessagesData}
+                adminMessageFilters={adminMessageFilters}
+                adminMessageSearch={adminMessageSearch}
+                selectedAdminMessageIds={selectedAdminMessageIds}
+                SmartDateInput={SmartDateInput}
+                onReloadAdminMessages={(filters) => void reloadAdminMessages(filters)}
+                onAdminMessageDayChange={(nextValue) => setAdminMessageFilters((prev) => ({
+                  ...prev,
+                  day: nextValue,
+                  year: '',
+                  month: '',
+                  day_num: '',
+                }))}
+                onAdminMessageSearchChange={(nextValue) => {
+                  startTransition(() => {
+                    setAdminMessageSearch(nextValue);
+                    setAdminMessageFilters((prev) => ({ ...prev, q: nextValue.trim() }));
+                  });
+                }}
+                onResetAdminMessageFilters={() => {
+                  const next = { day: '', q: '', year: '', month: '', day_num: '' };
+                  setAdminMessageFilters(next);
+                  setAdminMessageSearch('');
+                  void reloadAdminMessages(next);
+                }}
+                onPickAdminMessageDay={(day) => {
+                  const next = { ...adminMessageFilters, day };
+                  setAdminMessageFilters(next);
+                  void reloadAdminMessages(next);
+                }}
+                onToggleSelectAll={(checked) => setSelectedAdminMessageIds(
+                  checked ? (adminMessagesData?.messages || []).map((message) => message.id) : [],
                 )}
-
-                {adminMessagesData?.hasMore ? (
-                  <div className="text-center" style={{ marginTop: 14 }}>
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      disabled={adminMessagesLoading}
-                      onClick={() => {
-                        const nextLimit = adminMessagesLimit + ADMIN_MESSAGES_LIMIT_STEP;
-                        void loadAdminMessages(adminMessageFilters, nextLimit);
-                      }}
-                    >
-                      <i className={`fas ${adminMessagesLoading ? 'fa-spinner fa-spin' : 'fa-plus'}`}></i> Load More
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            </div>
+                onToggleSelectMessage={(id, checked) => setSelectedAdminMessageIds((prev) => (
+                  checked ? [...prev, id] : prev.filter((currentId) => currentId !== id)
+                ))}
+                onDeleteSelected={() => void handleDeleteSelectedAdminMessages()}
+                onDeleteMessage={(id) => void handleDeleteAdminMessage(id)}
+                onLoadMore={() => {
+                  const nextLimit = adminMessagesLimit + ADMIN_MESSAGES_LIMIT_STEP;
+                  void loadAdminMessages(adminMessageFilters, nextLimit);
+                }}
+              />
+            </Suspense>
           ) : ['admin', 'principal', 'deo'].includes(currentUser.role) && activeTab === 'users' ? (
-            <>
-              <div className="metrics-grid mb-3">
-                <div className="metric-card">
-                  <div className="metric-label">Total Users</div>
-                  <div className="metric-value">{bootstrap?.metrics.totalUsers ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-users"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Counselors</div>
-                  <div className="metric-value">{bootstrap?.metrics.counselorCount ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-chalkboard-teacher"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Active Sessions</div>
-                  <div className="metric-value">{bootstrap?.metrics.activeSessions ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-signal"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Messages Sent</div>
-                  <div className="metric-value">{bootstrap?.metrics.messagesSent ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-paper-plane"></i></div>
-                </div>
-              </div>
-
-              <div className="card mb-3">
-                <h3 className="section-title"><i className="fas fa-list"></i> User List ({filteredUsers.length})</h3>
-                <div className="global-action-bar">
-                  <div className="form-group" style={{ flex: 1, minWidth: 260 }}>
-                    <label className="form-label">Search by Name</label>
-                    <input className="form-control" type="text" placeholder="Type name to search..." value={userSearch} onChange={(event) => setUserSearch(event.target.value)} />
-                  </div>
-                  <div className="form-group" style={{ minWidth: 120, alignSelf: 'end' }}>
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => setUserFilterTrayOpen((prev) => !prev)}>
-                      <i className="fas fa-filter"></i> Filters
-                    </button>
-                  </div>
-                  <div className="form-group" style={{ minWidth: 120, alignSelf: 'end' }}>
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => void refreshUsersOverview()}>
-                      <i className="fas fa-rotate"></i> Refresh
-                    </button>
-                  </div>
-                </div>
-
-                {userFilterTrayOpen ? (
-                  <div className="filter-tray" style={{ marginBottom: 14 }}>
-                    <select className="form-control" value={userSortBy} onChange={(event) => setUserSortBy(event.target.value)} style={{ maxWidth: 180 }}>
-                      <option value="name_asc">Name A-Z</option>
-                      <option value="name_desc">Name Z-A</option>
-                      <option value="date_added">Date Added</option>
-                      <option value="role">Role</option>
-                      <option value="department">Department</option>
-                      <option value="year">Year</option>
-                    </select>
-                    <select className="form-control" value={userFilterDepartment} onChange={(event) => setUserFilterDepartment(event.target.value)} style={{ maxWidth: 180 }}>
-                      <option value="">All Departments</option>
-                      {userSelectableDepartments.map((department) => (
-                        <option key={department.id} value={department.code}>{department.code}</option>
-                      ))}
-                    </select>
-                    <select className="form-control" value={userFilterRole} onChange={(event) => setUserFilterRole(event.target.value)} style={{ maxWidth: 170 }}>
-                      <option value="">All Account Types</option>
-                      <option value="admin">System Admin</option>
-                      <option value="principal">Principal</option>
-                      <option value="hod">HoD</option>
-                      <option value="deo">DEO</option>
-                      <option value="counselor">Counselor</option>
-                    </select>
-                    <select className="form-control" value={userFilterStatus} onChange={(event) => setUserFilterStatus(event.target.value)} style={{ maxWidth: 150 }}>
-                      <option value="">All States</option>
-                      <option value="active">Active</option>
-                      <option value="inactive">Inactive</option>
-                    </select>
-                    <select className="form-control" value={userFilterYear} onChange={(event) => setUserFilterYear(event.target.value)} style={{ maxWidth: 140 }}>
-                      <option value="">All Years</option>
-                      <option value="1">Year 1</option>
-                      <option value="2">Year 2</option>
-                      <option value="3">Year 3</option>
-                      <option value="4">Year 4</option>
-                    </select>
-                    <select className="form-control" value={userFilterStudentList} onChange={(event) => setUserFilterStudentList(event.target.value)} style={{ maxWidth: 220 }}>
-                      <option value="">All Student List Status</option>
-                      <option value="with_students">Counselors With Student List</option>
-                      <option value="no_students">Counselors With No Student List</option>
-                    </select>
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      onClick={() => {
-                        setUserFilterDepartment('');
-                        setUserFilterRole('');
-                        setUserFilterStatus('');
-                        setUserFilterYear('');
-                        setUserFilterStudentList('');
-                        setUserSortBy('name_asc');
-                      }}
-                    >
-                      <i className="fas fa-rotate-left"></i> Reset
-                    </button>
-                  </div>
-                ) : null}
-
-                <div className="table-wrapper">
-                  <table id="userTable">
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Role</th>
-                        <th>Department</th>
-                        <th>Year</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {usersLoading ? (
-                        <tr><td colSpan={6} className="text-center text-muted" style={{ padding: 20 }}>Loading users...</td></tr>
-                      ) : filteredUsers.length ? filteredUsers.map((row) => (
-                        <tr key={row.email}>
-                          <td><strong>{row.name}</strong><br /><span className="inline-muted">{row.email}</span></td>
-                          <td>
-                            <span className={`badge ${getRoleBadgeClass(row.role)}`}>
-                              {getRoleOptionLabel(row.role)}
-                            </span>
-                          </td>
-                          <td>
-                            {row.role === 'hod' || row.role === 'deo'
-                              ? (row.scopes?.length
-                                ? row.scopes.length <= 2
-                                  ? row.scopes.map((scope) => scope.department).join(', ')
-                                  : 'Multiple'
-                                : (row.department || '-'))
-                              : (row.department || '-')}
-                          </td>
-                          <td>{row.role === 'counselor' ? formatYearLevel(row.year_level || 1) : '-'}</td>
-                          <td>
-                            <span className={`badge ${row.is_active && !row.is_locked ? 'badge-success' : 'badge-danger'}`}>
-                              {row.is_active && !row.is_locked ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                          <td>
-                            <div className="btn-group">
-                              {row.can_edit ? (
-                                <button type="button" className="btn btn-outline btn-sm" onClick={() => openEditUserModal(row)}>
-                                  <i className="fas fa-edit"></i> Edit
-                                </button>
-                              ) : null}
-                              {row.can_manage ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    className={`btn btn-sm ${row.is_locked ? 'btn-success' : 'btn-warning'}`}
-                                    onClick={() => setUserActionTarget({ kind: row.is_locked ? 'unlock' : 'lock', user: row })}
-                                  >
-                                    <i className={`fas fa-${row.is_locked ? 'unlock' : 'lock'}`}></i>
-                                  </button>
-                                  <button type="button" className="btn btn-danger btn-sm" onClick={() => setUserActionTarget({ kind: 'delete', user: row })}>
-                                    <i className="fas fa-trash"></i>
-                                  </button>
-                                </>
-                              ) : (
-                                <span className="badge badge-info">View Only</span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      )) : (
-                        <tr><td colSpan={6} className="text-center text-muted" style={{ padding: 20 }}>No users matched the current filter.</td></tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {currentUser.role !== 'principal' ? (
-                <div className="card mb-3">
-                  <div className="card-title"><i className="fas fa-user-plus"></i> Register New User</div>
-                  <form onSubmit={(event) => void handleCreateUser(event)} autoComplete="off">
-                    <div className="form-row">
-                      <div className="form-group">
-                        <label className="form-label">Full Name</label>
-                        <input className="form-control" autoComplete="off" data-lpignore="true" data-1p-ignore="true" value={userCreateForm.name} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, name: event.target.value }))} required placeholder="Dr. John Doe" />
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Email</label>
-                        <input className="form-control" type="email" autoComplete="off" data-lpignore="true" data-1p-ignore="true" value={userCreateForm.email} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, email: event.target.value }))} required placeholder="john@rmkcet.ac.in" />
-                      </div>
-                    </div>
-                    <div className="form-row">
-                      <div className="form-group">
-                        <label className="form-label">Password</label>
-                        <input className="form-control" type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={userCreateForm.password} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, password: event.target.value }))} required placeholder="Minimum 6 characters" />
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Confirm Password</label>
-                        <input className="form-control" type="password" autoComplete="new-password" data-lpignore="true" data-1p-ignore="true" value={userCreateForm.confirm_password} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, confirm_password: event.target.value }))} required placeholder="Re-enter password" />
-                      </div>
-                    </div>
-                    {currentUser.role === 'admin' ? (
-                      <div className="form-row">
-                        <div className="form-group">
-                          <label className="form-label">Role</label>
-                          <select
-                            className="form-control"
-                            value={userCreateForm.role}
-                            onChange={(event) => setUserCreateForm((prev) => ({ ...prev, role: event.target.value as Role, scope_pairs: [], department: '', year_level: '1' }))}
-                          >
-                            {userAssignableRoles.map((role) => (
-                              <option key={role} value={role}>{getRoleOptionLabel(role)}</option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                    ) : null}
-                    {(userCreateForm.role === 'hod' || userCreateForm.role === 'deo') ? (
-                      <div className="card mb-2" style={{ padding: 12, background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.28)' }}>
-                        <div className="card-title" style={{ fontSize: '.86rem', marginBottom: 10 }}><i className="fas fa-layer-group"></i> Assigned Scopes</div>
-                        <div className="scope-grid">
-                          {userSelectableDepartments.map((department) => (
-                            <div key={department.id} className="scope-item">
-                              <div className="scope-item-title">{department.code}</div>
-                              <div className="scope-year-list">
-                                {(currentUser.role === 'admin' ? [1, 2, 3, 4] : userScopeOptions.filter((scope) => scope.department === department.code).map((scope) => scope.year_level)).map((year) => {
-                                  const value = `${department.code}::${year}`;
-                                  return (
-                                    <label key={value} className="scope-chip">
-                                      <input
-                                        type="checkbox"
-                                        checked={userCreateForm.scope_pairs.includes(value)}
-                                        onChange={(event) => setUserCreateForm((prev) => ({
-                                          ...prev,
-                                          scope_pairs: event.target.checked ? [...prev.scope_pairs, value] : prev.scope_pairs.filter((item) => item !== value),
-                                        }))}
-                                      />
-                                      <span>Y{year}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-                    {userCreateForm.role === 'counselor' ? (
-                      <>
-                        <div className="form-row">
-                          <div className="form-group">
-                            <label className="form-label">Department</label>
-                            <select className="form-control" value={userCreateForm.department} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, department: event.target.value }))} required>
-                              <option value="">-- Select --</option>
-                              {userSelectableDepartments.map((department) => (
-                                <option key={department.id} value={department.code}>{department.code} - {department.name}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="form-group">
-                            <label className="form-label">Year</label>
-                            <select className="form-control" value={userCreateForm.year_level} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, year_level: event.target.value }))}>
-                              {[1, 2, 3, 4].map((year) => (
-                                <option key={year} value={year}>{formatYearLevel(year)}</option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-                        <div className="form-group" style={{ maxWidth: 220 }}>
-                          <label className="form-label">Max Students</label>
-                          <input className="form-control" type="number" min="1" max="500" value={userCreateForm.max_students} onChange={(event) => setUserCreateForm((prev) => ({ ...prev, max_students: event.target.value }))} />
-                        </div>
-                      </>
-                    ) : null}
-                    <button type="submit" className="btn btn-primary" disabled={userSaving}>
-                      <i className={`fas ${userSaving ? 'fa-spinner fa-spin' : 'fa-user-plus'}`}></i> Create User
-                    </button>
-                  </form>
-                </div>
-              ) : null}
-
-              {currentUser.role !== 'principal' ? (
-                <div className="card">
-                  <div className="card-title"><i className="fas fa-upload"></i> Bulk Counselor Upload</div>
-                  <form onSubmit={(event) => void handleBulkCounselorUpload(event)}>
-                    <div className="form-row">
-                      <div className="form-group" style={{ maxWidth: 220 }}>
-                        <label className="form-label">Year</label>
-                        <select className="form-control" value={bulkCounselorForm.year_level} onChange={(event) => setBulkCounselorForm((prev) => ({ ...prev, year_level: event.target.value }))}>
-                          {[1, 2, 3, 4].map((year) => (
-                            <option key={year} value={year}>{formatYearLevel(year)}</option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">Counselor Excel File</label>
-                      <div className="file-input-wrapper">
-                        <i className="fas fa-file-excel"></i>
-                        <div className="file-text">Choose file</div>
-                        <div className="file-name" style={{ display: bulkCounselorForm.file ? 'block' : 'none' }}>{bulkCounselorForm.file?.name || ''}</div>
-                        <input
-                          key={bulkCounselorUploadKey}
-                          type="file"
-                          accept=".xlsx,.xls"
-                          onChange={(event) => setBulkCounselorForm((prev) => ({ ...prev, file: event.target.files?.[0] || null }))}
-                          required
-                        />
-                      </div>
-                    </div>
-                    <div className="card" style={{ padding: 12, background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.22)', marginBottom: 12 }}>
-                      <div style={{ fontSize: '.84rem', color: 'var(--text-dim)' }}>
-                        {String(bootstrap?.appConfig.google_oauth_enabled || 'false').toLowerCase() === 'true'
-                          ? 'Google OAuth is enabled. Bulk-uploaded counselor passwords follow the configured sheet/override policy from settings.'
-                          : 'Google OAuth is disabled. Bulk-uploaded counselor passwords use the configured non-OAuth fallback from settings, or the password from the sheet when no override is configured.'}
-                      </div>
-                    </div>
-                    <button type="submit" className="btn btn-primary" disabled={bulkCounselorSaving}>
-                      <i className={`fas ${bulkCounselorSaving ? 'fa-spinner fa-spin' : 'fa-upload'}`}></i> Run Bulk Upload
-                    </button>
-                  </form>
-                </div>
-              ) : null}
-            </>
-          ) : (['admin', 'principal', 'hod', 'deo'].includes(currentUser.role) && activeTab === 'activity') ? (
-            activityLoading && !activityData ? (
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading users workspace...</div></div>}>
+              <UsersTab
+                currentUserRole={currentUser.role}
+                metrics={bootstrap?.metrics || null}
+                filteredUsers={filteredUsers}
+                usersLoading={usersLoading}
+                userSearch={userSearch}
+                onUserSearchChange={(value) => startTransition(() => setUserSearch(value))}
+                userFilterTrayOpen={userFilterTrayOpen}
+                onToggleFilterTray={() => setUserFilterTrayOpen((prev) => !prev)}
+                onRefreshUsers={() => void refreshUsersOverview({ preferCache: false })}
+                userSortBy={userSortBy}
+                onUserSortChange={setUserSortBy}
+                userFilterDepartment={userFilterDepartment}
+                onUserFilterDepartmentChange={setUserFilterDepartment}
+                userFilterRole={userFilterRole}
+                onUserFilterRoleChange={setUserFilterRole}
+                userFilterStatus={userFilterStatus}
+                onUserFilterStatusChange={setUserFilterStatus}
+                userFilterYear={userFilterYear}
+                onUserFilterYearChange={setUserFilterYear}
+                userFilterStudentList={userFilterStudentList}
+                onUserFilterStudentListChange={setUserFilterStudentList}
+                onResetUserFilters={() => {
+                  setUserFilterDepartment('');
+                  setUserFilterRole('');
+                  setUserFilterStatus('');
+                  setUserFilterYear('');
+                  setUserFilterStudentList('');
+                  setUserSortBy('name_asc');
+                }}
+                userSelectableDepartments={userSelectableDepartments}
+                userScopeOptions={userScopeOptions}
+                getRoleBadgeClass={getRoleBadgeClass}
+                getRoleOptionLabel={getRoleOptionLabel}
+                formatYearLevel={formatYearLevel}
+                onOpenEditUserModal={openEditUserModal}
+                onSetUserActionTarget={(kind, user) => setUserActionTarget({ kind, user })}
+                onManageLinkedUsers={setLinkedUserGroupEmail}
+                userAssignableRoles={userAssignableRoles}
+                userCreateForm={userCreateForm}
+                userCreateEmailExists={userCreateEmailExists}
+                userCreateEmailDomainValid={userCreateEmailDomainValid}
+                userCreateAvailableRoles={userCreateAvailableRoles}
+                userCreateExistingName={userCreateExistingAccounts[0]?.name || ''}
+                managedUserDomain={managedUserDomain}
+                onUserCreateFieldChange={(field, value) => setUserCreateForm((prev) => ({ ...prev, [field]: value }))}
+                onUserCreateRoleChange={(role) => setUserCreateForm((prev) => ({
+                  ...prev,
+                  role,
+                  designation: role === 'principal' ? (String(prev.designation || '').trim() || 'Higher Official') : '',
+                  scope_pairs: [],
+                  department: '',
+                  year_level: '1',
+                }))}
+                onToggleUserCreateScopePair={(value, checked) => setUserCreateForm((prev) => ({
+                  ...prev,
+                  scope_pairs: checked ? [...prev.scope_pairs, value] : prev.scope_pairs.filter((item) => item !== value),
+                }))}
+                onCreateUserSubmit={(event) => void handleCreateUser(event)}
+                onClearUserCreateForm={handleClearUserCreateDraft}
+                userSaving={userSaving}
+                bulkCounselorForm={bulkCounselorForm}
+                bulkCounselorUploadKey={bulkCounselorUploadKey}
+                onBulkCounselorYearChange={(value) => setBulkCounselorForm((prev) => ({ ...prev, year_level: value }))}
+                onBulkCounselorFileChange={(file) => setBulkCounselorForm((prev) => ({ ...prev, file }))}
+                onBulkCounselorUploadSubmit={(event) => void handleBulkCounselorUpload(event)}
+                bulkCounselorSaving={bulkCounselorSaving}
+                googleOauthEnabled={String(bootstrap?.appConfig.google_oauth_enabled || 'false').toLowerCase() === 'true'}
+              />
+            </Suspense>
+          ) : (['admin', 'deo'].includes(currentUser.role) && activeTab === 'subjects') ? (
+            subjectsLoading && !subjectsData ? (
               <div className="card">
-                <div className="panel-placeholder">Loading counselor activity...</div>
+                <div className="panel-placeholder">Loading subjects...</div>
               </div>
             ) : (
               <>
-                {activityData?.showDepartmentPicker ? (
+                {subjectsData?.showDepartmentPicker ? (
                   <div className="mb-3">
-                    <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 10 }}>
-                      <h3 className="section-title" style={{ margin: 0 }}><i className="fas fa-building"></i> Select Department</h3>
-                      <div className="btn-group">
-                        <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleCopyActivityDefaulters('scope')}>
-                          <i className="fas fa-copy"></i> Copy Defaulters
-                        </button>
-                        <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleDownloadActivityScopePdf()}>
-                          <i className="fas fa-file-pdf"></i> Full Scope PDF
-                        </button>
-                        <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadActivityOverview()}>
-                          <i className="fas fa-rotate"></i> Refresh
-                        </button>
-                      </div>
-                    </div>
+                    <h3 className="section-title" style={{ marginBottom: 14 }}><i className="fas fa-building"></i> Select Department</h3>
                     <div className="metrics-grid selection-grid department-selection-grid">
-                      {(activityData?.departments || []).map((department) => (
+                      {(subjectsData?.departments || []).map((department) => (
                         <button
                           key={department.code}
                           type="button"
                           className="metric-card selection-card-button"
-                          onClick={() => void loadActivityOverview({ department: department.code })}
+                          onClick={() => void loadSubjects(department.code)}
                         >
                           <div className="metric-value" style={{ fontSize: '1.6rem' }}>{department.code}</div>
                           <div className="selection-card-subtitle">{department.name}</div>
@@ -6676,37 +10586,24 @@ export default function App() {
                   </div>
                 ) : null}
 
-                {activityData?.showYearPicker ? (
-                  <div className="selection-shell mb-3" style={{ maxWidth: 620 }}>
+                {subjectsData?.showYearPicker ? (
+                  <div className="selection-shell selection-shell-stage-enter mb-3" style={{ maxWidth: 620 }}>
                     <div className="d-flex justify-between align-center flex-wrap" style={{ gap: 12, marginBottom: 14 }}>
                       <ScopeBreadcrumb
-                        icon="fa-layer-group"
+                        icon="fa-book-open"
                         items={[
-                          {
-                            label: 'Counsellor Activity',
-                            onClick: () => {
-                              setActivityFilters({ department: '', year: '', semester: '', test_name: '', q: '', sort: 'pending_first' });
-                              void loadActivityOverview();
-                            },
-                          },
-                          { label: activityData.selectedDepartment || 'Department' },
+                          { label: 'Subjects', onClick: () => void loadSubjects() },
+                          { label: subjectsData.selectedDepartment || 'Department' },
                         ]}
                       />
-                      <button
-                        type="button"
-                        className="btn btn-outline btn-sm"
-                        onClick={() => void handleCopyActivityDefaulters('department', { department: activityData.selectedDepartment })}
-                      >
-                        <i className="fas fa-copy"></i> Copy Defaulters
-                      </button>
                     </div>
                     <div className="selection-actions-grid">
-                      {(activityData.availableYears || []).map((year) => (
+                      {(subjectsData.availableYears || []).map((year) => (
                         <button
                           key={year}
                           type="button"
                           className="btn btn-outline selection-action-button"
-                          onClick={() => void loadActivityOverview({ department: activityData.selectedDepartment, year })}
+                          onClick={() => void loadSubjects(subjectsData.selectedDepartment, year)}
                         >
                           {formatYearLevel(year)}
                         </button>
@@ -6715,179 +10612,378 @@ export default function App() {
                   </div>
                 ) : null}
 
-                {activityData && !activityData.showDepartmentPicker && !activityData.showYearPicker ? (
-                  <div className="card mb-3">
+                {subjectsData?.showSemesterPicker ? (
+                  <div className="selection-shell selection-shell-stage-enter mb-3" style={{ maxWidth: 620 }}>
                     <div className="d-flex justify-between align-center flex-wrap" style={{ gap: 12, marginBottom: 14 }}>
                       <ScopeBreadcrumb
-                        icon="fa-layer-group"
+                        icon="fa-book-open"
                         items={[
-                          { label: 'Counsellor Activity', onClick: () => void loadActivityOverview() },
-                          { label: activityData.selectedDepartment, onClick: () => void loadActivityOverview({ department: activityData.selectedDepartment }) },
-                          { label: formatYearLevel(activityData.selectedYear || 1) },
+                          { label: 'Subjects', onClick: () => void loadSubjects() },
+                          { label: subjectsData.selectedDepartment, onClick: () => void loadSubjects(subjectsData.selectedDepartment) },
+                          { label: formatYearLevel(subjectsData.selectedYear || 1) },
                         ]}
                       />
-                      <div className="btn-group">
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() => void handleCopyActivityDefaulters('year', {
-                            department: activityData.selectedDepartment,
-                            year: activityData.selectedYear,
-                          })}
-                        >
-                          <i className="fas fa-copy"></i> Copy Defaulters
-                        </button>
-                      </div>
                     </div>
-                    <div className="test-status-grid">
-                      {['1', '2'].map((semester) => (
-                        <div key={semester} className="card test-status-panel">
-                          <div className="d-flex justify-between align-center" style={{ gap: 10, marginBottom: 12 }}>
-                            <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-layer-group"></i> Semester {semester}</div>
-                          </div>
-                          {['IAT 1', 'IAT 2', 'MODEL EXAM'].map((testName) => {
-                            const uploaded = !!activityData.testStatus?.[semester]?.[testName];
-                            const active = activityData.selectedSemester === semester && activityData.selectedTestName === testName;
-                            return (
-                              <div key={`${semester}:${testName}`} className="test-status-row">
-                                <button
-                                  type="button"
-                                  className={`btn ${active ? 'btn-primary' : 'btn-outline'} test-status-button`}
-                                  onClick={() => void loadActivityOverview({
-                                    department: activityData.selectedDepartment,
-                                    year: activityData.selectedYear,
-                                    semester,
-                                    test_name: testName,
-                                  })}
-                                >
-                                  {testName}
-                                </button>
-                                <span className={`badge ${uploaded ? 'badge-success' : 'badge-warning'}`}>{uploaded ? 'Uploaded' : 'Upload Pending'}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
+                    <div className="selection-actions-grid">
+                      {(subjectsData.availableSemesters || []).map((semester) => (
+                        <button
+                          key={semester}
+                          type="button"
+                          className="btn btn-outline selection-action-button"
+                          onClick={() => void loadSubjects(subjectsData.selectedDepartment, subjectsData.selectedYear, semester)}
+                        >
+                          {getSemesterLabel(semester)}
+                        </button>
                       ))}
                     </div>
                   </div>
                 ) : null}
 
-                {activityData?.result ? (
+                {subjectsData && !subjectsData.showDepartmentPicker && !subjectsData.showYearPicker && !subjectsData.showSemesterPicker ? (
                   <>
-                    <div className="metrics-grid mb-3">
-                      <div className="metric-card">
-                        <div className="metric-label">Total Counselors</div>
-                        <div className="metric-value">{activityData.result.stats.total_counselors}</div>
-                        <div className="metric-icon"><i className="fas fa-users"></i></div>
-                      </div>
-                      <div className="metric-card">
-                        <div className="metric-label">Complete</div>
-                        <div className="metric-value">{activityData.result.stats.complete}</div>
-                        <div className="metric-icon"><i className="fas fa-circle-check"></i></div>
-                      </div>
-                      <div className="metric-card">
-                        <div className="metric-label">Pending</div>
-                        <div className="metric-value">{activityData.result.stats.pending}</div>
-                        <div className="metric-icon"><i className="fas fa-clock"></i></div>
-                      </div>
-                      <div className="metric-card">
-                        <div className="metric-label">Avg Completion</div>
-                        <div className="metric-value">{activityData.result.stats.avg_completion}%</div>
-                        <div className="metric-icon"><i className="fas fa-chart-line"></i></div>
-                      </div>
-                    </div>
-
-                    <div className="card mb-3">
-                      <div className="d-flex align-center flex-wrap" style={{ gap: 8 }}>
-                        <input className="form-control" style={{ maxWidth: 280, height: 34, padding: '6px 10px', fontSize: '.82rem' }} value={activityFilters.q} onChange={(event) => setActivityFilters((prev) => ({ ...prev, q: event.target.value }))} placeholder="Search counselor" />
-                        <select className="form-control" style={{ maxWidth: 150, height: 34, padding: '6px 10px', fontSize: '.8rem' }} value={activityFilters.sort} onChange={(event) => setActivityFilters((prev) => ({ ...prev, sort: event.target.value }))}>
-                          <option value="pending_first">Pending</option>
-                          <option value="name_asc">A-Z</option>
-                          <option value="name_desc">Z-A</option>
-                        </select>
-                        <button type="button" className="btn btn-outline btn-sm" style={{ height: 34 }} onClick={() => void loadActivityOverview({
-                          department: activityData.selectedDepartment,
-                          year: activityData.selectedYear,
-                          semester: activityData.selectedSemester,
-                          test_name: activityData.selectedTestName,
-                        })}>
-                          <i className="fas fa-rotate"></i> Refresh
-                        </button>
+                    <div className="selection-shell mb-3" style={{ maxWidth: 780 }}>
+                      <div className="d-flex justify-between align-center flex-wrap" style={{ gap: 12 }}>
+                        <ScopeBreadcrumb
+                          icon="fa-book-open"
+                        items={[
+                          { label: 'Subjects', onClick: () => void loadSubjects() },
+                          { label: subjectsData.selectedDepartment, onClick: () => void loadSubjects(subjectsData.selectedDepartment) },
+                          { label: formatYearLevel(subjectsData.selectedYear || 1), onClick: () => void loadSubjects(subjectsData.selectedDepartment, subjectsData.selectedYear) },
+                          { label: getSemesterLabel(subjectsData.selectedSemester || '1'), onClick: () => void loadSubjects(subjectsData.selectedDepartment, subjectsData.selectedYear) },
+                        ]}
+                      />
                         <button
                           type="button"
                           className="btn btn-outline btn-sm"
-                          style={{ height: 34 }}
-                          onClick={() => void handleCopyActivityDefaulters('test', {
-                            department: activityData.selectedDepartment,
-                            year: activityData.selectedYear,
-                            semester: activityData.selectedSemester,
-                            test_name: activityData.selectedTestName,
-                          })}
+                          onClick={() => {
+                            setActiveTab('cdp');
+                            void loadCdpOverview({
+                              department: subjectsData.selectedDepartment,
+                              year: subjectsData.selectedYear,
+                              semester: subjectsData.selectedSemester,
+                            });
+                          }}
                         >
-                          <i className="fas fa-copy"></i> Copy Defaulters
+                          <i className="fas fa-arrow-right"></i> Open CDP
                         </button>
                       </div>
                     </div>
 
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Counselor</th>
-                            <th>Department</th>
-                            <th>Status</th>
-                            <th>Completion %</th>
-                            <th>Year</th>
-                            <th>Students</th>
-                            <th>Reached</th>
-                            <th>Pending</th>
-                            <th>Last Login</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {activityDisplayRows.length ? activityDisplayRows.map((row) => (
-                            <tr key={row.email}>
-                              <td><strong>{row.name}</strong><br /><span className="inline-muted">{row.email}</span></td>
-                              <td>{row.department}</td>
-                              <td><span className={`badge ${row.work_status === 'Complete' ? 'badge-success' : 'badge-warning'}`}>{row.work_status}</span></td>
-                              <td>{row.completion_pct}%</td>
-                              <td>{formatYearLevel(row.year_level || 1)}</td>
-                              <td>{row.student_count}</td>
-                              <td>{row.unique_students_messaged}</td>
-                              <td>{row.pending_count}</td>
-                              <td style={{ fontSize: '.8rem' }}>{formatDateTime(row.last_login || 'Never')}</td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={9} className="text-center text-muted" style={{ padding: 24 }}>No counselor rows found for the current search and sort filters.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
+                    {subjectsData.canManage ? (
+                      <div className="card mb-3" style={{ maxWidth: 860 }}>
+                        <div className="card-title"><i className="fas fa-book-medical"></i> {subjectEditId ? 'Edit Subject' : 'Create Subject'}</div>
+                        <form onSubmit={(event) => void handleSaveSubject(event)}>
+                          <div className="form-row">
+                            <div className="form-group" style={{ maxWidth: 180 }}>
+                              <label className="form-label">Attendance Start Year</label>
+                              <input className="form-control" type="number" min="2000" max="2100" value={subjectForm.academic_start_year} onChange={(event) => setSubjectForm((prev) => ({ ...prev, academic_start_year: event.target.value }))} required />
+                            </div>
+                            <div className="form-group" style={{ maxWidth: 180 }}>
+                              <label className="form-label">Attendance End Year</label>
+                              <input className="form-control" type="number" min="2000" max="2101" value={subjectForm.academic_end_year} onChange={(event) => setSubjectForm((prev) => ({ ...prev, academic_end_year: event.target.value }))} required />
+                            </div>
+                          </div>
+                          <div className="inline-muted" style={{ marginTop: -8, marginBottom: 12 }}>
+                            Daily Attendance dates from months `01-12` use this attendance year range. Example: `2025` to `2026`, or `2025` to `2025` when the sheet stays inside one calendar year.
+                          </div>
+                          <div className="form-row">
+                            <div className="form-group">
+                              <label className="form-label">Subject Code</label>
+                              <input className="form-control" value={subjectForm.subject_code} onChange={(event) => setSubjectForm((prev) => ({ ...prev, subject_code: event.target.value }))} placeholder="CS3491" required />
+                            </div>
+                            <div className="form-group">
+                              <label className="form-label">Faculty Name</label>
+                              <input
+                                className="form-control"
+                                value={subjectForm.faculty_name}
+                                onChange={(event) => setSubjectForm((prev) => {
+                                  const nextFacultyName = event.target.value;
+                                  const visibleFaculties = splitFacultyNames(nextFacultyName).length
+                                    ? splitFacultyNames(nextFacultyName)
+                                    : subjectParsedFaculties;
+                                  const nextAllocations = normalizeFacultyAllocations(prev.faculty_allocations, visibleFaculties, subjectParsedClasses);
+                                  return {
+                                    ...prev,
+                                    faculty_name: nextFacultyName,
+                                    class_sections: normalizeClassSections(nextAllocations.flatMap((entry) => entry.class_sections)),
+                                    faculty_allocations: nextAllocations,
+                                  };
+                                })}
+                                placeholder="Dr. Faculty Name"
+                                required
+                              />
+                            </div>
+                          </div>
+                          <div className="form-row">
+                            <div className="form-group">
+                              <label className="form-label">Subject Name</label>
+                              <input className="form-control" value={subjectForm.subject_name} onChange={(event) => setSubjectForm((prev) => ({ ...prev, subject_name: event.target.value }))} placeholder="Database Management Systems" required />
+                            </div>
+                            <div className="form-group">
+                              <label className="form-label">Google Sheet Link</label>
+                              <div className="position-relative">
+                                <input
+                                  className="form-control"
+                                  value={subjectForm.google_sheet_link}
+                                  onChange={(event) => setSubjectForm((prev) => ({
+                                    ...prev,
+                                    google_sheet_link: event.target.value,
+                                    class_sections: String(prev.google_sheet_link || '').trim() === String(event.target.value || '').trim()
+                                      ? prev.class_sections
+                                      : [],
+                                    faculty_allocations: String(prev.google_sheet_link || '').trim() === String(event.target.value || '').trim()
+                                      ? prev.faculty_allocations
+                                      : [],
+                                  }))}
+                                  placeholder="https://docs.google.com/spreadsheets/..."
+                                />
+                              </div>
+                              <div className="inline-muted" style={{ marginTop: 8 }}>
+                                {subjectParsing ? (
+                                  <><i className="fas fa-spinner fa-spin"></i> Detecting subject details and class sections from the Daily Attendance sheet...</>
+                                ) : subjectParseError ? (
+                                  <span style={{ color: 'var(--danger-color)' }}>{subjectParseError}</span>
+                                ) : subjectParsedClasses.length ? (
+                                  <><i className="fas fa-check-circle" style={{ color: 'var(--success-color)' }}></i> Detected classes: {subjectParsedClasses.join(', ')}</>
+                                ) : (
+                                  'Paste a Google Sheet link to auto-detect the subject details and available class sections.'
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          {subjectParsedClasses.length ? (
+                            <div className="card mb-2" style={{ padding: 12, background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.24)' }}>
+                              <div className="card-title" style={{ fontSize: '.86rem', marginBottom: 10 }}><i className="fas fa-layer-group"></i> Allocated Classes</div>
+                              <div className="inline-muted" style={{ marginBottom: 10 }}>
+                                Parsed sections are assigned per faculty. A class can be selected for more than one faculty when they share responsibility.
+                              </div>
+                              <div style={{ display: 'grid', gap: 12 }}>
+                                {(subjectForm.faculty_allocations.length ? subjectForm.faculty_allocations : normalizeFacultyAllocations([], subjectParsedFaculties.length ? subjectParsedFaculties : splitFacultyNames(subjectForm.faculty_name), subjectParsedClasses)).map((allocation) => (
+                                  <div key={allocation.faculty_name} className="card" style={{ padding: 12, marginBottom: 0 }}>
+                                    <div className="card-title" style={{ fontSize: '.85rem', marginBottom: 10 }}>
+                                      <i className="fas fa-user-tie"></i> {allocation.faculty_name}
+                                    </div>
+                                    <div className="scope-grid">
+                                      {subjectParsedClasses.map((sectionLabel) => (
+                                        <label key={`${allocation.faculty_name}:${sectionLabel}`} className="scope-chip">
+                                          <input
+                                            type="checkbox"
+                                            checked={allocation.class_sections.includes(sectionLabel)}
+                                            onChange={(event) => setSubjectForm((prev) => {
+                                              const nextAllocations = prev.faculty_allocations.map((entry) => (
+                                                entry.faculty_name !== allocation.faculty_name
+                                                  ? entry
+                                                  : {
+                                                    ...entry,
+                                                    class_sections: event.target.checked
+                                                      ? normalizeClassSections([...entry.class_sections, sectionLabel])
+                                                      : entry.class_sections.filter((value) => value !== sectionLabel),
+                                                  }
+                                              ));
+                                              return {
+                                                ...prev,
+                                                faculty_allocations: nextAllocations,
+                                                class_sections: normalizeClassSections(nextAllocations.flatMap((entry) => entry.class_sections)),
+                                              };
+                                            })}
+                                          />
+                                          <span>{sectionLabel}</span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                          <div className="ui-preview-note" style={{ marginBottom: 12 }}>
+                            Scope: <strong>{subjectsData.selectedDepartment}</strong> / <strong>{formatYearLevel(subjectsData.selectedYear || 1)}</strong> / <strong>{getSemesterLabel(subjectsData.selectedSemester || '1')}</strong>. Paste the Google Sheet link to auto-fill subject code, subject name, faculty names, and only the class sections actually parsed from the Daily Attendance sheet. Academic years and faculty-wise allocated classes are required because the daily attendance parser uses them to resolve messy date columns and faculty responsibility.
+                          </div>
+                          <div className="btn-group">
+                            <button type="submit" className="btn btn-primary" disabled={subjectSaving}>
+                              <i className={`fas ${subjectSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i> {subjectEditId ? 'Save Subject' : 'Create Subject'}
+                            </button>
+                            {subjectEditId ? (
+                              <button type="button" className="btn btn-outline" onClick={() => resetSubjectDraft()}>
+                                <i className="fas fa-xmark"></i> Cancel
+                              </button>
+                            ) : null}
+                          </div>
+                        </form>
+                      </div>
+                    ) : (
+                      <div className="card mb-3" style={{ maxWidth: 780 }}>
+                        <div className="card-title"><i className="fas fa-eye"></i> Read-only Subject Scope</div>
+                        <div className="inline-muted">
+                          Higher Official access is view-only for Subjects. Use the CDP tab to inspect operational status for this scope.
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="card">
+                      <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
+                        <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list"></i> Allocated Subjects</div>
+                        <span className="badge badge-info">{subjectsData.records.length} subject{subjectsData.records.length === 1 ? '' : 's'}</span>
+                      </div>
+                      {subjectsData.records.length ? (
+                <div className="table-wrapper table-scroll-lg">
+                  <table className="sticky-table">
+                            <thead>
+                              <tr>
+                                <th>Code</th>
+                                <th>Subject</th>
+                                <th>Faculty</th>
+                                <th>Semester / Classes</th>
+                                <th>Updated</th>
+                                <th>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {subjectsData.records.map((subject) => (
+                                <tr key={subject.id}>
+                                  <td><strong>{subject.subject_code}</strong></td>
+                                  <td>{subject.subject_name}</td>
+                                  <td>
+                                    <div>{subject.faculty_name}</div>
+                                    {subject.faculty_allocations.length ? (
+                                      <div className="inline-muted" style={{ marginTop: 4 }}>
+                                        {subject.faculty_allocations.map((entry) => `${entry.faculty_name}: ${entry.class_sections.join(', ') || 'No classes'}`).join(' | ')}
+                                      </div>
+                                    ) : null}
+                                  </td>
+                                  <td>
+                                    <span className="inline-muted">{getSemesterLabel(subject.semester)}<br />{subject.class_sections.length ? subject.class_sections.join(', ') : 'All classes'}</span>
+                                  </td>
+                                  <td style={{ fontSize: '.82rem' }}>{formatDateTime(subject.updated_at || subject.created_at || '')}</td>
+                                  <td>
+                                    <div className="btn-group">
+                                      {subject.google_sheet_link ? (
+                                        <a href={subject.google_sheet_link} target="_blank" rel="noreferrer" className="btn btn-outline btn-sm">
+                                          <i className="fas fa-link"></i> Sheet
+                                        </a>
+                                      ) : null}
+                                      <button
+                                        type="button"
+                                        className="btn btn-outline btn-sm"
+                                        onClick={() => {
+                                          setActiveTab('cdp');
+                                          void rebuildCdpScopeOverview({
+                                            department: subject.department,
+                                            year: subject.year_level,
+                                            semester: subject.semester,
+                                            subject_id: subject.id,
+                                          });
+                                        }}
+                                      >
+                                        <i className="fas fa-arrow-up-right-from-square"></i> CDP
+                                      </button>
+                                      {subjectsData.canManage ? (
+                                        <>
+                                          <button type="button" className="btn btn-outline btn-sm" onClick={() => beginSubjectEdit(subject)}>
+                                            <i className="fas fa-edit"></i> Edit
+                                          </button>
+                                          <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleDeleteSubject(subject)}>
+                                            <i className="fas fa-trash"></i>
+                                          </button>
+                                        </>
+                                      ) : null}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="panel-placeholder">No subjects are configured yet for this department/year scope.</div>
+                      )}
                     </div>
                   </>
                 ) : null}
               </>
             )
+          ) : (['admin', 'principal', 'hod'].includes(currentUser.role) && activeTab === 'cdp') ? (
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading CDP workspace...</div></div>}>
+              <CdpTab
+                cdpLoading={cdpLoading}
+                cdpData={cdpData}
+                ScopeBreadcrumb={ScopeBreadcrumb}
+                formatYearLevel={formatYearLevel}
+                formatDateTime={formatDateTime}
+                getSemesterLabel={getSemesterLabel}
+                onLoadCdpOverview={(filters) => void loadCdpOverview(filters)}
+                onRebuildScope={(filters) => void rebuildCdpScopeOverview(filters)}
+                copyTemplate={String(bootstrap?.appConfig?.cdp_defaulter_copy_template || DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE)}
+                onShowNoDefaultersNotice={(message) => {
+                  setFlash({ type: 'warning', message });
+                }}
+                onShowCopyDialog={(title, message) => {
+                  setConfirmDialog({
+                    title,
+                    message,
+                    confirmLabel: 'OK',
+                    confirmClassName: title === 'Copy Failed' ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm',
+                    iconClassName: title === 'Copy Failed' ? 'fas fa-circle-exclamation' : 'fas fa-copy',
+                    cancelLabel: null,
+                  });
+                }}
+              />
+            </Suspense>
+          ) : (['admin', 'principal', 'hod', 'deo'].includes(currentUser.role) && activeTab === 'activity') ? (
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading counselor activity workspace...</div></div>}>
+              <ActivityTab
+                activityLoading={activityLoading}
+                activityCopying={activityCopying}
+                activityPdfLoading={activityPdfLoading}
+                activityData={activityData}
+                activityDisplayRows={activityDisplayRows}
+                activityFilters={activityFilters}
+                ScopeBreadcrumb={ScopeBreadcrumb}
+                formatYearLevel={formatYearLevel}
+                formatDateTime={formatDateTime}
+                onLoadActivityOverview={(filters) => void loadActivityOverview(filters)}
+                onActivitySearchChange={(value) => startTransition(() => setActivityFilters((prev) => ({ ...prev, q: value })))}
+                onActivitySortChange={(value) => setActivityFilters((prev) => ({ ...prev, sort: value }))}
+                onResetActivityToRoot={() => {
+                  setActivityFilters({ department: '', year: '', semester: '', test_name: '', q: '', sort: 'pending_first' });
+                  void loadActivityOverview();
+                }}
+                onCopyActivityDefaulters={(mode, options) => void handleCopyActivityDefaulters(mode, options)}
+                onDownloadActivityScopePdf={() => void handleDownloadActivityScopePdf()}
+              />
+            </Suspense>
           ) : (['admin', 'principal'].includes(currentUser.role) && activeTab === 'database') ? (
             <>
-              <div className="card mb-3" style={{ maxWidth: 780 }}>
-                <div className="card-title"><i className="fas fa-floppy-disk"></i> Create Backup</div>
-                <p style={{ fontSize: '.85rem', color: 'var(--text-dim)', marginBottom: 12 }}>
-                  Create a full database backup before batch operations.
-                </p>
-                <form onSubmit={(event) => void handleCreateBackup(event)} className="form-row" style={{ alignItems: 'end' }}>
-                  <div className="form-group">
-                    <label className="form-label">Batch Label</label>
-                    <input className="form-control" value={databaseBatchName} onChange={(event) => setDatabaseBatchName(event.target.value)} placeholder="2025-2026" required />
-                  </div>
-                  <label className="form-check" style={{ marginBottom: 10 }}>
-                    <input type="checkbox" checked={databaseOverwrite} onChange={(event) => setDatabaseOverwrite(event.target.checked)} />
-                    <span>Overwrite if same label exists</span>
-                  </label>
-                  <div className="form-group">
-                    <button className="btn btn-primary" type="submit"><i className="fas fa-save"></i> Create Backup</button>
-                  </div>
-                </form>
-              </div>
+              {currentUser.role === 'admin' ? (
+                <div className="card mb-3" style={{ maxWidth: 780 }}>
+                  <div className="card-title"><i className="fas fa-floppy-disk"></i> Create Backup</div>
+                  <p style={{ fontSize: '.85rem', color: 'var(--text-dim)', marginBottom: 12 }}>
+                    Create a full database backup before batch operations.
+                  </p>
+                  <form onSubmit={(event) => void handleCreateBackup(event)} className="form-row" style={{ alignItems: 'end' }}>
+                    <div className="form-group">
+                      <label className="form-label">Batch Label</label>
+                      <input className="form-control" value={databaseBatchName} onChange={(event) => setDatabaseBatchName(event.target.value)} placeholder="2025-2026" required disabled={archiveViewActive || databaseBackupCreating} />
+                    </div>
+                    <label className="form-check" style={{ marginBottom: 10 }}>
+                      <input type="checkbox" checked={databaseOverwrite} onChange={(event) => setDatabaseOverwrite(event.target.checked)} disabled={archiveViewActive || databaseBackupCreating} />
+                      <span>Overwrite if same label exists</span>
+                    </label>
+                    <div className="form-group">
+                      <button className="btn btn-primary" type="submit" disabled={archiveViewActive || databaseBackupCreating}>
+                        <i className={`fas ${databaseBackupCreating ? 'fa-spinner fa-spin' : 'fa-save'}`}></i> {databaseBackupCreating ? 'Creating Backup...' : 'Create Backup'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              ) : (
+                <div className="card mb-3" style={{ maxWidth: 780 }}>
+                  <div className="card-title"><i className="fas fa-eye"></i> Archive Viewer</div>
+                  <p style={{ fontSize: '.85rem', color: 'var(--text-dim)', marginBottom: 0 }}>
+                    Higher Officials can open archived academic years in read-only mode from the archive list below.
+                  </p>
+                </div>
+              )}
 
               {databaseLoading && !databaseData ? (
                 <div className="card"><div className="panel-placeholder">Loading database tools...</div></div>
@@ -6895,8 +10991,8 @@ export default function App() {
                 <>
                   <div className="card mb-3">
                     <div className="card-title"><i className="fas fa-clock-rotate-left"></i> Automatic Backups (Daily)</div>
-                    <div className="table-wrapper">
-                      <table>
+                  <div className="table-wrapper table-scroll-lg">
+                    <table className="sticky-table">
                         <thead>
                           <tr>
                             <th>Backup</th>
@@ -6912,14 +11008,18 @@ export default function App() {
                               <td>{backup.size_kb} KB</td>
                               <td>{backup.modified}</td>
                               <td style={{ textAlign: 'right' }}>
-                                <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
-                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => { setDatabaseBackupAction({ kind: 'restore', backupName: backup.name }); setDatabaseActionPassword(''); }}>
-                                    <i className="fas fa-rotate-left"></i> Restore
-                                  </button>
-                                  <button type="button" className="btn btn-danger btn-sm" onClick={() => { setDatabaseBackupAction({ kind: 'delete', backupName: backup.name }); setDatabaseActionPassword(''); }}>
-                                    <i className="fas fa-trash"></i> Delete
-                                  </button>
-                                </div>
+                                {currentUser.role === 'admin' ? (
+                                  <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+                                    <button type="button" className="btn btn-outline btn-sm" disabled={archiveViewActive} onClick={() => { setDatabaseBackupAction({ kind: 'restore', backupName: backup.name }); setDatabaseActionPassword(''); }}>
+                                      <i className="fas fa-rotate-left"></i> Restore
+                                    </button>
+                                    <button type="button" className="btn btn-danger btn-sm" disabled={archiveViewActive} onClick={() => { setDatabaseBackupAction({ kind: 'delete', backupName: backup.name }); setDatabaseActionPassword(''); }}>
+                                      <i className="fas fa-trash"></i> Delete
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-muted">Read only</span>
+                                )}
                               </td>
                             </tr>
                           )) : (
@@ -6952,14 +11052,18 @@ export default function App() {
                               <td>{backup.size_kb} KB</td>
                               <td>{backup.modified}</td>
                               <td style={{ textAlign: 'right' }}>
-                                <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
-                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => { setDatabaseBackupAction({ kind: 'restore', backupName: backup.name }); setDatabaseActionPassword(''); }}>
-                                    <i className="fas fa-rotate-left"></i> Restore
-                                  </button>
-                                  <button type="button" className="btn btn-danger btn-sm" onClick={() => { setDatabaseBackupAction({ kind: 'delete', backupName: backup.name }); setDatabaseActionPassword(''); }}>
-                                    <i className="fas fa-trash"></i> Delete
-                                  </button>
-                                </div>
+                                {currentUser.role === 'admin' ? (
+                                  <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+                                    <button type="button" className="btn btn-outline btn-sm" disabled={archiveViewActive} onClick={() => { setDatabaseBackupAction({ kind: 'restore', backupName: backup.name }); setDatabaseActionPassword(''); }}>
+                                      <i className="fas fa-rotate-left"></i> Restore
+                                    </button>
+                                    <button type="button" className="btn btn-danger btn-sm" disabled={archiveViewActive} onClick={() => { setDatabaseBackupAction({ kind: 'delete', backupName: backup.name }); setDatabaseActionPassword(''); }}>
+                                      <i className="fas fa-trash"></i> Delete
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-muted">Read only</span>
+                                )}
                               </td>
                             </tr>
                           )) : (
@@ -6979,17 +11083,33 @@ export default function App() {
                       <table>
                         <thead>
                           <tr>
-                            <th>Archive</th>
-                            <th>Size</th>
+                            <th>Academic Year</th>
                             <th>Modified</th>
+                            <th style={{ textAlign: 'right' }}>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
                           {(databaseData?.archiveFiles || []).length ? databaseData!.archiveFiles.map((archive) => (
                             <tr key={archive.name}>
-                              <td><strong>{archive.name}</strong></td>
-                              <td>{archive.size_kb} KB</td>
+                              <td><strong>{archive.academic_year_label || archive.name}</strong></td>
                               <td>{archive.modified}</td>
+                              <td style={{ textAlign: 'right' }}>
+                                <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleEnterArchiveView(archive.name)}>
+                                    <i className="fas fa-eye"></i> View
+                                  </button>
+                                  {currentUser.role === 'admin' ? (
+                                    <>
+                                      <button type="button" className="btn btn-outline btn-sm" disabled={archiveViewActive} onClick={() => { setDatabaseBackupAction({ kind: 'restore-archive', backupName: archive.name }); setDatabaseActionPassword(''); }}>
+                                        <i className="fas fa-rotate-left"></i> Restore
+                                      </button>
+                                      <button type="button" className="btn btn-danger btn-sm" disabled={archiveViewActive} onClick={() => { setDatabaseBackupAction({ kind: 'delete-archive', backupName: archive.name }); setDatabaseActionPassword(''); }}>
+                                        <i className="fas fa-trash"></i> Delete
+                                      </button>
+                                    </>
+                                  ) : null}
+                                </div>
+                              </td>
                             </tr>
                           )) : (
                             <tr><td colSpan={3} className="text-center text-muted" style={{ padding: 20 }}>No year archives available yet.</td></tr>
@@ -6999,166 +11119,134 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="card" style={{ maxWidth: 860, border: '1px solid rgba(220,38,38,.35)' }}>
-                    <div className="card-title"><i className="fas fa-box-archive"></i> Archive Year</div>
-                    <p style={{ fontSize: '.85rem', color: 'var(--text-dim)', marginBottom: 12 }}>
-                      Creates a year archive in the rebuild archive folder, then clears active operational data while retaining Admin and Principal access.
-                    </p>
-                    <form onSubmit={(event) => void handleArchiveYear(event)}>
-                      <div className="form-row">
-                        <div className="form-group">
-                          <label className="form-label">Academic Year Range</label>
-                          <input
-                            className="form-control"
-                            value={archiveYearLabel}
-                            onChange={(event) => setArchiveYearLabel(event.target.value)}
-                            required
-                            placeholder="2025_2026"
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Confirm Password</label>
-                          <input className="form-control" type="password" value={clearExamPassword} onChange={(event) => setClearExamPassword(event.target.value)} required placeholder="Enter your password" />
-                        </div>
+                  {currentUser.role === 'admin' ? (
+                    <div className="form-row" style={{ alignItems: 'stretch' }}>
+                      <div className="card" style={{ border: '1px solid rgba(220,38,38,.35)' }}>
+                        <div className="card-title"><i className="fas fa-box-archive"></i> Archive Year</div>
+                        <p style={{ fontSize: '.85rem', color: 'var(--text-dim)', marginBottom: 12 }}>
+                          Creates a year archive in the rebuild archive folder, then clears active operational data while retaining Admin and Higher Official access. Password confirmation is requested in the warning popup.
+                        </p>
+                        <form onSubmit={(event) => void handleArchiveYear(event)}>
+                          <div className="form-row">
+                            <div className="form-group">
+                              <label className="form-label">Start Year</label>
+                              <input
+                                className="form-control"
+                                inputMode="numeric"
+                                pattern="\d{4}"
+                                value={archiveYearStart}
+                                onChange={(event) => setArchiveYearStart(event.target.value.replace(/[^\d]/g, '').slice(0, 4))}
+                                required
+                                placeholder="2025"
+                                disabled={archiveViewActive}
+                              />
+                            </div>
+                            <div className="form-group">
+                              <label className="form-label">End Year</label>
+                              <input
+                                className="form-control"
+                                inputMode="numeric"
+                                pattern="\d{4}"
+                                value={archiveYearEnd}
+                                onChange={(event) => setArchiveYearEnd(event.target.value.replace(/[^\d]/g, '').slice(0, 4))}
+                                required
+                                placeholder="2026"
+                                disabled={archiveViewActive}
+                              />
+                            </div>
+                          </div>
+                          <div className="inline-muted" style={{ marginBottom: 12 }}>
+                            Archive label: {archiveYearLabel || 'Enter both years'}
+                          </div>
+                          <label className="form-check" style={{ marginBottom: 12 }}>
+                            <input type="checkbox" checked={archiveYearOverwrite} onChange={(event) => setArchiveYearOverwrite(event.target.checked)} disabled={archiveViewActive} />
+                            <span>Overwrite if this academic year archive already exists</span>
+                          </label>
+                          <button className="btn btn-danger" type="submit" disabled={archiveViewActive}>
+                            <i className="fas fa-box-archive"></i> Archive Active Year
+                          </button>
+                        </form>
                       </div>
-                      <label className="form-check" style={{ marginBottom: 12 }}>
-                        <input type="checkbox" checked={archiveYearOverwrite} onChange={(event) => setArchiveYearOverwrite(event.target.checked)} />
-                        <span>Overwrite if this academic year archive already exists</span>
-                      </label>
-                      <button className="btn btn-danger" type="submit" disabled={archiveYearLoading}>
-                        <i className={`fas ${archiveYearLoading ? 'fa-spinner fa-spin' : 'fa-box-archive'}`}></i> {archiveYearLoading ? 'Archiving...' : 'Clear And Create Active'}
-                      </button>
-                    </form>
-                  </div>
+
+                      <div className="card" style={{ border: '1px solid rgba(239,68,68,.35)' }}>
+                        <div className="card-title"><i className="fas fa-trash-can"></i> Clear Database</div>
+                        <p style={{ fontSize: '.85rem', color: 'var(--text-dim)', marginBottom: 12 }}>
+                          Clears the current live exam and notice workspace without creating an archive. This action requires your password and follows the existing backup safety checks.
+                        </p>
+                        <div className="inline-muted" style={{ marginBottom: 14 }}>
+                          Use this only when you want a clean active workspace immediately.
+                        </div>
+                        <button
+                          className="btn btn-danger"
+                          type="button"
+                          disabled={archiveViewActive}
+                          onClick={() => {
+                            setDatabaseActionPassword('');
+                            setDatabaseBackupAction({ kind: 'clear', backupName: 'active workspace' });
+                          }}
+                        >
+                          <i className="fas fa-trash-can"></i> Clear Active Database
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               )}
             </>
           ) : (currentUser.role === 'admin' && activeTab === 'monitoring') ? (
-            <>
-              {!monitoringData?.sessionLog.ok ? (
-                <div className="card mb-3" style={{ border: '1px solid rgba(245,158,11,.45)' }}>
-                  <div className="card-title"><i className="fas fa-triangle-exclamation"></i> Under Maintenance</div>
-                  <p style={{ fontSize: '.88rem', color: 'var(--text-dim)' }}>{monitoringData?.sessionLog.message || 'Session monitoring is temporarily unavailable.'}</p>
-                </div>
-              ) : null}
-
-              <div className="metrics-grid mb-3">
-                <div className="metric-card">
-                  <div className="metric-label">Active Sessions</div>
-                  <div className="metric-value">{monitoringData?.stats.active_sessions ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-signal"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Peak Concurrent</div>
-                  <div className="metric-value">{monitoringData?.stats.peak_concurrent ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-chart-line"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Forced Logouts</div>
-                  <div className="metric-value">{monitoringData?.stats.forced_logouts ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-power-off"></i></div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-label">Avg Duration (min)</div>
-                  <div className="metric-value">{monitoringData?.stats.avg_duration_minutes ?? 0}</div>
-                  <div className="metric-icon"><i className="fas fa-hourglass-half"></i></div>
-                </div>
-              </div>
-
-              <div className="card mb-3">
-                <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
-                  <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-desktop"></i> Active Sessions ({monitoringData?.sessions.length ?? 0})</div>
-                  <div className="btn-group">
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadMonitoringOverview()}>
-                      <i className="fas fa-rotate"></i> Refresh
-                    </button>
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => void handleCleanupSessions()}>
-                      <i className="fas fa-broom"></i> Cleanup
-                    </button>
-                    <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleLogoutAllUsers()}>
-                      <i className="fas fa-power-off"></i> Logout All
-                    </button>
-                  </div>
-                </div>
-                <div className="table-wrapper">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>User</th>
-                        <th>Role</th>
-                        <th>Login</th>
-                        <th>Dept</th>
-                        <th>Status</th>
-                        <th>Last Activity</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {monitoringLoading && !monitoringData ? (
-                        <tr><td colSpan={6} className="text-center text-muted" style={{ padding: 24 }}>Loading sessions...</td></tr>
-                      ) : (monitoringData?.sessions || []).length ? monitoringData!.sessions.map((session) => (
-                        <tr key={session.session_id}>
-                          <td><strong>{session.name || session.user_email}</strong><br /><span className="inline-muted">{session.user_email}</span></td>
-                          <td><span className="badge badge-primary">{session.role || 'N/A'}</span></td>
-                          <td><span className={`badge ${String(session.auth_method || 'password').toLowerCase() === 'google' ? 'badge-info' : 'badge-muted'}`}>{String(session.auth_method || 'password').toLowerCase() === 'google' ? 'Google' : 'Password'}</span></td>
-                          <td>{session.department || 'N/A'}</td>
-                          <td><span className={`badge ${session.status === 'Active' ? 'badge-success' : session.status === 'Idle' ? 'badge-warning' : 'badge-muted'}`}>{session.status}</span></td>
-                          <td style={{ fontSize: '.82rem' }}>{session.time_ago || '--'}</td>
-                          <td>
-                            <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleForceLogout(session.user_email)}>
-                              <i className="fas fa-sign-out-alt"></i> Kick
-                            </button>
-                          </td>
-                        </tr>
-                      )) : (
-                        <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No active sessions.</td></tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="card">
-                <div className="card-title"><i className="fas fa-clock-rotate-left"></i> Session History</div>
-                <div className="table-wrapper">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>User</th>
-                        <th>Role</th>
-                        <th>Login</th>
-                        <th>Dept</th>
-                        <th>Login Time</th>
-                        <th>Last Activity</th>
-                        <th>Duration</th>
-                        <th>Logout Reason</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(monitoringData?.history || []).length ? monitoringData!.history.map((entry) => (
-                        <tr key={`${entry.session_id}:${entry.last_activity}`}>
-                          <td><strong>{entry.name || entry.user_email}</strong><br /><span className="inline-muted">{entry.user_email}</span></td>
-                          <td>{entry.role || 'N/A'}</td>
-                          <td><span className={`badge ${String(entry.auth_method || 'password').toLowerCase() === 'google' ? 'badge-info' : 'badge-muted'}`}>{String(entry.auth_method || 'password').toLowerCase() === 'google' ? 'Google' : 'Password'}</span></td>
-                          <td>{entry.department || 'N/A'}</td>
-                          <td>{formatDateTime(entry.login_time)}</td>
-                          <td>{formatDateTime(entry.last_activity)}</td>
-                          <td>{entry.duration || '--'}</td>
-                          <td>{entry.logout_reason || '--'}</td>
-                        </tr>
-                      )) : (
-                        <tr><td colSpan={8} className="text-center text-muted" style={{ padding: 24 }}>No session history available yet.</td></tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </>
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading session monitoring workspace...</div></div>}>
+              <MonitoringTab
+                currentUserEmail={currentUser.email}
+                monitoringData={monitoringData}
+                monitoringLoading={monitoringLoading}
+                monitoringSearch={monitoringSearch}
+                monitoringStatusFilter={monitoringStatusFilter}
+                monitoringAuthFilter={monitoringAuthFilter}
+                monitoringSortBy={monitoringSortBy}
+                filteredMonitoringSessions={filteredMonitoringSessions}
+                filteredMonitoringHistory={filteredMonitoringHistory}
+                onMonitoringSearchChange={(value) => startTransition(() => setMonitoringSearch(value))}
+                onMonitoringStatusFilterChange={setMonitoringStatusFilter}
+                onMonitoringAuthFilterChange={setMonitoringAuthFilter}
+                onMonitoringSortChange={setMonitoringSortBy}
+                onMonitoringReset={() => {
+                  setMonitoringSearch('');
+                  setMonitoringStatusFilter('all');
+                  setMonitoringAuthFilter('all');
+                  setMonitoringSortBy('last_activity_desc');
+                }}
+                onMonitoringRefresh={() => void loadMonitoringOverview()}
+                onLogoutAllUsers={() => void handleLogoutAllUsers()}
+                onForceLogout={(email) => void handleForceLogout(email)}
+                formatUtcSqlDateTime={formatUtcSqlDateTime}
+              />
+            </Suspense>
           ) : (currentUser.role === 'admin' && activeTab === 'config') ? (
             configLoading && !configData ? (
               <div className="card"><div className="panel-placeholder">Loading settings...</div></div>
             ) : (
               <>
+                {runtimeConfig.isDesktop ? (
+                  <div className="card mb-3">
+                    <div className="form-group" style={{ maxWidth: 360, marginBottom: 0 }}>
+                      <label className="form-label">Settings Area</label>
+                      <div className="segmented-switch" data-mode={configDesktopMode === 'desktop' ? 'gdrive' : 'local'}>
+                        <div className="segmented-switch-thumb" aria-hidden="true"></div>
+                        <button type="button" className={`segmented-switch-option ${configDesktopMode === 'server' ? 'active' : ''}`} onClick={() => setConfigDesktopMode('server')}>
+                          Server Settings
+                        </button>
+                        <button type="button" className={`segmented-switch-option ${configDesktopMode === 'desktop' ? 'active' : ''}`} onClick={() => {
+                          setConfigDesktopMode('desktop');
+                          void loadDesktopRuntimeState();
+                        }}>
+                          Desktop App
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {runtimeConfig.isDesktop && configDesktopMode === 'desktop' ? renderDesktopAppSettingsPanel() : (
                 <form onSubmit={(event) => void handleSaveConfig(event)}>
                   <div className="card mb-3">
                     <div className="card-title"><i className="fas fa-file-arrow-up"></i> Configuration Migration</div>
@@ -7192,6 +11280,22 @@ export default function App() {
                       <label className="form-label">Batch Send Delay (seconds)</label>
                       <input type="number" min="1" max="30" step="1" className="form-control" value={String(configForm.counselor_batch_send_delay_seconds || '4')} onChange={(event) => setConfigForm((prev) => ({ ...prev, counselor_batch_send_delay_seconds: event.target.value }))} />
                     </div>
+                    <div className="settings-slider-row" style={{ marginTop: 12 }}>
+                      <div>
+                        <div className="form-label" style={{ marginBottom: 4 }}>Enable desktop send workspace in Windows app</div>
+                        <div className="inline-muted" style={{ fontSize: '.78rem' }}>
+                          Enables the Windows-only floating/send workspace for new result and notice sending sessions.
+                        </div>
+                      </div>
+                      <label className="settings-slider" aria-label="Enable desktop send workspace in Windows app">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(configForm.desktop_send_workspace_enabled)}
+                          onChange={(event) => setConfigForm((prev) => ({ ...prev, desktop_send_workspace_enabled: event.target.checked }))}
+                        />
+                        <span className="settings-slider-track" aria-hidden="true"></span>
+                      </label>
+                    </div>
                   </div>
 
                   <div className="card mb-3">
@@ -7217,6 +11321,14 @@ export default function App() {
                     <div className="form-group" style={{ maxWidth: 220 }}>
                       <label className="form-label">Session Timeout (hours)</label>
                       <input type="number" min="1" max="168" className="form-control" value={String(configForm.session_timeout_hours || '24')} onChange={(event) => setConfigForm((prev) => ({ ...prev, session_timeout_hours: event.target.value }))} />
+                    </div>
+                    <div className="form-group" style={{ maxWidth: 260 }}>
+                      <label className="form-label">Desktop Notification Poll (seconds)</label>
+                      <input type="number" min="10" max="3600" className="form-control" value={String(configForm.desktop_notification_poll_seconds || '30')} onChange={(event) => setConfigForm((prev) => ({ ...prev, desktop_notification_poll_seconds: event.target.value }))} />
+                    </div>
+                    <div className="form-group" style={{ maxWidth: 280 }}>
+                      <label className="form-label">Pending Reminder Threshold (days)</label>
+                      <input type="number" min="1" max="30" className="form-control" value={String(configForm.notification_pending_threshold_days || '2')} onChange={(event) => setConfigForm((prev) => ({ ...prev, notification_pending_threshold_days: event.target.value }))} />
                     </div>
                     <label className="form-check">
                       <input type="checkbox" checked={Boolean(configForm.allow_concurrent_sessions)} onChange={(event) => setConfigForm((prev) => ({ ...prev, allow_concurrent_sessions: event.target.checked }))} />
@@ -7257,7 +11369,7 @@ export default function App() {
                         ['tutorial_counselor_enabled', 'Counselor Tutorial'],
                         ['tutorial_hod_enabled', 'HoD Tutorial'],
                         ['tutorial_deo_enabled', 'DEO Tutorial'],
-                        ['tutorial_principal_enabled', 'Principal Tutorial'],
+                        ['tutorial_principal_enabled', 'Higher Official Tutorial'],
                       ].map(([key, label]) => (
                         <label key={key} className="form-check" style={{ minWidth: 180 }}>
                           <input
@@ -7282,10 +11394,28 @@ export default function App() {
                       <input type="checkbox" checked={Boolean(configForm.require_otp_on_login)} onChange={(event) => setConfigForm((prev) => ({ ...prev, require_otp_on_login: event.target.checked }))} />
                       <span>Require OTP for login (except default admin)</span>
                     </label>
-                    <label className="form-check">
-                      <input type="checkbox" checked={Boolean(configForm.counselor_login_otp_enabled)} disabled={!Boolean(configForm.require_otp_on_login)} onChange={(event) => setConfigForm((prev) => ({ ...prev, counselor_login_otp_enabled: event.target.checked }))} />
-                      <span>Require OTP for counselors when login OTP policy is enabled</span>
-                    </label>
+                    <div className="form-group" style={{ maxWidth: 220 }}>
+                      <label className="form-label">OTP Lockout (hours)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="168"
+                        className="form-control"
+                        value={String(configForm.otp_login_lock_hours || '5')}
+                        onChange={(event) => setConfigForm((prev) => ({ ...prev, otp_login_lock_hours: event.target.value }))}
+                      />
+                      <small style={{ color: 'var(--text-dim)', fontSize: '.75rem', marginTop: 4, display: 'block' }}>
+                        Applied after 3 invalid login OTP attempts.
+                      </small>
+                    </div>
+                    {otpPolicyChanged ? (
+                      <div className="form-group" style={{ maxWidth: 360 }}>
+                        <label className="form-label">Policy Change Warning</label>
+                        <div className="ui-preview-note">
+                          Saving this change logs out every active account immediately and will ask for your admin password in the save popup.
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="card mb-3">
@@ -7298,6 +11428,45 @@ export default function App() {
                       <input type="checkbox" checked={Boolean(configForm.activity_copy_as_image)} onChange={(event) => setConfigForm((prev) => ({ ...prev, activity_copy_as_image: event.target.checked }))} />
                       <span>Copy Counselor Activity Defaulters as styled image</span>
                     </label>
+                    <div className="form-group" style={{ marginTop: 14 }}>
+                      <label className="form-label">Notice Copy Template</label>
+                      <textarea
+                        className="form-control"
+                        rows={5}
+                        value={String(configForm.notice_defaulter_copy_template || '')}
+                        onChange={(event) => setConfigForm((prev) => ({ ...prev, notice_defaulter_copy_template: event.target.value }))}
+                        placeholder={DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE}
+                      />
+                      <small style={{ fontSize: '.74rem', color: 'var(--text-dim)' }}>
+                        Use {'{entries}'} for the generated notice rows and {'{count}'} for the pending counselor count.
+                      </small>
+                    </div>
+                    <div className="form-group" style={{ marginTop: 12 }}>
+                      <label className="form-label">Counsellor Activity Copy Template</label>
+                      <textarea
+                        className="form-control"
+                        rows={5}
+                        value={String(configForm.activity_defaulter_copy_template || '')}
+                        onChange={(event) => setConfigForm((prev) => ({ ...prev, activity_defaulter_copy_template: event.target.value }))}
+                        placeholder={DEFAULT_ACTIVITY_DEFAULTER_COPY_TEMPLATE}
+                      />
+                      <small style={{ fontSize: '.74rem', color: 'var(--text-dim)' }}>
+                        Use {'{entries}'} for the generated activity rows, {'{count}'} for pending counselors, and {'{mode}'} for the copy scope.
+                      </small>
+                    </div>
+                    <div className="form-group" style={{ marginTop: 12 }}>
+                      <label className="form-label">CDP Copy Template</label>
+                      <textarea
+                        className="form-control"
+                        rows={5}
+                        value={String(configForm.cdp_defaulter_copy_template || '')}
+                        onChange={(event) => setConfigForm((prev) => ({ ...prev, cdp_defaulter_copy_template: event.target.value }))}
+                        placeholder={DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE}
+                      />
+                      <small style={{ fontSize: '.74rem', color: 'var(--text-dim)' }}>
+                        Use {'{entries}'} for subject blocks, {'{count}'} for pending faculty count, and {'{scope}'} for the selected CDP scope.
+                      </small>
+                    </div>
                   </div>
 
                   <div className="card mb-3">
@@ -7441,8 +11610,10 @@ export default function App() {
                     <button type="submit" className="btn btn-primary" disabled={configSaving}>
                       <i className={`fas ${configSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i> {configSaving ? 'Saving...' : 'Save All Settings'}
                     </button>
+                    {configFormDirty ? <span className="badge badge-warning" style={{ alignSelf: 'center' }}>Unsaved Changes</span> : null}
                   </div>
                 </form>
+                )}
 
                 <div className="card mt-3">
                   <div className="card-title"><i className="fas fa-file-code"></i> Raw .env Editor</div>
@@ -7491,17 +11662,17 @@ export default function App() {
                         <table>
                           <tbody>
                             {filteredResetUsers.map((user) => (
-                              <tr key={user.email}>
+                              <tr key={user.account_email || user.email}>
                                 <td>
                                   <strong>{user.name}</strong><br />
                                   <span className="inline-muted">{user.email}</span>
                                 </td>
-                                <td>{user.role === 'admin' ? 'System Admin' : user.role === 'principal' ? 'Principal' : user.role === 'hod' ? 'HoD' : user.role === 'deo' ? 'DEO' : 'Counselor'}</td>
+                                <td>{getRoleOptionLabel(user.role, user.designation)}</td>
                                 <td style={{ textAlign: 'right' }}>
                                   <button
                                     type="button"
-                                    className={`btn btn-sm ${resetPasswordDraft.target_email === user.email ? 'btn-primary' : 'btn-outline'}`}
-                                    onClick={() => setResetPasswordDraft((prev) => ({ ...prev, target_email: user.email, new_password: '', confirm_password: '' }))}
+                                    className={`btn btn-sm ${resetPasswordDraft.target_email === (user.account_email || user.email) ? 'btn-primary' : 'btn-outline'}`}
+                                    onClick={() => setResetPasswordDraft((prev) => ({ ...prev, target_email: user.account_email || user.email, new_password: '', confirm_password: '' }))}
                                   >
                                     Select
                                   </button>
@@ -7518,17 +11689,17 @@ export default function App() {
                           <div>
                             <div className="detail-display-label">Selected User</div>
                             <div className="detail-display-value is-strong">
-                              {(configData?.resetUsers || []).find((row) => row.email === resetPasswordDraft.target_email)?.name || resetPasswordDraft.target_email}
+                              {(configData?.resetUsers || []).find((row) => (row.account_email || row.email) === resetPasswordDraft.target_email)?.name || resetPasswordDraft.target_email}
                             </div>
                           </div>
                           <div>
                             <div className="detail-display-label">Scope</div>
                             <div className="detail-display-value">
                               {(() => {
-                                const selectedRow = (configData?.resetUsers || []).find((row) => row.email === resetPasswordDraft.target_email);
+                                const selectedRow = (configData?.resetUsers || []).find((row) => (row.account_email || row.email) === resetPasswordDraft.target_email);
                                 if (!selectedRow) return '-';
                                 if (selectedRow.role === 'counselor') return `${selectedRow.department || '-'} • ${formatYearLevel(Number(selectedRow.year_level || 1) || 1)}`;
-                                return selectedRow.department || getRoleOptionLabel(selectedRow.role);
+                                return selectedRow.department || getRoleOptionLabel(selectedRow.role, selectedRow.designation);
                               })()}
                             </div>
                           </div>
@@ -7566,17 +11737,17 @@ export default function App() {
                       <table>
                         <tbody>
                           {filteredPreviewUsers.map((user) => (
-                            <tr key={`preview:${user.email}`}>
+                            <tr key={`preview:${user.account_email || user.email}`}>
                               <td>
                                 <strong>{user.name}</strong><br />
                                 <span className="inline-muted">{user.email}</span>
                               </td>
-                              <td>{getRoleOptionLabel(user.role)}</td>
+                              <td>{getRoleOptionLabel(user.role, user.designation)}</td>
                               <td style={{ textAlign: 'right' }}>
                                 <button
                                   type="button"
-                                  className={`btn btn-sm ${previewUserEmail === user.email ? 'btn-primary' : 'btn-outline'}`}
-                                  onClick={() => setPreviewUserEmail(user.email)}
+                                  className={`btn btn-sm ${previewUserEmail === (user.account_email || user.email) ? 'btn-primary' : 'btn-outline'}`}
+                                  onClick={() => setPreviewUserEmail(user.account_email || user.email)}
                                 >
                                   Select
                                 </button>
@@ -7596,7 +11767,7 @@ export default function App() {
                         </div>
                         <div>
                           <div className="detail-display-label">Role</div>
-                          <div className="detail-display-value">{getRoleOptionLabel(previewShellUser.role)}</div>
+                          <div className="detail-display-value">{getRoleOptionLabel(previewShellUser.role, previewShellUser.designation)}</div>
                         </div>
                         <div>
                           <div className="detail-display-label">Default Landing Tab</div>
@@ -7622,7 +11793,7 @@ export default function App() {
                     <div className="panel-placeholder">Select any user above to review their account details and enter full-page test mode.</div>
                   )}
                   <div className="btn-group" style={{ marginTop: 12 }}>
-                    <button type="button" className="btn btn-warning" disabled={!previewUserRecord} onClick={() => previewUserRecord ? void handleStartAccountTestMode(previewUserRecord.email) : undefined}>
+                    <button type="button" className="btn btn-warning" disabled={!previewUserRecord} onClick={() => previewUserRecord ? void handleStartAccountTestMode(previewUserRecord.account_email || previewUserRecord.email) : undefined}>
                       <i className="fas fa-right-to-bracket"></i> Enter Test Mode
                     </button>
                     {previewUserRecord ? (
@@ -7670,547 +11841,57 @@ export default function App() {
               </pre>
             </div>
           ) : ((['admin', 'principal', 'hod', 'deo'].includes(currentUser.role) && activeTab === 'reports') || (currentUser.role === 'counselor' && activeTab === 'test-database')) ? (
-            <>
-              {testDetailLoading ? (
-                <div className="card">
-                  <div className="panel-placeholder">Loading test details...</div>
-                </div>
-              ) : testDetail ? (
-                <div className="report-page-shell">
-                  <div className="report-sticky-toolbar report-detail-toolbar mb-2">
-                    <div className="report-toolbar-top">
-                      <button
-                        type="button"
-                        className="btn btn-outline btn-sm report-back-btn"
-                        onClick={() => setTestDetail(null)}
-                      >
-                        <i className="fas fa-arrow-left"></i> {currentUser.role === 'counselor' ? 'Back To Test Database' : 'Back To Reports'}
-                      </button>
-                    </div>
-                    <div className="report-toolbar-main">
-                      <div className="report-toolbar-cluster report-toolbar-search">
-                        <div className="form-group report-toolbar-field">
-                          <label className="form-label">Search Students</label>
-                          <input
-                            className="form-control"
-                            placeholder="Search by reg no or student name"
-                            value={testDetailSearch}
-                            onChange={(event) => setTestDetailSearch(event.target.value)}
-                          />
-                        </div>
-                        <div className="form-group report-toolbar-field report-toolbar-field-sm">
-                          <label className="form-label">Sort</label>
-                          <select className="form-control" value={testDetailSort} onChange={(event) => setTestDetailSort(event.target.value)}>
-                            <option value="reg_asc">Reg No</option>
-                            <option value="reg_desc">Reg No (Desc)</option>
-                            <option value="name_asc">Name (A-Z)</option>
-                            <option value="name_desc">Name (Z-A)</option>
-                            <option value="gpa_desc">GPA (High-Low)</option>
-                            <option value="gpa_asc">GPA (Low-High)</option>
-                            <option value="failed_desc">Failed (High-Low)</option>
-                            <option value="failed_asc">Failed (Low-High)</option>
-                          </select>
-                        </div>
-                      </div>
-                      <div className="report-toolbar-cluster report-toolbar-end">
-                        {!testMarksReadOnly ? (
-                          <button className="btn btn-primary report-save-all-btn" type="button" onClick={() => void handleSaveAllMarks()} disabled={savingMarks}>
-                            <i className="fas fa-save"></i> {savingMarks ? 'Saving...' : 'Save All Marks'}
-                          </button>
-                        ) : null}
-                        <span className="badge badge-info">{testDetail.meta.test_name || 'Selected Test'}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="card mb-3">
-                    <div className="card-title"><i className="fas fa-pen"></i> Test Metadata</div>
-                    <form onSubmit={(event) => void handleSaveMeta(event)}>
-                      <div className="form-row">
-                        <div className="form-group">
-                          <label className="form-label">Test Name</label>
-                          <select
-                            className="form-control"
-                            value={testMetaDraft.test_name}
-                            disabled={testMetaReadOnly}
-                            onChange={(event) => setTestMetaDraft((prev) => ({ ...prev, test_name: event.target.value }))}
-                          >
-                            <option value="IAT 1">IAT 1</option>
-                            <option value="IAT 2">IAT 2</option>
-                            <option value="MODEL EXAM">MODEL EXAM</option>
-                          </select>
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Semester</label>
-                          <input
-                            type="text"
-                            className="form-control"
-                            value={testMetaDraft.semester}
-                            readOnly={testMetaReadOnly}
-                            onChange={(event) => setTestMetaDraft((prev) => ({ ...prev, semester: event.target.value }))}
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Section</label>
-                          <input
-                            type="text"
-                            className="form-control"
-                            value={testMetaDraft.section}
-                            readOnly={testMetaReadOnly}
-                            placeholder="e.g. A, B, C"
-                            onChange={(event) => setTestMetaDraft((prev) => ({ ...prev, section: event.target.value }))}
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Batch</label>
-                          <input
-                            type="text"
-                            className="form-control"
-                            value={testMetaDraft.batch_name}
-                            readOnly={testMetaReadOnly}
-                            onChange={(event) => setTestMetaDraft((prev) => ({ ...prev, batch_name: event.target.value }))}
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Department</label>
-                          <input className="form-control" value={testDetail.meta.department || '-'} readOnly />
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Year</label>
-                          <input className="form-control" value={formatYearLevel(testDetail.meta.year_level || 1)} readOnly />
-                        </div>
-                      </div>
-                      {!testMetaReadOnly ? (
-                        <button className="btn btn-primary" type="submit" disabled={savingMeta}>
-                          <i className="fas fa-save"></i> {savingMeta ? 'Saving...' : 'Save Metadata'}
-                        </button>
-                      ) : null}
-                    </form>
-                  </div>
-
-                  <div className="card">
-                    <div className="card-title">
-                      <span><i className="fas fa-table"></i> Student Marks</span>
-                    </div>
-                    <div className="table-wrapper report-marks-scroll">
-                      <table className="report-marks-table">
-                        <thead>
-                          <tr>
-                            <th>Reg No</th>
-                            <th>Student Name</th>
-                            {testDetail.subjects.map((subject) => (
-                              <th key={subject}>{subject}</th>
-                            ))}
-                            <th>GPA</th>
-                            <th className="summary-col-failed">Failed</th>
-                            {!testMarksReadOnly ? <th>Action</th> : null}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {visibleTestDetailStudents.length ? visibleTestDetailStudents.map((student: ReportStudentRow) => (
-                            <tr key={student.reg_no}>
-                              <td><strong>{student.reg_no}</strong></td>
-                              <td>{student.student_name || '-'}</td>
-                              {testDetail.subjects.map((subject) => (
-                                <td key={`${student.reg_no}:${subject}`}>
-                                  {testMarksReadOnly ? (
-                                    student.marks[subject] || ''
-                                  ) : (
-                                    <input
-                                      className="form-control"
-                                      value={student.marks[subject] || ''}
-                                      style={{ minWidth: 80 }}
-                                      onChange={(event) => updateLocalMark(student.reg_no, subject, event.target.value)}
-                                    />
-                                  )}
-                                </td>
-                              ))}
-                              <td>{readSummaryMetric(student.marks, ['GPA', 'gpa', 'CGPA', 'cgpa'])}</td>
-                              <td className="summary-col-failed">{readSummaryMetric(student.marks, ['No. of subjects failed', 'noofsubjectsfailed', 'failedsubjects'])}</td>
-                              {!testMarksReadOnly ? (
-                                <td>
-                                  <button className="btn btn-sm btn-primary" type="button" onClick={() => void handleSaveRowMarks(student.reg_no)}>
-                                    <i className="fas fa-save"></i>
-                                  </button>
-                                </td>
-                              ) : null}
-                            </tr>
-                          )) : (
-                            <tr>
-                              <td colSpan={testDetail.subjects.length + (testMarksReadOnly ? 4 : 5)} className="text-center text-muted" style={{ padding: 22 }}>
-                                No students match the current search and sort filters.
-                              </td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              ) : currentUser.role === 'counselor' ? (
-                <>
-                  <h3 className="section-title"><i className="fas fa-file-lines"></i> Reports</h3>
-
-                  <div className="card mb-3">
-                    <div className="card-title"><i className="fas fa-database"></i> Semester 1</div>
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Test Name</th>
-                            <th>Year</th>
-                            <th>Batch</th>
-                            <th>Sem</th>
-                            <th>Students</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {counselorTestsLoading ? (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>Loading tests...</td></tr>
-                          ) : counselorTestsBySemester.sem1.length ? counselorTestsBySemester.sem1.map((test) => (
-                            <tr key={test.id}>
-                              <td><strong>{test.test_name}</strong></td>
-                              <td>{formatYearLevel(test.year_level || (currentUser.year_level || 1))}</td>
-                              <td>{test.batch_name || '-'}</td>
-                              <td>{test.semester || '-'}</td>
-                              <td><span className="badge badge-info">{test.student_count}</span></td>
-                              <td>
-                                {test.is_blocked ? (
-                                  <span className="badge badge-danger">Blocked By Admin</span>
-                                ) : (test.generated_count || 0) > 0 ? (
-                                  <span className="badge badge-success">Uploaded</span>
-                                ) : (
-                                  <span className="badge badge-warning">Upload Pending</span>
-                                )}
-                              </td>
-                              <td>
-                                <div className="btn-group">
-                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadTestDetail(test.id)} disabled={Boolean(test.is_blocked)}>
-                                    <i className="fas fa-eye"></i> View/Edit
-                                  </button>
-                                  <button type="button" className="btn btn-primary btn-sm" onClick={() => startCounselorSendFlow(test.id, test.test_name)} disabled={Boolean(test.is_blocked)}>
-                                    <i className="fas fa-paper-plane"></i> Send Results
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No semester 1 tests mapped yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  <div className="card mb-3">
-                    <div className="card-title"><i className="fas fa-database"></i> Semester 2</div>
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Test Name</th>
-                            <th>Year</th>
-                            <th>Batch</th>
-                            <th>Sem</th>
-                            <th>Students</th>
-                            <th>Status</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {counselorTestsLoading ? (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>Loading tests...</td></tr>
-                          ) : counselorTestsBySemester.sem2.length ? counselorTestsBySemester.sem2.map((test) => (
-                            <tr key={test.id}>
-                              <td><strong>{test.test_name}</strong></td>
-                              <td>{formatYearLevel(test.year_level || (currentUser.year_level || 1))}</td>
-                              <td>{test.batch_name || '-'}</td>
-                              <td>{test.semester || '-'}</td>
-                              <td><span className="badge badge-info">{test.student_count}</span></td>
-                              <td>
-                                {test.is_blocked ? (
-                                  <span className="badge badge-danger">Blocked By Admin</span>
-                                ) : (test.generated_count || 0) > 0 ? (
-                                  <span className="badge badge-success">Uploaded</span>
-                                ) : (
-                                  <span className="badge badge-warning">Upload Pending</span>
-                                )}
-                              </td>
-                              <td>
-                                <div className="btn-group">
-                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadTestDetail(test.id)} disabled={Boolean(test.is_blocked)}>
-                                    <i className="fas fa-eye"></i> View/Edit
-                                  </button>
-                                  <button type="button" className="btn btn-primary btn-sm" onClick={() => startCounselorSendFlow(test.id, test.test_name)} disabled={Boolean(test.is_blocked)}>
-                                    <i className="fas fa-paper-plane"></i> Send Results
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No semester 2 tests mapped yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </>
-              ) : !reportsData?.selectedDepartment ? (
-                <div className="mb-3">
-                  <h3 className="section-title"><i className="fas fa-building"></i> Select Department</h3>
-                  <div className="metrics-grid selection-grid department-selection-grid">
-                    {(reportsData?.departments || []).map((department) => (
-                      <button
-                        key={department.id}
-                        type="button"
-                        className="metric-card selection-card-button"
-                        onClick={() => void loadReports(department.code)}
-                      >
-                        <div className="metric-value" style={{ fontSize: '1.6rem' }}>{department.code}</div>
-                        <div className="selection-card-subtitle">{department.name}</div>
-                      </button>
-                    ))}
-                    {!reportsLoading && !(reportsData?.departments || []).length ? (
-                      <div className="card" style={{ padding: 16, fontSize: '.9rem', color: 'var(--text-dim)' }}>No departments available for your scope.</div>
-                    ) : null}
-                  </div>
-                </div>
-              ) : !reportsData.selectedYear ? (
-                <div className="selection-shell mb-3" style={{ maxWidth: 620 }}>
-                  <ScopeBreadcrumb
-                    icon="fa-file-lines"
-                    items={[
-                      { label: 'Reports', onClick: () => void loadReports() },
-                      { label: reportsData.selectedDepartment },
-                    ]}
-                  />
-                  <div className="selection-actions-grid">
-                    {reportsData.availableYears.map((year) => (
-                      <button
-                        key={year}
-                        type="button"
-                        className="btn btn-outline selection-action-button"
-                        onClick={() => void loadReports(reportsData.selectedDepartment, year)}
-                      >
-                        {formatYearLevel(year)}
-                      </button>
-                    ))}
-                    {!reportsData.availableYears.length ? (
-                      <div className="card" style={{ padding: 12, fontSize: '.86rem', color: 'var(--text-dim)' }}>No years allocated for this department.</div>
-                    ) : null}
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div className="d-flex align-center justify-between flex-wrap mb-2" style={{ gap: 12 }}>
-                    <ScopeBreadcrumb
-                      icon="fa-file-lines"
-                      items={[
-                        { label: 'Reports', onClick: () => void loadReports() },
-                        { label: reportsData.selectedDepartment, onClick: () => void loadReports(reportsData.selectedDepartment) },
-                        { label: formatYearLevel(reportsData.selectedYear) },
-                      ]}
-                    />
-                  </div>
-
-                  {(currentUser.role === 'admin' || currentUser.role === 'deo') ? (
-                    <div className="card mb-3">
-                      <div className="card-title"><i className="fas fa-file-upload"></i> Upload Marksheet</div>
-                      <form onSubmit={(event) => void handleUploadReport(event)}>
-                        <div className="form-row">
-                          <div className="form-group">
-                            <label className="form-label">Department</label>
-                            <input className="form-control" value={reportsData.selectedDepartment} readOnly />
-                          </div>
-                          <div className="form-group">
-                            <label className="form-label">Year</label>
-                            <input className="form-control" value={formatYearLevel(reportsData.selectedYear)} readOnly />
-                          </div>
-                        </div>
-                        <div className="form-row">
-                          <div className="form-group">
-                            <label className="form-label">Test Name</label>
-                            <select
-                              className="form-control"
-                              value={reportUploadDraft.test_name}
-                              onChange={(event) => setReportUploadDraft((prev) => ({ ...prev, test_name: event.target.value }))}
-                              required
-                            >
-                              <option value="">-- Select Test --</option>
-                              <option value="IAT 1">IAT 1</option>
-                              <option value="IAT 2">IAT 2</option>
-                              <option value="MODEL EXAM">MODEL EXAM</option>
-                            </select>
-                          </div>
-                          <div className="form-group">
-                            <label className="form-label">Semester</label>
-                            <select
-                              className="form-control"
-                              value={reportUploadDraft.semester}
-                              onChange={(event) => setReportUploadDraft((prev) => ({ ...prev, semester: event.target.value }))}
-                              required
-                            >
-                              <option value="1">1</option>
-                              <option value="2">2</option>
-                            </select>
-                          </div>
-                        </div>
-                        <div className="form-group" style={{ maxWidth: 380 }}>
-                          <label className="form-label">Upload Mode</label>
-                          <select
-                            className="form-control"
-                            value={reportUploadDraft.upload_mode}
-                            onChange={(event) => setReportUploadDraft((prev) => ({ ...prev, upload_mode: event.target.value }))}
-                          >
-                            <option value="new">Keep as New Test</option>
-                            <option value="replace">Replace Existing Matching Test</option>
-                          </select>
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Marksheet File</label>
-                          <div className="file-input-wrapper">
-                            <i className="fas fa-file-excel"></i>
-                            <div className="file-text">Upload Excel marksheet (.xlsx, .xls)</div>
-                            <div className="file-name" style={{ display: reportUploadDraft.file ? 'block' : 'none' }}>{reportUploadDraft.file?.name || ''}</div>
-                            <input
-                              key={reportUploadInputKey}
-                              type="file"
-                              accept=".xlsx,.xls"
-                              onChange={(event) =>
-                                setReportUploadDraft((prev) => ({
-                                  ...prev,
-                                  file: event.target.files?.[0] || null,
-                                  batch_name: getDefaultBatchNameForYearLevel(reportsData.selectedYear ?? 1, bootstrap?.appConfig || null),
-                                  section: '',
-                                }))
-                              }
-                              required
-                            />
-                          </div>
-                        </div>
-                        <button className="btn btn-primary" type="submit" disabled={uploadingReport}>
-                          <i className={`fas ${uploadingReport ? 'fa-spinner fa-spin' : 'fa-upload'}`}></i> {uploadingReport ? 'Uploading...' : 'Upload Marksheet'}
-                        </button>
-                      </form>
-                    </div>
-                  ) : null}
-
-                  <div className="card mb-3">
-                    <div className="card-title"><i className="fas fa-database"></i> {reportsData.selectedDepartment} - {formatYearLevel(reportsData.selectedYear)} - Semester 1</div>
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Test Name</th>
-                            <th>Batch</th>
-                            <th>Semester</th>
-                            <th>Uploaded By</th>
-                            <th>Students</th>
-                            <th>Uploaded At</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reportsLoading ? (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>Loading reports...</td></tr>
-                          ) : reportTestsBySemester.sem1.length ? reportTestsBySemester.sem1.map((test) => (
-                            <tr key={test.id}>
-                              <td><strong>{test.test_name || `Test #${test.id}`}</strong></td>
-                              <td>{test.batch_name || '-'}</td>
-                              <td>{test.semester || '-'}</td>
-                              <td><span style={{ fontSize: '.85rem' }}>{test.uploaded_by_name || test.uploaded_by || '-'}</span></td>
-                              <td><span className="badge badge-info">{test.student_count || 0}</span></td>
-                              <td style={{ fontSize: '.82rem' }}>{(test.uploaded_at || '').slice(0, 16)}</td>
-                              <td>
-                                <div className="btn-group">
-                                  <button
-                                    type="button"
-                                    className="btn btn-outline btn-sm"
-                                    onClick={() => void loadTestDetail(test.id)}
-                                  >
-                                    <i className={`fas ${currentUser.role === 'principal' ? 'fa-eye' : 'fa-pen'}`}></i> {currentUser.role === 'principal' ? 'View' : 'Edit/View'}
-                                  </button>
-                                  {currentUser.role !== 'principal' ? (
-                                    <>
-                                      <button type="button" className={`btn ${test.is_blocked ? 'btn-success' : 'btn-warning'} btn-sm`} onClick={() => void handleToggleTestBlock(test)}>
-                                        <i className={`fas ${test.is_blocked ? 'fa-lock-open' : 'fa-lock'}`}></i>
-                                      </button>
-                                      <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleDeleteTest(test)}>
-                                        <i className="fas fa-trash"></i>
-                                      </button>
-                                    </>
-                                  ) : null}
-                                </div>
-                              </td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No semester 1 tests uploaded yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  <div className="card mb-3">
-                    <div className="card-title"><i className="fas fa-database"></i> {reportsData.selectedDepartment} - {formatYearLevel(reportsData.selectedYear)} - Semester 2</div>
-                    <div className="table-wrapper">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Test Name</th>
-                            <th>Batch</th>
-                            <th>Semester</th>
-                            <th>Uploaded By</th>
-                            <th>Students</th>
-                            <th>Uploaded At</th>
-                            <th>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reportsLoading ? (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>Loading reports...</td></tr>
-                          ) : reportTestsBySemester.sem2.length ? reportTestsBySemester.sem2.map((test) => (
-                            <tr key={test.id}>
-                              <td><strong>{test.test_name || `Test #${test.id}`}</strong></td>
-                              <td>{test.batch_name || '-'}</td>
-                              <td>{test.semester || '-'}</td>
-                              <td><span style={{ fontSize: '.85rem' }}>{test.uploaded_by_name || test.uploaded_by || '-'}</span></td>
-                              <td><span className="badge badge-info">{test.student_count || 0}</span></td>
-                              <td style={{ fontSize: '.82rem' }}>{(test.uploaded_at || '').slice(0, 16)}</td>
-                              <td>
-                                <div className="btn-group">
-                                  <button
-                                    type="button"
-                                    className="btn btn-outline btn-sm"
-                                    onClick={() => void loadTestDetail(test.id)}
-                                  >
-                                    <i className={`fas ${currentUser.role === 'principal' ? 'fa-eye' : 'fa-pen'}`}></i> {currentUser.role === 'principal' ? 'View' : 'Edit/View'}
-                                  </button>
-                                  {currentUser.role !== 'principal' ? (
-                                    <>
-                                      <button type="button" className={`btn ${test.is_blocked ? 'btn-success' : 'btn-warning'} btn-sm`} onClick={() => void handleToggleTestBlock(test)}>
-                                        <i className={`fas ${test.is_blocked ? 'fa-lock-open' : 'fa-lock'}`}></i>
-                                      </button>
-                                      <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleDeleteTest(test)}>
-                                        <i className="fas fa-trash"></i>
-                                      </button>
-                                    </>
-                                  ) : null}
-                                </div>
-                              </td>
-                            </tr>
-                          )) : (
-                            <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No semester 2 tests uploaded yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </>
-              )}
-            </>
+            <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading reports workspace...</div></div>}>
+              <ReportsTab
+                currentUser={currentUser}
+                appConfig={bootstrap?.appConfig || null}
+                testDetailLoading={testDetailLoading}
+                testDetail={testDetail}
+                testDetailSearch={testDetailSearch}
+                testDetailSort={testDetailSort}
+                visibleTestDetailStudents={visibleTestDetailStudents}
+                testMetaDraft={testMetaDraft}
+                testMetaReadOnly={testMetaReadOnly}
+                testMarksReadOnly={testMarksReadOnly}
+                savingMeta={savingMeta}
+                savingMarks={savingMarks}
+                counselorTestsLoading={counselorTestsLoading}
+                counselorTestsBySemester={counselorTestsBySemester}
+                reportsLoading={reportsLoading}
+                reportsData={reportsData}
+                reportTestsBySemester={reportTestsBySemester}
+                reportUploadDraft={reportUploadDraft}
+                reportUploadInputKey={reportUploadInputKey}
+                uploadingReport={uploadingReport}
+                ScopeBreadcrumb={ScopeBreadcrumb}
+                formatYearLevel={formatYearLevel}
+                getDefaultBatchNameForYearLevel={getDefaultBatchNameForYearLevel}
+                readSummaryMetric={readSummaryMetric}
+                onBackFromTestDetail={() => setTestDetail(null)}
+                onTestDetailSearchChange={setTestDetailSearch}
+                onTestDetailSortChange={setTestDetailSort}
+                onSaveAllMarks={() => void handleSaveAllMarks()}
+                onTestMetaDraftChange={(field, value) => setTestMetaDraft((prev) => ({ ...prev, [field]: value }))}
+                onSaveMetaSubmit={(event) => void handleSaveMeta(event)}
+                onUpdateLocalMark={updateLocalMark}
+                onSaveRowMarks={(regNo) => void handleSaveRowMarks(regNo)}
+                isTestDetailRowDirty={isTestDetailRowDirty}
+                onLoadTestDetail={(testId) => void loadTestDetail(testId)}
+                onStartCounselorSendFlow={startCounselorSendFlow}
+                sendResultOpeningId={sendResultOpeningId}
+                onLoadReports={(department, year) => void loadReports(department, year ?? undefined)}
+                onUploadReportSubmit={(event) => void handleUploadReport(event)}
+                onReportUploadDraftChange={(field, value) => setReportUploadDraft((prev) => ({ ...prev, [field]: value }))}
+                onReportUploadFileChange={(file) => setReportUploadDraft((prev) => ({
+                  ...prev,
+                  file,
+                  batch_name: getDefaultBatchNameForYearLevel(reportsData?.selectedYear ?? 1, bootstrap?.appConfig || null),
+                  section: '',
+                }))}
+                onToggleTestBlock={(test) => void handleToggleTestBlock(test)}
+                onDeleteTest={(test) => void handleDeleteTest(test)}
+              />
+            </Suspense>
           ) : (['admin', 'principal'].includes(currentUser.role) && activeTab === 'departments') ? (
             <>
               <div className="card mb-3">
@@ -8309,39 +11990,46 @@ export default function App() {
           )}
         </div>
 
-        <footer className="global-footer">
-          <div className="global-footer-inner">
-            <div className="global-footer-left">
-              <img src="/assets/banner.png" alt="RMKCET Banner" className="global-footer-banner-image" />
-              <span className="global-footer-text">Department of Science and Humanities</span>
+        {embeddedWhatsappSidepaneLayoutActive ? null : (
+          <footer className="global-footer">
+            <div className="global-footer-inner">
+              <div className="global-footer-left">
+                <img src="/assets/banner.png" alt="RMKCET Banner" className="global-footer-banner-image" loading="lazy" />
+                <span className="global-footer-text">Department of Science and Humanities</span>
+              </div>
+              <div className="global-footer-links">
+                {canOpenFooterTemplates ? (
+                  <button
+                    type="button"
+                    className="global-footer-link global-footer-btn"
+                    onClick={() => setTemplateDownloadsOpen(true)}
+                  >
+                    Templates
+                  </button>
+                ) : null}
+                {currentUser.role === 'counselor' ? (
+                  <a
+                    className="global-footer-link global-footer-btn"
+                    href="https://apps.microsoft.com/detail/9NKSQGP7F2NH?hl=en-us&gl=IN&ocid=pdpshare"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    WhatsApp Download
+                  </a>
+                ) : null}
+                {!runtimeConfig.isDesktop ? (
+                  <a className="global-footer-link global-footer-btn" href="/api/desktop/installer">
+                    Windows App
+                  </a>
+                ) : null}
+                <a className="global-footer-link global-footer-btn" href="/api/footer/credits">Credits</a>
+                {currentUser.role !== 'admin' ? (
+                  <a className="global-footer-link global-footer-btn" href={getFooterSupportHref(currentUser)} target="_blank" rel="noreferrer">Support</a>
+                ) : null}
+              </div>
             </div>
-            <div className="global-footer-links">
-              {canOpenFooterTemplates ? (
-                <button
-                  type="button"
-                  className="global-footer-link global-footer-btn"
-                  onClick={() => setTemplateDownloadsOpen(true)}
-                >
-                  Templates
-                </button>
-              ) : null}
-              {currentUser.role === 'counselor' ? (
-                <a
-                  className="global-footer-link global-footer-btn"
-                  href="https://apps.microsoft.com/detail/9NKSQGP7F2NH?hl=en-us&gl=IN&ocid=pdpshare"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  WhatsApp Download
-                </a>
-              ) : null}
-              <a className="global-footer-link global-footer-btn" href="/api/footer/credits">Credits</a>
-              {currentUser.role !== 'admin' ? (
-                <a className="global-footer-link global-footer-btn" href={getFooterSupportHref(currentUser)} target="_blank" rel="noreferrer">Support</a>
-              ) : null}
-            </div>
-          </div>
-        </footer>
+          </footer>
+        )}
       </main>
 
       {templateDownloadsOpen ? (
@@ -8438,6 +12126,49 @@ export default function App() {
               <div className="btn-group" style={{ justifyContent: 'flex-end', marginTop: 8 }}>
                 <button type="button" className="btn btn-primary btn-sm" onClick={() => setSelectedNoticeCompletion(null)}>Close</button>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {desktopSettingsPanelOpen && runtimeConfig.isDesktop ? (
+        <div className="modal-overlay open" onClick={() => setDesktopSettingsPanelOpen(false)}>
+          <div className="modal" style={{ maxWidth: 980 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-desktop"></i> Desktop App</h3>
+              <button className="modal-close" type="button" onClick={() => setDesktopSettingsPanelOpen(false)}>
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+            {renderDesktopAppSettingsPanel()}
+          </div>
+        </div>
+      ) : null}
+
+      {loginNotificationPrompt ? (
+        <div className="modal-overlay open" onClick={() => setLoginNotificationPrompt(null)}>
+          <div className="modal" style={{ maxWidth: 520 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-circle-exclamation"></i> Notification</h3>
+            </div>
+            <div className="notification-login-body">
+              <strong>{loginNotificationPrompt.title}</strong>
+              <p>{loginNotificationPrompt.body}</p>
+            </div>
+            <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => {
+                markNotificationsRead([loginNotificationPrompt.key]);
+                setLoginNotificationPrompt(null);
+                openNotificationCenter();
+              }}>
+                Check Notification Center
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => {
+                markNotificationsRead([loginNotificationPrompt.key]);
+                setLoginNotificationPrompt(null);
+              }}>
+                OK
+              </button>
             </div>
           </div>
         </div>
@@ -8544,12 +12275,14 @@ export default function App() {
                 <div className="form-group">
                   <label className="form-label">Reset OTP</label>
                   <input
-                    className="form-control"
+                    className="form-control otp-code-input"
                     autoComplete="off"
+                    inputMode="numeric"
+                    pattern="\d{6}"
                     data-lpignore="true"
                     data-1p-ignore="true"
                     value={forgotPasswordState.otp_code}
-                    onChange={(event) => setForgotPasswordState((prev) => ({ ...prev, otp_code: event.target.value }))}
+                    onChange={(event) => setForgotPasswordState((prev) => ({ ...prev, otp_code: normalizeOtpCode(event.target.value) }))}
                     placeholder="Enter 6-digit OTP"
                     minLength={6}
                     maxLength={6}
@@ -8739,12 +12472,14 @@ export default function App() {
                 <div className="form-group">
                   <label className="form-label">OTP Code</label>
                   <input
-                    className="form-control"
+                    className="form-control otp-code-input"
                     autoComplete="off"
+                    inputMode="numeric"
+                    pattern="\d{6}"
                     data-lpignore="true"
                     data-1p-ignore="true"
                     value={selfPasswordDraft.otp_code}
-                    onChange={(event) => setSelfPasswordDraft((prev) => ({ ...prev, otp_code: event.target.value }))}
+                    onChange={(event) => setSelfPasswordDraft((prev) => ({ ...prev, otp_code: normalizeOtpCode(event.target.value) }))}
                     placeholder="Enter 6-digit OTP"
                     minLength={6}
                     maxLength={6}
@@ -8839,7 +12574,14 @@ export default function App() {
                 {currentUser.role === 'admin' ? (
                   <div className="form-group">
                     <label className="form-label">Role</label>
-                    <select className="form-control" value={userEditDraft.role} onChange={(event) => setUserEditDraft((prev) => prev ? { ...prev, role: event.target.value as Role, scope_pairs: [], department: '', year_level: '1' } : prev)}>
+                    <select className="form-control" value={userEditDraft.role} onChange={(event) => setUserEditDraft((prev) => prev ? {
+                      ...prev,
+                      role: event.target.value as Role,
+                      designation: event.target.value === 'principal' ? (String(prev.designation || '').trim() || 'Higher Official') : '',
+                      scope_pairs: [],
+                      department: '',
+                      year_level: '1',
+                    } : prev)}>
                       {userAssignableRoles.map((role) => (
                         <option key={role} value={role}>{getRoleOptionLabel(role)}</option>
                       ))}
@@ -8847,6 +12589,20 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
+              {userEditDraft.role === 'principal' ? (
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Higher Official Designation</label>
+                    <input
+                      className="form-control"
+                      autoComplete="off"
+                      value={userEditDraft.designation}
+                      onChange={(event) => setUserEditDraft((prev) => prev ? { ...prev, designation: event.target.value } : prev)}
+                      placeholder="Vice Chairman, Dean, Director..."
+                    />
+                  </div>
+                </div>
+              ) : null}
               {(userEditDraft.role === 'hod' || userEditDraft.role === 'deo') ? (
                 <div className="card mb-2" style={{ padding: 12, background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.28)' }}>
                   <div className="card-title" style={{ fontSize: '.86rem', marginBottom: 10 }}><i className="fas fa-layer-group"></i> Assigned Scopes</div>
@@ -8905,17 +12661,17 @@ export default function App() {
                   <div className="card mt-3 mb-2" style={{ padding: 14, background: 'rgba(34,197,94,.08)', border: '1px solid rgba(34,197,94,.30)' }}>
                     <div className="d-flex justify-between align-center mb-3" style={{ gap: 12 }}>
                       <label className="form-label" style={{ margin: 0 }}><i className="fas fa-users"></i> Student Management</label>
-                      <span className="badge badge-success">{typeof users.find((item) => item.email === userEditDraft.original_email)?.student_count === 'number' ? users.find((item) => item.email === userEditDraft.original_email)?.student_count : 0} students</span>
+                      <span className="badge badge-success">{typeof users.find((item) => (item.account_email || item.email) === userEditDraft.original_email)?.student_count === 'number' ? users.find((item) => (item.account_email || item.email) === userEditDraft.original_email)?.student_count : 0} students</span>
                     </div>
                     <div className="btn-group">
                       <button type="button" className="btn btn-outline btn-sm" onClick={() => {
-                        const targetUser = users.find((item) => item.email === userEditDraft.original_email);
+                        const targetUser = users.find((item) => (item.account_email || item.email) === userEditDraft.original_email);
                         if (targetUser) void loadCounselorStudents(targetUser);
                       }}>
                         <i className="fas fa-pen"></i> Edit/View All
                       </button>
                       <button type="button" className="btn btn-outline btn-sm" onClick={() => {
-                        const targetUser = users.find((item) => item.email === userEditDraft.original_email);
+                        const targetUser = users.find((item) => (item.account_email || item.email) === userEditDraft.original_email);
                         if (targetUser) void loadCounselorStudents(targetUser);
                       }}>
                         <i className="fas fa-upload"></i> Upload Excel
@@ -8969,6 +12725,80 @@ export default function App() {
                 <i className={`fas ${userActionLoading ? 'fa-spinner fa-spin' : userActionTarget.kind === 'delete' ? 'fa-trash' : userActionTarget.kind === 'lock' ? 'fa-lock' : 'fa-unlock'}`}></i>
                 {userActionLoading ? 'Working...' : userActionTarget.kind === 'delete' ? 'Delete' : userActionTarget.kind === 'lock' ? 'Lock' : 'Unlock'}
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {linkedUserGroupEmail && linkedUserGroupRecords.length ? (
+        <div className="modal-overlay open" onClick={() => setLinkedUserGroupEmail('')}>
+          <div className="modal" style={{ maxWidth: 760 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-layer-group"></i> Manage Roles</h3>
+              <button className="modal-close" type="button" onClick={() => setLinkedUserGroupEmail('')}>
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+              {linkedUserGroupEmail}
+            </p>
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Department</th>
+                    <th>Year</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {linkedUserGroupRecords.map((user) => (
+                    <tr key={user.account_email || `${user.email}:${user.role}`}>
+                      <td><span className={`badge ${getRoleBadgeClass(user.role)}`}>{getRoleOptionLabel(user.role, user.designation)}</span></td>
+                      <td>{user.role === 'hod' || user.role === 'deo' ? ((user.scopes || []).map((scope) => scope.department).slice(0, 2).join(', ') || user.department || '-') : (user.department || '-')}</td>
+                      <td>{user.role === 'counselor' ? formatYearLevel(user.year_level || 1) : '-'}</td>
+                      <td><span className={`badge ${user.is_active && !user.is_locked ? 'badge-success' : 'badge-danger'}`}>{user.is_active && !user.is_locked ? 'Active' : 'Inactive'}</span></td>
+                      <td>
+                        <div className="btn-group">
+                          {user.can_edit ? (
+                            <button type="button" className="btn btn-outline btn-sm" onClick={() => { setLinkedUserGroupEmail(''); openEditUserModal(user); }}>
+                              <i className="fas fa-edit"></i> Edit
+                            </button>
+                          ) : null}
+                          {user.can_manage ? (
+                            <>
+                              <button
+                                type="button"
+                                className={`btn btn-sm ${user.is_locked ? 'btn-success' : 'btn-warning'}`}
+                                onClick={() => {
+                                  setLinkedUserGroupEmail('');
+                                  setUserActionTarget({ kind: user.is_locked ? 'unlock' : 'lock', user });
+                                }}
+                              >
+                                <i className={`fas fa-${user.is_locked ? 'unlock' : 'lock'}`}></i>
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                onClick={() => {
+                                  setLinkedUserGroupEmail('');
+                                  setUserActionTarget({ kind: 'delete', user });
+                                }}
+                              >
+                                <i className="fas fa-trash"></i>
+                              </button>
+                            </>
+                          ) : (
+                            <span className="badge badge-info">View Only</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -9046,6 +12876,102 @@ export default function App() {
                   )}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {roleSwitchModalOpen && currentUser ? (
+        <div className="modal-overlay open" onClick={() => !roleSwitchLoading && setRoleSwitchModalOpen(false)}>
+          <div className="modal" style={{ maxWidth: 560 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-repeat"></i> Change Role</h3>
+              <button className="modal-close" type="button" onClick={() => !roleSwitchLoading && setRoleSwitchModalOpen(false)}>
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+            <form onSubmit={(event) => void handleSwitchRole(event)}>
+              <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+                This login is linked to multiple SHINE roles for <strong>{roleSwitchLoginDisplayEmail || normalizeSharedRoleDisplayEmail(currentUser.email)}</strong>. Choose the workspace you want to open next.
+              </p>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {orderedRoleSwitchOptions.map((option) => {
+                  const isCurrentOption = isCurrentRoleSwitchOption(option, currentUser);
+                  return (
+                  <label
+                    key={option.accountEmail}
+                    className="scope-chip"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '12px 14px',
+                      borderRadius: 12,
+                      border: option.accountEmail === roleSwitchSelectedAccountEmail ? '1px solid var(--primary)' : '1px solid var(--border)',
+                      background: option.accountEmail === roleSwitchSelectedAccountEmail ? 'rgba(102,126,234,.12)' : 'var(--bg-input)',
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="session-role-selection"
+                      checked={option.accountEmail === roleSwitchSelectedAccountEmail}
+                      onChange={() => setRoleSwitchSelectedAccountEmail(option.accountEmail)}
+                    />
+                    <span style={{ display: 'grid', gap: 3 }}>
+                      <strong>
+                        {getRoleOptionLabel(option.role, option.designation)}
+                        {isCurrentOption ? ' (Current)' : ''}
+                      </strong>
+                      <span className="inline-muted">
+                        {option.name}
+                        {option.department ? ` - ${option.department}` : ''}
+                        {option.role === 'counselor' ? ` - ${formatYearLevel(option.year_level || 1)}` : ''}
+                      </span>
+                    </span>
+                  </label>
+                )})}
+              </div>
+              {roleSwitchError ? (
+                <div className="flash flash-error" style={{ marginTop: 14 }}>
+                  <i className="fas fa-times-circle"></i>
+                  <span>{roleSwitchError}</span>
+                </div>
+              ) : null}
+              <div className="btn-group" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
+                <button type="button" className="btn btn-outline btn-sm" onClick={() => setRoleSwitchModalOpen(false)} disabled={roleSwitchLoading}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary btn-sm" disabled={roleSwitchLoading}>
+                  <i className={`fas ${roleSwitchLoading ? 'fa-spinner fa-spin' : 'fa-right-left'}`}></i> {roleSwitchLoading ? 'Switching...' : 'Switch Role'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {missingWhatsappPrompt ? (
+        <div className="modal-overlay open" onClick={() => setMissingWhatsappPrompt(null)}>
+          <div className="modal" style={{ maxWidth: 480 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fab fa-whatsapp"></i> WhatsApp App Missing</h3>
+              <button className="modal-close" type="button" onClick={() => setMissingWhatsappPrompt(null)}>
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+              WhatsApp Desktop is not installed on this device. Install it from Microsoft Store, or continue with WhatsApp Web mode for <strong>{missingWhatsappPrompt.title}</strong>.
+            </p>
+            <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => setMissingWhatsappPrompt(null)}>
+                Back
+              </button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => installWhatsappFromPrompt()}>
+                <i className="fas fa-download"></i> Install From Store
+              </button>
+              <button type="button" className="btn btn-success btn-sm" onClick={() => useWhatsappWebFromPrompt()}>
+                <i className="fas fa-globe"></i> Use Web Mode
+              </button>
             </div>
           </div>
         </div>
@@ -9151,11 +13077,104 @@ export default function App() {
         </div>
       ) : null}
 
+      {pendingConfigTab ? (
+        <div className="modal-overlay open" onClick={() => setPendingConfigTab(null)}>
+          <div className="modal" style={{ maxWidth: 480 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-floppy-disk"></i> Unsaved Settings</h3>
+              <button className="modal-close" type="button" onClick={() => setPendingConfigTab(null)}>
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 14 }}>
+              You have unsaved settings changes. Save them before leaving Settings, or discard them and continue.
+            </p>
+            <div className="btn-group" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => setPendingConfigTab(null)} disabled={configSaving}>
+                Stay
+              </button>
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => discardConfigChanges(pendingConfigTab)} disabled={configSaving}>
+                Discard
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={() => {
+                  if (otpPolicyChanged) {
+                    const nextTab = pendingConfigTab;
+                    setPendingConfigTab(null);
+                    setConfigPromptPassword('');
+                    setConfigPasswordPrompt({ nextTab });
+                    return;
+                  }
+                  void (async () => {
+                    const result = await persistConfig('');
+                    if (!result) return;
+                    const nextTab = pendingConfigTab;
+                    setPendingConfigTab(null);
+                    if (!result.relogin && nextTab) {
+                      setActiveTab(nextTab);
+                      setMobileSidebarOpen(false);
+                    }
+                  })();
+                }}
+                disabled={configSaving}
+              >
+                <i className={`fas ${configSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i> {configSaving ? 'Saving...' : 'Save And Leave'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {configPasswordPrompt ? (
+        <div className="modal-overlay open" onClick={() => { if (!configSaving) setConfigPasswordPrompt(null); }}>
+          <div className="modal" style={{ maxWidth: 460 }} onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fas fa-key"></i> Confirm OTP Policy Change</h3>
+              <button className="modal-close" type="button" onClick={() => setConfigPasswordPrompt(null)} disabled={configSaving}>
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+            <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 12 }}>
+              Saving this change updates the OTP login policy and immediately logs out all active users.
+            </p>
+            <div className="form-group">
+              <label className="form-label">Admin Password</label>
+              <input
+                className="form-control"
+                type="password"
+                value={configPromptPassword}
+                onChange={(event) => setConfigPromptPassword(event.target.value)}
+                placeholder="Enter your admin password"
+                autoFocus
+              />
+            </div>
+            <div className="btn-group" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => setConfigPasswordPrompt(null)} disabled={configSaving}>Cancel</button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => void handleConfirmConfigPassword()} disabled={configSaving}>
+                <i className={`fas ${configSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i> {configSaving ? 'Saving...' : 'Confirm And Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {databaseBackupAction ? (
         <div className="modal-overlay open" onClick={() => { if (!databaseActionLoading) setDatabaseBackupAction(null); }}>
           <div className="modal" style={{ maxWidth: 460 }} onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h3><i className="fas fa-triangle-exclamation"></i> {databaseBackupAction.kind === 'restore' ? 'Restore Backup' : 'Delete Backup'}</h3>
+              <h3><i className="fas fa-triangle-exclamation"></i> {databaseBackupAction.kind === 'restore'
+                ? 'Restore Backup'
+                : databaseBackupAction.kind === 'archive'
+                  ? 'Archive Academic Year'
+                  : databaseBackupAction.kind === 'clear'
+                    ? 'Clear Active Database'
+                  : databaseBackupAction.kind === 'restore-archive'
+                    ? 'Restore Archive'
+                    : databaseBackupAction.kind === 'delete-archive'
+                      ? 'Delete Archive'
+                      : 'Delete Backup'}</h3>
               <button className="modal-close" type="button" onClick={() => setDatabaseBackupAction(null)} disabled={databaseActionLoading}>
                 <i className="fas fa-xmark"></i>
               </button>
@@ -9163,7 +13182,15 @@ export default function App() {
             <p style={{ fontSize: '.9rem', color: 'var(--text-dim)', marginBottom: 12 }}>
               {databaseBackupAction.kind === 'restore'
                 ? `Restore backup ${databaseBackupAction.backupName}? This logs out all users and replaces the current database.`
-                : `Delete backup ${databaseBackupAction.backupName}? This cannot be undone.`}
+                : databaseBackupAction.kind === 'archive'
+                  ? `Archive the active academic year as ${databaseBackupAction.backupName} and reset the live workspace?`
+                  : databaseBackupAction.kind === 'clear'
+                    ? 'Clear the active database workspace now? This removes current operational exam and notice data from the live workspace.'
+                  : databaseBackupAction.kind === 'restore-archive'
+                    ? `Restore archive ${databaseBackupAction.backupName}? This logs out all users and replaces the current database with the selected academic year.`
+                    : databaseBackupAction.kind === 'delete-archive'
+                      ? `Delete archive ${databaseBackupAction.backupName}? This cannot be undone.`
+                      : `Delete backup ${databaseBackupAction.backupName}? This cannot be undone.`}
             </p>
             <form onSubmit={(event) => void handleConfirmDatabaseBackupAction(event)}>
               <div className="form-group">
@@ -9172,9 +13199,29 @@ export default function App() {
               </div>
               <div className="btn-group" style={{ justifyContent: 'flex-end', gap: 8 }}>
                 <button type="button" className="btn btn-outline btn-sm" onClick={() => setDatabaseBackupAction(null)} disabled={databaseActionLoading}>Cancel</button>
-                <button type="submit" className={`btn btn-sm ${databaseBackupAction.kind === 'restore' ? 'btn-outline' : 'btn-danger'}`} disabled={databaseActionLoading}>
-                  <i className={`fas ${databaseActionLoading ? 'fa-spinner fa-spin' : databaseBackupAction.kind === 'restore' ? 'fa-rotate-left' : 'fa-trash'}`}></i>
-                  {databaseActionLoading ? 'Working...' : databaseBackupAction.kind === 'restore' ? 'Restore' : 'Delete'}
+                <button
+                  type="submit"
+                  className={`btn btn-sm ${(databaseBackupAction.kind === 'restore' || databaseBackupAction.kind === 'restore-archive') ? 'btn-outline' : 'btn-danger'}`}
+                  disabled={databaseActionLoading}
+                >
+                  <i className={`fas ${databaseActionLoading
+                    ? 'fa-spinner fa-spin'
+                    : (databaseBackupAction.kind === 'restore' || databaseBackupAction.kind === 'restore-archive')
+                      ? 'fa-rotate-left'
+                      : databaseBackupAction.kind === 'archive'
+                        ? 'fa-box-archive'
+                        : databaseBackupAction.kind === 'clear'
+                          ? 'fa-trash-can'
+                        : 'fa-trash'}`}></i>
+                  {databaseActionLoading
+                    ? 'Working...'
+                    : (databaseBackupAction.kind === 'restore' || databaseBackupAction.kind === 'restore-archive')
+                      ? 'Restore'
+                      : databaseBackupAction.kind === 'archive'
+                        ? 'Archive'
+                        : databaseBackupAction.kind === 'clear'
+                          ? 'Clear Database'
+                        : 'Delete'}
                 </button>
               </div>
             </form>

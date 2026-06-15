@@ -12,12 +12,11 @@ def main():
     original_filename = sys.argv[2]
 
     script_path = Path(__file__).resolve()
-    workspace_root = script_path.parents[3]
-    backend_root = workspace_root / "backend"
+    parser_root = script_path.parent / "shine_parser"
 
-    sys.path.insert(0, str(backend_root))
+    sys.path.insert(0, str(parser_root))
 
-    from core.intelligent_parser import IntelligentParser
+    from intelligent_parser import IntelligentParser
 
     parser = IntelligentParser()
     with file_path.open("rb") as handle:

@@ -96,8 +96,15 @@ export function fillTemplate(template: string, variables: Record<string, string>
 }
 
 export function getWhatsappLink(phoneNumber: string, message: string) {
-  const phone = String(phoneNumber || '').replace(/\D/g, '').slice(-10);
+  const raw = String(phoneNumber || '').trim();
+  let phone = raw.replace(/\D/g, '');
+  if (raw.startsWith('00')) {
+    phone = phone.slice(2);
+  } else if (!raw.startsWith('+') && phone.length === 10) {
+    const cc = String(COUNTRY_CODE || '91').replace(/\D/g, '') || '91';
+    phone = `${cc}${phone}`;
+  }
   const cc = String(COUNTRY_CODE || '91').replace(/\D/g, '') || '91';
-  const fullPhone = `${cc}${phone}`;
+  const fullPhone = phone.length === 10 ? `${cc}${phone}` : phone;
   return `whatsapp://send?phone=${fullPhone}&text=${encodeURIComponent(message)}`;
 }

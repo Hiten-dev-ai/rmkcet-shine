@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller
+  Uri="{{APPINSTALLER_URI}}"
+  Version="{{PACKAGE_VERSION}}"
+  xmlns="http://schemas.microsoft.com/appx/appinstaller/2017/2">
+  <MainPackage
+    Name="{{PACKAGE_NAME}}"
+    Version="{{PACKAGE_VERSION}}"
+    Publisher="{{PUBLISHER}}"
+    Uri="{{MSIX_URI}}"
+    ProcessorArchitecture="{{ARCHITECTURE}}" />
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="12" />
+    <ForceUpdateFromAnyVersion>true</ForceUpdateFromAnyVersion>
+  </UpdateSettings>
+</AppInstaller>

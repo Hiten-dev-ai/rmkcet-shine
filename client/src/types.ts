@@ -3,6 +3,9 @@ export type Role = 'admin' | 'principal' | 'hod' | 'deo' | 'counselor';
 export interface AppConfig {
   session_timeout: string;
   session_heartbeat_interval?: string;
+  desktop_notification_poll_seconds?: string;
+  desktop_notification_poll_minutes?: string;
+  notification_pending_threshold_days?: string;
   allow_concurrent_sessions: string;
   max_concurrent_sessions: string;
   enable_periodic_backups?: string;
@@ -15,10 +18,14 @@ export interface AppConfig {
   tutorial_principal_enabled?: string;
   disable_default_admin_on_new_system_admin?: string;
   require_otp_on_login: string;
+  otp_login_lock_hours?: string;
   require_otp_on_password_reset: string;
   counselor_login_otp_enabled?: string;
   notice_copy_as_image?: string;
   activity_copy_as_image?: string;
+  notice_defaulter_copy_template?: string;
+  activity_defaulter_copy_template?: string;
+  cdp_defaulter_copy_template?: string;
   backup_storage_mode?: string;
   google_oauth_enabled: string;
   google_oauth_client_id: string;
@@ -31,6 +38,8 @@ export interface AppConfig {
   google_drive_folder_id?: string;
   enable_counselor_batch_send: string;
   counselor_batch_send_delay_seconds: string;
+  desktop_send_workspace_enabled?: string;
+  desktop_send_target_preference?: string;
   current_batch_year?: string;
   smtp_server?: string;
   smtp_port?: string;
@@ -60,9 +69,11 @@ export interface ScopeRow {
 }
 
 export interface UserRecord {
+  account_email?: string;
   email: string;
   name: string;
   role: Role;
+  designation?: string;
   department: string | null;
   year_level: number;
   is_active: number;
@@ -119,7 +130,169 @@ export interface ReportsOverviewPayload {
   selectedDepartment: string;
   availableYears: number[];
   selectedYear: number | null;
+  showDepartmentPicker: boolean;
+  showYearPicker: boolean;
   tests: ReportTestRecord[];
+  cacheMeta?: ReadModelCacheMeta;
+}
+
+export interface SubjectRecord {
+  id: number;
+  subject_code: string;
+  subject_name: string;
+  faculty_name: string;
+  google_sheet_link: string;
+  department: string;
+  year_level: number;
+  semester: string;
+  academic_start_year: number | null;
+  academic_end_year: number | null;
+  class_sections: string[];
+  faculty_allocations: Array<{
+    faculty_name: string;
+    class_sections: string[];
+  }>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SubjectsOverviewPayload {
+  departments: DepartmentRecord[];
+  selectedDepartment: string;
+  availableYears: number[];
+  selectedYear: number | null;
+  availableSemesters: string[];
+  selectedSemester: string;
+  showDepartmentPicker: boolean;
+  showYearPicker: boolean;
+  showSemesterPicker: boolean;
+  canManage: boolean;
+  records: SubjectRecord[];
+}
+
+export interface CdpSubjectClassStatus {
+  label: string;
+  total_date_cols: number;
+  filled_cols: number;
+  completion_pct: number;
+  today_col_exists: boolean;
+  today_col_filled: boolean;
+  pending_dates: string[];
+  missing_entry_count: number;
+}
+
+export interface CdpFacultyStatusPayload {
+  faculty_name: string;
+  class_sections: string[];
+  status: 'ready' | 'pending' | 'error';
+  filled_cols: number;
+  total_date_cols: number;
+  completion_pct: number;
+  pending_class_count: number;
+  pending_dates: string[];
+  pending_classes: string[];
+  missing_entry_count: number;
+  class_breakdown: Array<{
+    class_label: string;
+    filled_cols: number;
+    total_date_cols: number;
+    completion_pct: number;
+    pending_dates: string[];
+    missing_entry_count: number;
+  }>;
+  notes: string[];
+}
+
+export interface CdpMarkEntryCellPayload {
+  status: 'complete' | 'pending' | 'not_available' | 'error';
+  filled_students: number;
+  total_students: number;
+  completion_pct: number;
+  pending_students: number;
+  message: string;
+}
+
+export interface CdpMarkEntrySummaryPayload extends CdpMarkEntryCellPayload {
+  key: 'iat1' | 'iat2' | 'model' | 'unit_test';
+  label: string;
+}
+
+export interface CdpMarkEntryRowPayload {
+  faculty_name: string;
+  class_label: string;
+  tests: Record<'iat1' | 'iat2' | 'model' | 'unit_test', CdpMarkEntryCellPayload>;
+}
+
+export interface CdpMarkEntryPayload {
+  summaries: CdpMarkEntrySummaryPayload[];
+  rows: CdpMarkEntryRowPayload[];
+}
+
+export interface CdpSubjectStatusPayload {
+  subject_id: number;
+  subject_code: string;
+  subject_name: string;
+  faculty_name: string;
+  department: string;
+  year_level: number;
+  semester: string;
+  classes: CdpSubjectClassStatus[];
+  faculty_statuses: CdpFacultyStatusPayload[];
+  overall_filled_cols: number;
+  overall_total_cols: number;
+  overall_completion_pct: number;
+  today_pending: boolean;
+  summary_status: 'ready' | 'pending' | 'error' | 'unparsed';
+  faculty_count: number;
+  allocated_class_count: number;
+  pending_faculty_count: number;
+  pending_class_count: number;
+  pending_date_count: number;
+  parsed_at: string | null;
+  parser_error: string;
+  mark_entry: CdpMarkEntryPayload;
+}
+
+export interface CdpSubjectOverviewRecord extends SubjectRecord {
+  summary_status: 'ready' | 'pending' | 'error' | 'unparsed';
+  faculty_count: number;
+  allocated_class_count: number;
+  pending_faculty_count: number;
+  pending_class_count: number;
+  pending_date_count: number;
+  parsed_at: string | null;
+  parser_error: string;
+  faculty_statuses?: CdpFacultyStatusPayload[];
+}
+
+export interface CdpOverviewPayload {
+  summary: {
+    total_subjects: number;
+    configured_sheets: number;
+    departments_covered: number;
+    years_covered: number;
+    scopes_covered: number;
+  };
+  departments: DepartmentRecord[];
+  selectedDepartment: string;
+  availableYears: number[];
+  selectedYear: number | null;
+  availableSemesters: string[];
+  selectedSemester: string;
+  showDepartmentPicker: boolean;
+  showYearPicker: boolean;
+  showSemesterPicker: boolean;
+  subjects: CdpSubjectOverviewRecord[];
+  selectedSubjectId: number | null;
+  selectedSubject: SubjectRecord | null;
+  selectedSubjectDetail: CdpSubjectStatusPayload | null;
+  scopeSnapshot: {
+    department: string;
+    year_level: number;
+    counselor_count: number;
+    student_count: number;
+  } | null;
+  cacheMeta?: ReadModelCacheMeta;
 }
 
 export interface ReportUploadPayload {
@@ -242,7 +415,9 @@ export interface ActivityOverviewPayload {
   showYearPicker: boolean;
   showSemesterPicker: boolean;
   testStatus: Record<string, Record<string, boolean>>;
+  prefetchedResults?: CounselorActivityResult[];
   result: CounselorActivityResult | null;
+  cacheMeta?: ReadModelCacheMeta;
 }
 
 export interface ActivityScopeReportSection {
@@ -308,6 +483,12 @@ export interface DashboardOverviewPayload {
       detail: string;
       allowed_domain: string;
       redirect_base_url: string;
+      today_unregistered_attempts: number;
+      total_unregistered_attempts: number;
+      latest_unregistered_attempt_email: string;
+      latest_unregistered_attempt_name: string;
+      latest_unregistered_attempt_time: string;
+      latest_unregistered_attempt_reason: string;
     };
     backup: {
       storage_mode: 'local' | 'gdrive';
@@ -329,6 +510,7 @@ export interface DashboardOverviewPayload {
       forced_logouts: number;
     };
   };
+  cacheMeta?: ReadModelCacheMeta;
 }
 
 export interface NoticeScopePair {
@@ -344,6 +526,7 @@ export interface NoticeAttachmentRecord {
   mime_type: string;
   file_size: number;
   public_token: string;
+  public_url?: string;
 }
 
 export interface NoticeRecord {
@@ -477,6 +660,7 @@ export interface ReportStudentRow {
   reg_no: string;
   student_name: string;
   department: string;
+  section?: string;
   marks: Record<string, string>;
 }
 
@@ -503,6 +687,7 @@ export interface TestDetailPayload {
 export interface SessionMonitoringRecord {
   session_id: string;
   user_email: string;
+  login_email?: string;
   name: string;
   role: string;
   department: string;
@@ -521,6 +706,7 @@ export interface SessionMonitoringRecord {
 export interface SessionHistoryRecord {
   session_id: string;
   user_email: string;
+  login_email?: string;
   name: string;
   role: string;
   department: string;
@@ -559,6 +745,7 @@ export interface DatabaseBackupRecord {
   name: string;
   size_kb: number;
   modified: string;
+  academic_year_label?: string;
 }
 
 export interface DatabaseOverviewPayload {
@@ -567,6 +754,11 @@ export interface DatabaseOverviewPayload {
   archiveFiles: DatabaseBackupRecord[];
   currentBatchYear: string;
   backupStorageMode: 'local' | 'gdrive';
+  archiveView?: {
+    active: boolean;
+    archiveName: string;
+    academicYear: string;
+  } | null;
 }
 
 export interface SmtpStatusPayload {
@@ -602,11 +794,22 @@ export interface SessionConflict {
 
 export interface AuthUser {
   email: string;
+  login_email?: string;
   name: string;
   role: Role;
+  designation?: string;
   department: string | null;
   year_level: number;
   scopes: ScopeRow[];
+}
+
+export interface RoleSelectionOption {
+  accountEmail: string;
+  role: Role;
+  name: string;
+  designation?: string;
+  department: string;
+  year_level: number;
 }
 
 export interface BootstrapMetrics {
@@ -616,6 +819,11 @@ export interface BootstrapMetrics {
   messagesSent: number;
   departmentsCount: number;
   studentCount: number;
+}
+
+export interface ReadModelCacheMeta {
+  version: number;
+  generatedAt: string;
 }
 
 export interface AuthUiConfig {
@@ -634,6 +842,12 @@ export interface BootstrapPayload {
   authUi: AuthUiConfig;
   nowLabel: string;
   user: AuthUser | null;
+  roleSwitchOptions?: RoleSelectionOption[];
+  sessionEndNotice?: {
+    title: string;
+    message: string;
+    reason: string;
+  } | null;
   testMode?: {
     active: boolean;
     sessionUser: AuthUser | null;
@@ -642,6 +856,18 @@ export interface BootstrapPayload {
   navTabs: string[];
   defaultTab: string;
   metrics: BootstrapMetrics;
+  readModelVersion?: number;
+  archiveView?: {
+    active: boolean;
+    archiveName: string;
+    academicYear: string;
+  } | null;
+  prefetched?: {
+    dashboard?: DashboardOverviewPayload | null;
+    reports?: ReportsOverviewPayload | null;
+    activity?: ActivityOverviewPayload | null;
+    cdp?: CdpOverviewPayload | null;
+  };
   counselorOverview?: CounselorOverviewPayload | null;
   counselorTests?: CounselorVisibleTestRecord[];
 }
