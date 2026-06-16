@@ -2,29 +2,43 @@ import { build, Platform } from 'electron-builder';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import {
-  buildClientDesktopShellIfMissing,
+  buildClientDesktopShell,
   cleanDir,
   clientDesktopDistRoot,
   desktopRoot,
   ensureExists,
   exeOutputRoot,
   generatedRuntimeConfigPath,
+  getDesktopReleaseVersion,
   getDesktopExeFileName,
-  getRootAppVersion,
   readDesktopPackageJson,
   writeRuntimeReleaseConfig,
 } from './release-utils.mjs';
 
 const DEFAULT_APP_ID = 'dev.rmkcet.shine';
 
+function buildUpdaterFeedUrl() {
+  const explicit = String(process.env.SHINE_DESKTOP_UPDATER_FEED_URL || process.env.SHINE_DESKTOP_RELEASE_CHANNEL_URL || '').trim();
+  if (/^https?:\/\//i.test(explicit)) return explicit.replace(/\/+$/, '');
+  const publicBaseUrl = String(process.env.SHINE_DESKTOP_PUBLIC_BASE_URL || '').trim();
+  if (/^https?:\/\//i.test(publicBaseUrl)) {
+    return `${publicBaseUrl.replace(/\/+$/, '')}/api/desktop/updater`;
+  }
+  return 'http://127.0.0.1:5001/api/desktop/updater';
+}
+
 export async function runMakeExe() {
   const desktopPackage = await readDesktopPackageJson();
-  const appVersion = getRootAppVersion();
+  const appVersion = getDesktopReleaseVersion();
   const productName = String(desktopPackage.productName || 'RMKCET Shine').trim();
   const description = String(process.env.SHINE_DESKTOP_PACKAGE_DESCRIPTION || 'RMKCET Shine Windows desktop client.').trim();
-  const exeFileName = getDesktopExeFileName(appVersion);
+  const exeFileName = getDesktopExeFileName();
+  const certPath = String(process.env.SHINE_DESKTOP_CERT_PATH || '').trim();
+  const certPassword = String(process.env.SHINE_DESKTOP_CERT_PASSWORD || '').trim();
+  const publisherName = String(process.env.SHINE_DESKTOP_PUBLISHER_DISPLAY_NAME || productName).trim();
+  const hasWindowsSigningCert = certPath.length > 0;
 
-  await buildClientDesktopShellIfMissing();
+  await buildClientDesktopShell();
   await writeRuntimeReleaseConfig();
   await cleanDir(exeOutputRoot);
   await ensureExists(clientDesktopDistRoot, 'Desktop renderer build');
@@ -40,6 +54,14 @@ export async function runMakeExe() {
       },
       win: {
         icon: resolve(desktopRoot, 'assets', 'icon.ico'),
+        executableName: productName,
+        publisherName,
+        signAndEditExecutable: hasWindowsSigningCert,
+        signingHashAlgorithms: ['sha256'],
+        ...(hasWindowsSigningCert ? {
+          certificateFile: certPath,
+          certificatePassword: certPassword || undefined,
+        } : {}),
       },
       files: [
         '**/*',
@@ -63,6 +85,10 @@ export async function runMakeExe() {
       compression: 'normal',
       extraResources: [
         {
+          from: resolve(desktopRoot, 'assets'),
+          to: 'assets',
+        },
+        {
           from: generatedRuntimeConfigPath,
           to: 'release-config.json',
         },
@@ -72,16 +98,23 @@ export async function runMakeExe() {
         },
       ],
       nsis: {
+        include: resolve(desktopRoot, 'installer.nsh'),
         oneClick: false,
-        perMachine: false,
+        perMachine: true,
         allowElevation: true,
-        allowToChangeInstallationDirectory: true,
+        allowToChangeInstallationDirectory: false,
         deleteAppDataOnUninstall: false,
         createDesktopShortcut: 'always',
         createStartMenuShortcut: true,
         shortcutName: productName,
         uninstallDisplayName: productName,
       },
+      publish: [
+        {
+          provider: 'generic',
+          url: buildUpdaterFeedUrl(),
+        },
+      ],
     },
     projectDir: desktopRoot,
   });

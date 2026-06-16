@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { access, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -133,15 +133,31 @@ async function repairElectronInstallIfNeeded() {
 async function main() {
   await ensureElectronCli();
   await repairElectronInstallIfNeeded();
-
-  const child = spawn(process.execPath, [electronCli, '.'], {
-    cwd: desktopRoot,
-    stdio: 'inherit',
-    env: {
-      ...process.env,
-      SHINE_DESKTOP_MODE: modeArg,
-    },
-  });
+  const electronArgs = ['.'];
+  if (process.platform === 'linux') {
+    electronArgs.unshift('--disable-gpu');
+    electronArgs.unshift('--no-sandbox');
+  }
+  const childEnv = {
+    ...process.env,
+    SHINE_DESKTOP_MODE: modeArg,
+  };
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  const hasDisplay = Boolean(String(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || '').trim());
+  const xvfbRun = '/usr/bin/xvfb-run';
+  const child = (
+    process.platform === 'linux' && !hasDisplay && existsSync(xvfbRun)
+      ? spawn(xvfbRun, ['-a', electronBinaryDirect, ...electronArgs], {
+        cwd: desktopRoot,
+        stdio: 'inherit',
+        env: childEnv,
+      })
+      : spawn(electronBinaryDirect, electronArgs, {
+        cwd: desktopRoot,
+        stdio: 'inherit',
+        env: childEnv,
+      })
+  );
 
   child.on('exit', (code, signal) => {
     if (signal) {

@@ -12,6 +12,18 @@ echo.
 
 cd /d "%~dp0"
 
+set "LOOPBACK_IPV4=127.0.0.1"
+set "CLIENT_URL=http://%LOOPBACK_IPV4%:5000"
+set "SERVER_URL=http://%LOOPBACK_IPV4%:5001"
+set "DESKTOP_SHELL_URL=http://%LOOPBACK_IPV4%:5123"
+set "HOST=%LOOPBACK_IPV4%"
+set "CLIENT_ORIGIN=%CLIENT_URL%"
+set "DESKTOP_SHELL_ORIGIN=%DESKTOP_SHELL_URL%"
+set "SERVER_ORIGIN=%SERVER_URL%"
+set "SHINE_DESKTOP_DEV_URL=%CLIENT_URL%"
+set "SHINE_DESKTOP_API_ORIGIN=%SERVER_URL%"
+set "SHINE_DESKTOP_SHELL_HOST=%LOOPBACK_IPV4%"
+
 where node >nul 2>&1
 if errorlevel 1 (
     echo  [ERROR] Node.js is not installed or not in PATH.
@@ -67,6 +79,11 @@ if not exist "desktop\node_modules" (
     )
 )
 
+if exist "desktop\.release-local.cmd" (
+    call "desktop\.release-local.cmd"
+    echo  [INFO] Loaded local desktop signing env from desktop\.release-local.cmd
+)
+
 echo.
 echo  Choose launch mode:
 echo    [1] Web app only
@@ -110,13 +127,14 @@ if "%LAUNCH_MODE%"=="6" (
     set "OPEN_BROWSER=2"
     set "MODE_LABEL=Production web + desktop app + EXE release"
     set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://shine.athergrid.dev"
+    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://rmkcetshine.me"
     set /p "PACKAGE_API_ORIGIN=Enter hosted Shine server domain [!PACKAGE_DEFAULT_ORIGIN!]: "
     if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
     if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
     set "SHINE_DESKTOP_RELEASE_API_ORIGIN=!PACKAGE_API_ORIGIN!"
     set "SHINE_DESKTOP_PUBLIC_BASE_URL=!PACKAGE_API_ORIGIN!"
     set "SHINE_DESKTOP_RELEASE_CHANNEL_URL=!PACKAGE_API_ORIGIN!/api/desktop/installer"
+    set "SHINE_DESKTOP_UPDATER_FEED_URL=!PACKAGE_API_ORIGIN!/api/desktop/updater"
     set /p "PACKAGE_LOCATOR_CSV=Enter public Google Sheet locator CSV URL (optional) [!SHINE_DESKTOP_LOCATOR_CSV_URL!]: "
     if not "!PACKAGE_LOCATOR_CSV!"=="" set "SHINE_DESKTOP_LOCATOR_CSV_URL=!PACKAGE_LOCATOR_CSV!"
     set "SHINE_DESKTOP_SKIP_UNCHANGED=1"
@@ -140,7 +158,7 @@ if "%PACKAGE_BUILD%"=="1" (
 
     if "!PACKAGE_MODE!"=="1" (
         set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://localhost:5001"
+        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://127.0.0.1:5001"
         set /p "PACKAGE_API_ORIGIN=Enter local Shine server URL for the packaged app [!PACKAGE_DEFAULT_ORIGIN!]: "
         if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
         if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
@@ -169,7 +187,7 @@ if "%PACKAGE_BUILD%"=="1" (
 
     if "!PACKAGE_MODE!"=="3" (
         set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://localhost:5001"
+        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://127.0.0.1:5001"
         set /p "PACKAGE_API_ORIGIN=Enter local Shine server URL for the packaged app [!PACKAGE_DEFAULT_ORIGIN!]: "
         if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
         if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
@@ -197,12 +215,13 @@ if "%PACKAGE_BUILD%"=="1" (
     )
 
     set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://shine.athergrid.dev"
+    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://rmkcetshine.me"
     set /p "PACKAGE_API_ORIGIN=Enter hosted Shine URL for the packaged app [!PACKAGE_DEFAULT_ORIGIN!]: "
     if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
     if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
     set "SHINE_DESKTOP_RELEASE_API_ORIGIN=!PACKAGE_API_ORIGIN!"
     set "SHINE_DESKTOP_PUBLIC_BASE_URL=!PACKAGE_API_ORIGIN!"
+    set "SHINE_DESKTOP_UPDATER_FEED_URL=!PACKAGE_API_ORIGIN!/api/desktop/updater"
     set /p "PACKAGE_LOCATOR_CSV=Enter public locator CSV URL (optional) [!SHINE_DESKTOP_LOCATOR_CSV_URL!]: "
     if not "!PACKAGE_LOCATOR_CSV!"=="" set "SHINE_DESKTOP_LOCATOR_CSV_URL=!PACKAGE_LOCATOR_CSV!"
     set /p "PACKAGE_RELEASE_CHANNEL=Enter release channel URL (optional) [!SHINE_DESKTOP_RELEASE_CHANNEL_URL!]: "
@@ -281,12 +300,12 @@ for %%P in (%PORTS_TO_KILL%) do (
 echo.
 echo  ============================================
 echo   Starting %MODE_LABEL%...
-echo   Server : http://[::1]:5001
-if "%LAUNCH_MODE%"=="1" echo   Client : http://[::1]:5000
-if "%LAUNCH_MODE%"=="2" echo   Client : http://[::1]:5000
-if "%LAUNCH_MODE%"=="3" echo   Desktop shell : http://[::1]:5123
-if "%LAUNCH_MODE%"=="6" echo   Web app : http://[::1]:5000
-if "%LAUNCH_MODE%"=="6" echo   Desktop shell : http://[::1]:5123
+echo   Server : %SERVER_URL%
+if "%LAUNCH_MODE%"=="1" echo   Client : %CLIENT_URL%
+if "%LAUNCH_MODE%"=="2" echo   Client : %CLIENT_URL%
+if "%LAUNCH_MODE%"=="3" echo   Desktop shell : %DESKTOP_SHELL_URL%
+if "%LAUNCH_MODE%"=="6" echo   Web app : %CLIENT_URL%
+if "%LAUNCH_MODE%"=="6" echo   Desktop shell : %DESKTOP_SHELL_URL%
 if "%LAUNCH_MODE%"=="6" echo   Hosted URL : !SHINE_DESKTOP_RELEASE_API_ORIGIN!
 if "%LAUNCH_MODE%"=="6" echo   Installer : !SHINE_DESKTOP_RELEASE_API_ORIGIN!/api/desktop/installer
 if "%LAUNCH_MODE%"=="6" echo   EXE build : data\desktop-installer\latest
@@ -295,8 +314,8 @@ echo  ============================================
 echo.
 
 timeout /t 3 /nobreak >nul
-if "%OPEN_BROWSER%"=="1" start "" http://[::1]:5000
-if "%OPEN_BROWSER%"=="2" start "" http://[::1]:5000
+if "%OPEN_BROWSER%"=="1" start "" %CLIENT_URL%
+if "%OPEN_BROWSER%"=="2" start "" %CLIENT_URL%
 
 echo  [SUCCESS] %MODE_LABEL% launch initiated in this window.
 call npm.cmd run %NPM_SCRIPT%

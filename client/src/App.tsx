@@ -158,6 +158,7 @@ import type {
   CounselorMessageStats,
   CounselorActivityRow,
   CounselorNoticeSendPagePayload,
+  LinkedCounselorNotificationPayload,
   CounselorStudentRecord,
   CounselorSendNoticeRow,
   CounselorOverviewPayload,
@@ -687,6 +688,32 @@ function writeDeletedNotificationKeys(user: AuthUser | null, keys: Iterable<stri
   window.localStorage.setItem(getDeletedNotificationStorageKey(user), JSON.stringify(uniqueKeys));
 }
 
+function normalizeNotificationKeys(keys: unknown) {
+  return Array.from(new Set(
+    (Array.isArray(keys) ? keys : [])
+      .map((key) => String(key || '').trim())
+      .filter(Boolean),
+  ));
+}
+
+function mergeNotificationState(
+  ...states: Array<{ readKeys?: unknown; deletedKeys?: unknown } | null | undefined>
+) {
+  const readKeys = new Set<string>();
+  const deletedKeys = new Set<string>();
+  for (const state of states) {
+    for (const key of normalizeNotificationKeys(state?.readKeys)) readKeys.add(key);
+    for (const key of normalizeNotificationKeys(state?.deletedKeys)) {
+      deletedKeys.add(key);
+      readKeys.add(key);
+    }
+  }
+  return {
+    readKeys: Array.from(readKeys).slice(-500),
+    deletedKeys: Array.from(deletedKeys).slice(-500),
+  };
+}
+
 function compareVersionStrings(left: string, right: string) {
   const leftParts = String(left || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
   const rightParts = String(right || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
@@ -702,6 +729,11 @@ function getWeekdayKey(date = new Date()) {
   return ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][date.getDay()];
 }
 
+function notificationTimestamp(value: string) {
+  const parsed = Date.parse(String(value || '').replace(' ', 'T'));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function buildAppNotifications(
   user: AuthUser | null,
   pendingNotices: NoticeRecord[],
@@ -712,6 +744,7 @@ function buildAppNotifications(
     appVersion?: string;
     desktopSettings?: DesktopAppSettings | null;
     activityRows?: CounselorActivityRow[];
+    linkedCounselorNotifications?: LinkedCounselorNotificationPayload | null;
   },
 ) {
   if (!user) return [] as AppNotificationItem[];
@@ -732,6 +765,7 @@ function buildAppNotifications(
     for (const test of assignedTests || []) {
       const uploadedAt = String(test.uploaded_at || '');
       const pendingCount = Math.max(0, Number(test.student_count || 0) - Number(test.generated_count || 0));
+      if (pendingCount <= 0) continue;
       const isOldPending = pendingCount > 0 && uploadedAt && nowMs - (Date.parse(uploadedAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
       notifications.push({
         key: `test-assigned:${test.test_id || test.id}`,
@@ -776,6 +810,37 @@ function buildAppNotifications(
       }
     }
   }
+  if (user.role !== 'counselor' && options.linkedCounselorNotifications) {
+    const linked = options.linkedCounselorNotifications;
+    const counselorLabel = [linked.user.department, formatYearLevel(linked.user.year_level || 1)]
+      .filter(Boolean)
+      .join(' ');
+    for (const test of linked.tests || []) {
+      const uploadedAt = String(test.uploaded_at || '');
+      const pendingCount = Math.max(0, Number(test.student_count || 0) - Number(test.generated_count || 0));
+      if (pendingCount <= 0) continue;
+      const isOldPending = uploadedAt && nowMs - (Date.parse(uploadedAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
+      notifications.push({
+        key: `linked-counselor:test-assigned:${linked.user.email}:${test.test_id || test.id}`,
+        severity: isOldPending ? 'critical' : 'info',
+        title: 'Counselor role: test pending',
+        body: `${test.test_name} has ${pendingCount} pending student${pendingCount === 1 ? '' : 's'}${counselorLabel ? ` for ${counselorLabel}` : ''}. Switch to counselor role to send it.`,
+        createdAt: uploadedAt,
+      });
+    }
+    for (const notice of linked.overview?.pendingNotices || []) {
+      const noticeTitle = String(notice.title_display || notice.title || 'Notice pending').trim();
+      const createdAt = String(notice.created_at || '');
+      const isOldPending = createdAt && nowMs - (Date.parse(createdAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
+      notifications.push({
+        key: `linked-counselor:notice-assigned:${linked.user.email}:${notice.id}`,
+        severity: isOldPending ? 'critical' : 'info',
+        title: 'Counselor role: notice pending',
+        body: `${noticeTitle}${counselorLabel ? ` is waiting for ${counselorLabel}` : ' is waiting'}. Switch to counselor role to send it.`,
+        createdAt,
+      });
+    }
+  }
   if ((user.role === 'hod' || user.role === 'principal') && options.desktopSettings && runtimeConfig.isDesktop) {
     const digestDay = String(options.desktopSettings.higherOfficialDigestDay || 'monday').toLowerCase();
     if (digestDay === getWeekdayKey()) {
@@ -795,7 +860,7 @@ function buildAppNotifications(
       }
     }
   }
-  return notifications.sort((left, right) => Date.parse(right.createdAt || '') - Date.parse(left.createdAt || ''));
+  return notifications.sort((left, right) => notificationTimestamp(right.createdAt) - notificationTimestamp(left.createdAt));
 }
 
 function shouldRestoreSendReturnState() {
@@ -2925,12 +2990,8 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrap?.user || bootstrap.user.role !== 'counselor') return;
-    if (bootstrap.counselorOverview) {
-      setCounselorOverview((prev) => prev || bootstrap.counselorOverview || null);
-    }
-    if (bootstrap.counselorTests?.length) {
-      setCounselorTests((prev) => (prev.length ? prev : bootstrap.counselorTests || []));
-    }
+    setCounselorOverview(bootstrap.counselorOverview || null);
+    setCounselorTests(Array.isArray(bootstrap.counselorTests) ? bootstrap.counselorTests : []);
   }, [bootstrap]);
 
   useEffect(() => {
@@ -3508,33 +3569,35 @@ export default function App() {
   }, [deferredMonitoringSearch, monitoringAuthFilter, monitoringData?.history, monitoringSortBy]);
   const reportTestsBySemester = useMemo(() => splitTestsBySemester(reportsData?.tests || []), [reportsData]);
   const counselorVisibleTests = useMemo(() => {
-    if (counselorTests.length) return counselorTests;
+    if (bootstrap?.user?.role === 'counselor' && Array.isArray(bootstrap.counselorTests)) return bootstrap.counselorTests;
     if (bootstrap?.counselorTests?.length) return bootstrap.counselorTests;
-    if (counselorOverview?.recentTests?.length) return counselorOverview.recentTests;
+    if (counselorTests.length) return counselorTests;
     if (bootstrap?.counselorOverview?.recentTests?.length) return bootstrap.counselorOverview.recentTests;
+    if (counselorOverview?.recentTests?.length) return counselorOverview.recentTests;
     return [];
-  }, [bootstrap?.counselorOverview?.recentTests, bootstrap?.counselorTests, counselorOverview?.recentTests, counselorTests]);
+  }, [bootstrap?.counselorOverview?.recentTests, bootstrap?.counselorTests, bootstrap?.user?.role, counselorOverview?.recentTests, counselorTests]);
   const counselorTestsBySemester = useMemo(() => splitTestsBySemester(counselorVisibleTests), [counselorVisibleTests]);
   const counselorDashboardRecentTests = useMemo(() => {
-    if (counselorOverview?.recentTests?.length) return counselorOverview.recentTests;
     if (bootstrap?.counselorOverview?.recentTests?.length) return bootstrap.counselorOverview.recentTests;
+    if (counselorOverview?.recentTests?.length) return counselorOverview.recentTests;
     return counselorVisibleTests.slice(0, 2);
   }, [bootstrap?.counselorOverview?.recentTests, counselorOverview?.recentTests, counselorVisibleTests]);
   const counselorTopPerformingStudents = useMemo(() => {
-    if (counselorOverview?.topPerformingStudents?.length) return counselorOverview.topPerformingStudents;
     if (bootstrap?.counselorOverview?.topPerformingStudents?.length) return bootstrap.counselorOverview.topPerformingStudents;
+    if (counselorOverview?.topPerformingStudents?.length) return counselorOverview.topPerformingStudents;
     return [];
   }, [bootstrap?.counselorOverview?.topPerformingStudents, counselorOverview?.topPerformingStudents]);
   const counselorStudentsNeedImprovement = useMemo(() => {
-    if (counselorOverview?.studentsNeedImprovement?.length) return counselorOverview.studentsNeedImprovement;
     if (bootstrap?.counselorOverview?.studentsNeedImprovement?.length) return bootstrap.counselorOverview.studentsNeedImprovement;
+    if (counselorOverview?.studentsNeedImprovement?.length) return counselorOverview.studentsNeedImprovement;
     return [];
   }, [bootstrap?.counselorOverview?.studentsNeedImprovement, counselorOverview?.studentsNeedImprovement]);
   const counselorDashboardPendingNotices = useMemo(() => {
-    if (counselorOverview?.pendingNotices?.length) return counselorOverview.pendingNotices;
+    if (bootstrap?.user?.role === 'counselor' && bootstrap.counselorOverview) return bootstrap.counselorOverview.pendingNotices || [];
     if (bootstrap?.counselorOverview?.pendingNotices?.length) return bootstrap.counselorOverview.pendingNotices;
+    if (counselorOverview?.pendingNotices?.length) return counselorOverview.pendingNotices;
     return [];
-  }, [bootstrap?.counselorOverview?.pendingNotices, counselorOverview?.pendingNotices]);
+  }, [bootstrap?.counselorOverview, bootstrap?.counselorOverview?.pendingNotices, bootstrap?.user?.role, counselorOverview?.pendingNotices]);
 
   const currentUser = bootstrap?.user || null;
   const deletedNotificationKeys = useMemo(
@@ -3548,11 +3611,13 @@ export default function App() {
       appVersion: bootstrap?.appVersion,
       desktopSettings: desktopAppSettings,
       activityRows: activityData?.result?.rows || [],
+      linkedCounselorNotifications: bootstrap?.linkedCounselorNotifications || null,
     }).filter((item) => !deletedNotificationKeys.has(item.key)),
     [
       activityData?.result?.rows,
       bootstrap?.appConfig?.notification_pending_threshold_days,
       bootstrap?.appVersion,
+      bootstrap?.linkedCounselorNotifications,
       counselorDashboardPendingNotices,
       counselorVisibleTests,
       currentUser,
@@ -3663,10 +3728,7 @@ export default function App() {
       try {
         const state = await getNotificationState();
         if (!cancelled) {
-          setServerNotificationState({
-            readKeys: Array.isArray(state.readKeys) ? state.readKeys : [],
-            deletedKeys: Array.isArray(state.deletedKeys) ? state.deletedKeys : [],
-          });
+          setServerNotificationState((prev) => mergeNotificationState(prev, state));
         }
       } catch {
         if (!cancelled) setServerNotificationState({ readKeys: [], deletedKeys: [] });
@@ -3681,41 +3743,29 @@ export default function App() {
   }, [currentUser?.email]);
 
   const markNotificationsRead = (keys: string[]) => {
-    const uniqueKeys = Array.from(new Set(keys.map((key) => String(key || '').trim()).filter(Boolean)));
+    const uniqueKeys = normalizeNotificationKeys(keys);
     if (!uniqueKeys.length) return;
     const seen = readSeenNotificationKeys(currentUser);
     for (const key of uniqueKeys) seen.add(key);
     writeSeenNotificationKeys(currentUser, seen);
-    setServerNotificationState((prev) => ({
-      ...prev,
-      readKeys: Array.from(new Set([...prev.readKeys, ...uniqueKeys])),
-    }));
+    setServerNotificationState((prev) => mergeNotificationState(prev, { readKeys: uniqueKeys }));
     setNotificationSeenVersion((prev) => prev + 1);
     void markNotificationKeysRead(uniqueKeys)
-      .then((state) => setServerNotificationState({
-        readKeys: Array.isArray(state.readKeys) ? state.readKeys : [],
-        deletedKeys: Array.isArray(state.deletedKeys) ? state.deletedKeys : [],
-      }))
+      .then((state) => setServerNotificationState((prev) => mergeNotificationState(prev, state)))
       .catch(() => undefined);
   };
 
   const deleteNotifications = (keys: string[]) => {
-    const uniqueKeys = Array.from(new Set(keys.map((key) => String(key || '').trim()).filter(Boolean)));
+    const uniqueKeys = normalizeNotificationKeys(keys);
     if (!uniqueKeys.length) return;
     markNotificationsRead(uniqueKeys);
     const deleted = readDeletedNotificationKeys(currentUser);
     for (const key of uniqueKeys) deleted.add(key);
     writeDeletedNotificationKeys(currentUser, deleted);
-    setServerNotificationState((prev) => ({
-      readKeys: Array.from(new Set([...prev.readKeys, ...uniqueKeys])),
-      deletedKeys: Array.from(new Set([...prev.deletedKeys, ...uniqueKeys])),
-    }));
+    setServerNotificationState((prev) => mergeNotificationState(prev, { readKeys: uniqueKeys, deletedKeys: uniqueKeys }));
     setNotificationDeletedVersion((prev) => prev + 1);
     void deleteNotificationKeys(uniqueKeys)
-      .then((state) => setServerNotificationState({
-        readKeys: Array.isArray(state.readKeys) ? state.readKeys : [],
-        deletedKeys: Array.isArray(state.deletedKeys) ? state.deletedKeys : [],
-      }))
+      .then((state) => setServerNotificationState((prev) => mergeNotificationState(prev, state)))
       .catch(() => undefined);
   };
 
@@ -3842,6 +3892,31 @@ export default function App() {
   }, [currentUser, desktopAppSettings?.desktopNotificationsEnabled, unreadNotifications]);
 
   useEffect(() => {
+    if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
+    let cancelled = false;
+    const refreshDesktopNotifications = async () => {
+      try {
+        await refreshBootstrap();
+      } catch {
+        // Desktop notification refresh is best-effort.
+      }
+    };
+    const pollSeconds = Math.max(10, Number(bootstrap?.appConfig?.desktop_notification_poll_seconds || bootstrap?.appConfig?.desktop_notification_poll_minutes || 30) || 30);
+    const timerId = window.setInterval(() => {
+      if (!cancelled) void refreshDesktopNotifications();
+    }, pollSeconds * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
+    };
+  }, [
+    bootstrap?.appConfig?.desktop_notification_poll_minutes,
+    bootstrap?.appConfig?.desktop_notification_poll_seconds,
+    currentUser?.email,
+    desktopAppSettings?.desktopNotificationsEnabled,
+  ]);
+
+  useEffect(() => {
     if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings) return;
     if (currentUser.role !== 'hod' && currentUser.role !== 'principal') return;
     if (desktopAppSettings.higherOfficialDigestDay !== getWeekdayKey()) return;
@@ -3850,31 +3925,6 @@ export default function App() {
       sort: 'pending_first',
     });
   }, [activityData?.result?.rows?.length, currentUser, desktopAppSettings?.higherOfficialDigestDay, desktopAppSettings?.higherOfficialDigestScope]);
-
-  useEffect(() => {
-    if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
-    const storageKey = `shine_desktop_notified:${currentUser.email || currentUser.name || 'user'}`;
-    const seen = new Set<string>(JSON.parse(window.localStorage.getItem(storageKey) || '[]') as string[]);
-    const remember = (key: string) => {
-      seen.add(key);
-      window.localStorage.setItem(storageKey, JSON.stringify(Array.from(seen).slice(-80)));
-    };
-    const poll = async () => {
-      if (currentUser.role !== 'counselor') return;
-      const overview = await getCounselorOverview().catch(() => null);
-      for (const notice of overview?.pendingNotices || []) {
-        const key = `notice-assigned:${notice.id || notice.title || notice.created_at}`;
-        if (seen.has(key)) continue;
-        remember(key);
-        void showDesktopNotification({ title: 'Notice pending', body: String(notice.title || 'A notice is waiting to be sent.') });
-      }
-    };
-    void poll();
-    const pollSeconds = Math.max(10, Number(bootstrap?.appConfig?.desktop_notification_poll_seconds || bootstrap?.appConfig?.desktop_notification_poll_minutes || 30) || 30);
-    const intervalMs = pollSeconds * 1000;
-    const timerId = window.setInterval(() => void poll(), intervalMs);
-    return () => window.clearInterval(timerId);
-  }, [bootstrap?.appConfig?.desktop_notification_poll_minutes, bootstrap?.appConfig?.desktop_notification_poll_seconds, currentUser, desktopAppSettings?.desktopNotificationsEnabled]);
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop) return;
@@ -12018,7 +12068,7 @@ export default function App() {
                   </a>
                 ) : null}
                 {!runtimeConfig.isDesktop ? (
-                  <a className="global-footer-link global-footer-btn" href="/api/desktop/installer">
+                  <a className="global-footer-link global-footer-btn" href="/api/desktop/installer/exe">
                     Windows App
                   </a>
                 ) : null}

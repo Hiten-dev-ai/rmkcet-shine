@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const clientHost = process.env.HOST || '127.0.0.1';
+const serverOrigin = process.env.SERVER_ORIGIN || 'http://127.0.0.1:5001';
+const allowedHosts = ['shine.athergrid.dev', 'rmkcetshine.me'];
+
 export default defineConfig({
   plugins: [react()],
   build: {
@@ -13,33 +17,33 @@ export default defineConfig({
     },
   },
   server: {
-    host: '::1',
+    host: clientHost,
     port: 5000,
     strictPort: true,
-    allowedHosts: ['shine.athergrid.dev'],
+    allowedHosts,
     proxy: {
       '/api': {
-        target: 'http://[::1]:5001',
+        target: serverOrigin,
         changeOrigin: true,
       },
       '/auth': {
-        target: 'http://[::1]:5001',
+        target: serverOrigin,
         changeOrigin: true,
       },
     },
   },
   preview: {
-    host: '::1',
+    host: clientHost,
     port: 5000,
     strictPort: true,
-    allowedHosts: ['shine.athergrid.dev'],
+    allowedHosts,
     proxy: {
       '/api': {
-        target: 'http://[::1]:5001',
+        target: serverOrigin,
         changeOrigin: true,
       },
       '/auth': {
-        target: 'http://[::1]:5001',
+        target: serverOrigin,
         changeOrigin: true,
       },
     },

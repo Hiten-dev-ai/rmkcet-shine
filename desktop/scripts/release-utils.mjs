@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,6 +24,8 @@ export const desktopPackageJsonPath = resolve(desktopRoot, 'package.json');
 export const rootPackageJsonPath = resolve(repoRoot, 'package.json');
 export const desktopAssetSourcePath = resolve(repoRoot, 'client', 'assets', 'shine-logo-optimized.png');
 export const desktopBuildFingerprintPath = resolve(desktopInstallerLatestRoot, 'build-fingerprint.json');
+export const defaultLocatorCsvUrl = 'https://drive.google.com/uc?export=download&id=1K1YZVkPF42X2F5oA6_ZQYfrB57JHhxma';
+export const defaultDesktopExeFileName = 'rmkcet_shine_app.exe';
 
 export async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'));
@@ -74,7 +76,7 @@ export async function computeDesktopBuildFingerprint() {
   }
   return {
     schemaVersion: 1,
-    version: getRootAppVersion(),
+    version: getDesktopReleaseVersion(),
     hash: hash.digest('hex'),
   };
 }
@@ -97,6 +99,58 @@ export function getRootAppVersion() {
   }
 }
 
+export function getDesktopReleaseVersion() {
+  return getEnvFlag('SHINE_DESKTOP_RELEASE_VERSION', getEnvFlag('SHINE_DESKTOP_APP_VERSION', getRootAppVersion()));
+}
+
+export function bumpPatchVersion(version) {
+  const raw = String(version || '').trim() || '0.1.0';
+  const core = raw.split('-')[0];
+  const parts = core.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  while (parts.length < 3) parts.push(0);
+  parts[2] += 1;
+  return parts.slice(0, 3).join('.');
+}
+
+export function compareDesktopVersions(left, right) {
+  const leftParts = String(left || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = String(right || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+export function getLatestPublishedDesktopVersion() {
+  const manifestPath = resolve(desktopInstallerLatestRoot, getReleaseManifestFileName());
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    return String(manifest?.version || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function hasPublishedDesktopExe() {
+  if (existsSync(resolve(desktopInstallerLatestRoot, getDesktopExeFileName()))) return true;
+  try {
+    return readdirSync(desktopInstallerLatestRoot).some((entry) => /\.exe$/i.test(entry));
+  } catch {
+    return false;
+  }
+}
+
+export function getNextDesktopReleaseVersion() {
+  const explicit = getEnvFlag('SHINE_DESKTOP_RELEASE_VERSION', getEnvFlag('SHINE_DESKTOP_APP_VERSION', ''));
+  if (explicit) return explicit;
+  const rootVersion = getRootAppVersion();
+  if (!hasPublishedDesktopExe()) return rootVersion;
+  const nextPatchVersion = bumpPatchVersion(getLatestPublishedDesktopVersion() || rootVersion);
+  return compareDesktopVersions(rootVersion, nextPatchVersion) > 0 ? rootVersion : nextPatchVersion;
+}
+
 export function normalizeMsixVersion(version) {
   const raw = String(version || '').trim();
   const core = raw.split('-')[0];
@@ -116,8 +170,8 @@ export function getDesktopMsixFileName(version) {
   return `${getDesktopArtifactBaseName(version)}.msix`;
 }
 
-export function getDesktopExeFileName(version) {
-  return `RMKCET-Shine-Setup-${String(version || '').trim()}.exe`;
+export function getDesktopExeFileName() {
+  return getEnvFlag('SHINE_DESKTOP_EXE_FILE_NAME', defaultDesktopExeFileName) || defaultDesktopExeFileName;
 }
 
 export function getDesktopAppInstallerFileName() {
@@ -216,7 +270,7 @@ export async function writeRuntimeReleaseConfig() {
   await writeFile(generatedRuntimeConfigPath, JSON.stringify({
     apiOrigin,
     releaseChannelBaseUrl: getEnvFlag('SHINE_DESKTOP_RELEASE_CHANNEL_URL', ''),
-    locatorCsvUrl: getEnvFlag('SHINE_DESKTOP_LOCATOR_CSV_URL', ''),
+    locatorCsvUrl: getEnvFlag('SHINE_DESKTOP_LOCATOR_CSV_URL', defaultLocatorCsvUrl),
     downloadPageUrl: getEnvFlag('SHINE_DESKTOP_DOWNLOAD_PAGE_URL', ''),
   }, null, 2));
   return generatedRuntimeConfigPath;
@@ -253,12 +307,17 @@ export async function copyMsixAssets(targetAssetsDir) {
   }
 }
 
-export async function buildClientDesktopShellIfMissing() {
-  if (existsSync(clientDesktopDistRoot)) return;
+export async function buildClientDesktopShell() {
+  await cleanDir(clientDesktopDistRoot);
   await runCommand(getNpmCommand(), ['run', 'build:desktop-shell', '--prefix', 'client'], {
     cwd: repoRoot,
     title: 'Building desktop client shell',
   });
+}
+
+export async function buildClientDesktopShellIfMissing() {
+  if (existsSync(clientDesktopDistRoot)) return;
+  await buildClientDesktopShell();
 }
 
 export async function readDesktopPackageJson() {

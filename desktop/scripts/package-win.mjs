@@ -2,7 +2,7 @@ import { packager } from '@electron/packager';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import {
-  buildClientDesktopShellIfMissing,
+  buildClientDesktopShell,
   cleanDir,
   copyMsixAssets,
   desktopRoot,
@@ -28,7 +28,7 @@ export async function runPackageWin() {
   const publisherDisplayName = String(process.env.SHINE_DESKTOP_PUBLISHER_DISPLAY_NAME || 'RMKCET Shine').trim();
   const description = String(process.env.SHINE_DESKTOP_PACKAGE_DESCRIPTION || 'RMKCET Shine Windows desktop client.').trim();
 
-  await buildClientDesktopShellIfMissing();
+  await buildClientDesktopShell();
   await writeRuntimeReleaseConfig();
   await cleanDir(packagedOutputRoot);
 

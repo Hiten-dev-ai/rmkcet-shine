@@ -1,4 +1,6 @@
-import { cp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { cp, readdir, rm, stat, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
@@ -10,11 +12,11 @@ import {
   ensureDir,
   ensureExists,
   exeOutputRoot,
+  getDesktopReleaseVersion,
   getDesktopExeFileName,
   getEnvFlag,
   getReleaseManifestFileName,
   getReleaseNotesLines,
-  getRootAppVersion,
 } from './release-utils.mjs';
 import { runMakeExe } from './make-exe.mjs';
 
@@ -45,16 +47,73 @@ async function rotateOldReleaseFolders(keepCount = 5) {
   }
 }
 
+async function hashFileSha256(filePath) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', rejectPromise);
+    stream.on('end', () => resolvePromise(hash.digest('hex')));
+  });
+}
+
+function markLatestYmlAdminRequired(content) {
+  const raw = String(content || '');
+  if (/^\s+isAdminRightsRequired:\s*true\s*$/m.test(raw)) return raw;
+  const lines = raw.split(/\r?\n/);
+  const fileStartIndex = lines.findIndex((line, index) => (
+    /^\s+-\s+url:\s*/.test(line) && lines.slice(0, index).some((candidate) => /^files:\s*$/.test(candidate))
+  ));
+  if (fileStartIndex < 0) return raw;
+
+  let insertIndex = fileStartIndex + 1;
+  for (let index = fileStartIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\S/.test(line) || /^\s+-\s+/.test(line)) break;
+    insertIndex = index + 1;
+    if (/^\s+size:\s*/.test(line)) break;
+  }
+  lines.splice(insertIndex, 0, '    isAdminRightsRequired: true');
+  return lines.join('\n');
+}
+
+async function copyUpdaterArtifacts(sourceDir, releaseDir, latestDir) {
+  const entries = await readdir(sourceDir, { withFileTypes: true }).catch(() => []);
+  const updaterFiles = entries
+    .filter((entry) => entry.isFile() && (/\.blockmap$/i.test(entry.name) || /^latest\.ya?ml$/i.test(entry.name)))
+    .map((entry) => entry.name);
+  for (const fileName of updaterFiles) {
+    const sourcePath = resolve(sourceDir, fileName);
+    if (/^latest\.ya?ml$/i.test(fileName)) {
+      const latestYml = markLatestYmlAdminRequired(await readFile(sourcePath, 'utf8'));
+      await writeFile(resolve(releaseDir, fileName), latestYml);
+      await writeFile(resolve(latestDir, fileName), latestYml);
+      continue;
+    }
+    await cp(sourcePath, resolve(releaseDir, fileName), { force: true });
+    await cp(sourcePath, resolve(latestDir, fileName), { force: true });
+  }
+}
+
 export async function runPublishExe(options = {}) {
-  const appVersion = getRootAppVersion();
+  const appVersion = getDesktopReleaseVersion();
   const fingerprint = options.fingerprint || await computeDesktopBuildFingerprint();
   const baseUrl = buildBaseUrl();
-  const exeFileName = getDesktopExeFileName(appVersion);
+  const exeFileName = getDesktopExeFileName();
   const exeSourcePath = resolve(exeOutputRoot, exeFileName);
   const releaseDir = resolve(desktopInstallerReleasesRoot, appVersion);
   const latestDir = desktopInstallerLatestRoot;
   const versionedExeRelativePath = `/api/desktop/download/releases/${encodeURIComponent(appVersion)}/${encodeURIComponent(exeFileName)}`;
   const latestExeRelativePath = `/api/desktop/download/latest/${encodeURIComponent(exeFileName)}`;
+  try {
+    await ensureExists(exeSourcePath, 'EXE installer artifact');
+  } catch {
+    await runMakeExe();
+  }
+
+  await ensureExists(exeSourcePath, 'EXE installer artifact');
+  const exeDetails = await stat(exeSourcePath);
+  const exeSha256 = await hashFileSha256(exeSourcePath);
   const manifestPayload = {
     schemaVersion: 1,
     channel: 'latest',
@@ -71,22 +130,17 @@ export async function runPublishExe(options = {}) {
         fileName: exeFileName,
         relativePath: latestExeRelativePath,
         versionedRelativePath: versionedExeRelativePath,
+        size: exeDetails.size,
+        sha256: exeSha256,
       },
     },
   };
-
-  try {
-    await ensureExists(exeSourcePath, 'EXE installer artifact');
-  } catch {
-    await runMakeExe();
-  }
-
-  await ensureExists(exeSourcePath, 'EXE installer artifact');
   await ensureDir(desktopInstallerReleasesRoot);
   await cleanDir(releaseDir);
   await cleanDir(latestDir);
   await cp(exeSourcePath, resolve(releaseDir, exeFileName), { force: true });
   await cp(exeSourcePath, resolve(latestDir, exeFileName), { force: true });
+  await copyUpdaterArtifacts(exeOutputRoot, releaseDir, latestDir);
   await writeFile(resolve(releaseDir, getReleaseManifestFileName()), JSON.stringify(manifestPayload, null, 2));
   await writeFile(resolve(latestDir, getReleaseManifestFileName()), JSON.stringify(manifestPayload, null, 2));
   await writeFile(resolve(releaseDir, 'build-fingerprint.json'), JSON.stringify(fingerprint, null, 2));

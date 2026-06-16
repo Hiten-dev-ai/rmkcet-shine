@@ -1192,6 +1192,30 @@ function buildCounselorOverviewPayload(counselorEmail: string) {
   };
 }
 
+function buildLinkedCounselorNotificationPayload(authUser: ReturnType<typeof toAuthUser> | null) {
+  if (!authUser || authUser.role === 'counselor') return null;
+  const loginEmail = String(authUser.login_email || authUser.email || '').trim().toLowerCase();
+  if (!loginEmail) return null;
+  const counselorRow = getUsersByLoginEmail(loginEmail).find((userRow) => {
+    const role = String(userRow.role || '').trim().toLowerCase();
+    const email = String(userRow.email || '').trim().toLowerCase();
+    return role === 'counselor' && email && checkUserAccess(email).allowed;
+  });
+  if (!counselorRow) return null;
+  const counselorEmail = String(counselorRow.email || '').trim().toLowerCase();
+  if (!counselorEmail) return null;
+  return {
+    user: {
+      email: counselorEmail,
+      name: String(counselorRow.name || authUser.name || counselorEmail).trim(),
+      department: String(counselorRow.department || '').trim().toUpperCase(),
+      year_level: Number(counselorRow.year_level || 1) || 1,
+    },
+    overview: buildCounselorOverviewPayload(counselorEmail),
+    tests: getVisibleTestsForCounselor(counselorEmail),
+  };
+}
+
 function appendServerConsoleLine(message: string) {
   const text = String(message || '').trim();
   if (!text) return;
@@ -4770,6 +4794,7 @@ type DesktopInstallerManifest = {
 };
 
 const DESKTOP_INSTALLER_LATEST_MANIFEST_PATH = resolve(DESKTOP_INSTALLER_ROOT, 'latest', 'release.json');
+const DESKTOP_INSTALLER_STABLE_EXE_FILE_NAME = 'rmkcet_shine_app.exe';
 
 async function readDesktopInstallerManifest(): Promise<DesktopInstallerManifest | null> {
   try {
@@ -4797,6 +4822,35 @@ function resolveDesktopInstallerArtifactPath(relativePath: string) {
   return isInsideRoot ? resolvedPath : null;
 }
 
+function resolveDesktopInstallerDownloadRelativePath(relativePath: string) {
+  const normalized = String(relativePath || '')
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/\\/g, '/');
+  if (!normalized) return '';
+  return normalized
+    .replace(/^api\/desktop\/download\//i, '')
+    .replace(/^downloads\/desktop\//i, '');
+}
+
+async function resolveLatestDesktopExeRelativePath(manifest: DesktopInstallerManifest | null) {
+  const manifestPath = resolveDesktopInstallerDownloadRelativePath(manifest?.files.exe?.relativePath || '');
+  if (manifestPath) return manifestPath;
+
+  const stablePath = `latest/${DESKTOP_INSTALLER_STABLE_EXE_FILE_NAME}`;
+  try {
+    const stableStat = await stat(resolve(DESKTOP_INSTALLER_ROOT, stablePath));
+    if (stableStat.isFile()) return stablePath;
+  } catch {
+    // Fall through to any published EXE in latest.
+  }
+
+  const latestDir = resolve(DESKTOP_INSTALLER_ROOT, 'latest');
+  const entries = await readdir(latestDir).catch(() => []);
+  const firstExe = entries.find((entry) => /\.exe$/i.test(entry));
+  return firstExe ? `latest/${firstExe}` : '';
+}
+
 app.get('/api/desktop/installer/meta', async (c) => {
   const manifest = await readDesktopInstallerManifest();
   if (!manifest) {
@@ -4806,7 +4860,7 @@ app.get('/api/desktop/installer/meta', async (c) => {
   const requestOrigin = getPublicRequestOrigin(c);
   const appinstallerUrl = manifest.files.appinstaller?.relativePath ? `${requestOrigin}${manifest.files.appinstaller.relativePath}` : '';
   const msixUrl = manifest.files.msix?.relativePath ? `${requestOrigin}${manifest.files.msix.relativePath}` : '';
-  const exeUrl = manifest.files.exe?.relativePath ? `${requestOrigin}${manifest.files.exe.relativePath}` : '';
+  const exeUrl = manifest.files.exe?.relativePath ? `${requestOrigin}/api/desktop/installer/exe` : '';
   return c.json({
     available: true,
     ...manifest,
@@ -4817,12 +4871,21 @@ app.get('/api/desktop/installer/meta', async (c) => {
   });
 });
 
+app.get('/api/desktop/installer/exe', async (c) => {
+  const manifest = await readDesktopInstallerManifest();
+  const exeRelativePath = await resolveLatestDesktopExeRelativePath(manifest);
+  if (!manifest || !exeRelativePath) {
+    return c.text('Desktop EXE installer has not been published yet.', 404);
+  }
+  return serveDesktopInstallerDownload(c, exeRelativePath);
+});
+
 app.get('/api/desktop/installer', async (c) => {
   const manifest = await readDesktopInstallerManifest();
   const requestOrigin = getPublicRequestOrigin(c);
   const appinstallerUrl = manifest?.files.appinstaller?.relativePath ? `${requestOrigin}${manifest.files.appinstaller.relativePath}` : '';
   const msixUrl = manifest?.files.msix?.relativePath ? `${requestOrigin}${manifest.files.msix.relativePath}` : '';
-  const exeUrl = manifest?.files.exe?.relativePath ? `${requestOrigin}${manifest.files.exe.relativePath}` : '';
+  const exeUrl = manifest?.files.exe?.relativePath ? `${requestOrigin}/api/desktop/installer/exe` : '';
   const installUrl = appinstallerUrl ? `ms-appinstaller:?source=${encodeURIComponent(appinstallerUrl)}` : '';
   const preferredInstaller = String(manifest?.preferredInstaller || '').trim().toLowerCase();
   const prefersExe = preferredInstaller === 'exe' || (!!exeUrl && !appinstallerUrl);
@@ -4925,6 +4988,10 @@ app.get('/api/desktop/download/releases/:version/:fileName', async (c) => {
   );
 });
 
+app.get('/api/desktop/updater/:fileName', async (c) => {
+  return serveDesktopInstallerDownload(c, `latest/${String(c.req.param('fileName') || '').trim()}`);
+});
+
 app.get('/api/footer/credits', async (c) => {
   const creditsPath = resolve(CLIENT_PUBLIC_ASSETS_ROOT, 'credits_compiled.html');
   let compiledCreditsHtml = '';
@@ -4982,6 +5049,9 @@ function getStaticMimeType(filePath: string) {
       return 'text/css; charset=utf-8';
     case '.json':
       return 'application/json; charset=utf-8';
+    case '.yml':
+    case '.yaml':
+      return 'text/yaml; charset=utf-8';
     case '.svg':
       return 'image/svg+xml';
     case '.png':
@@ -5035,6 +5105,7 @@ app.get('/api/bootstrap', async (c) => {
 
   const counselorTests = authUser?.role === 'counselor' ? getVisibleTestsForCounselor(authUser.email) : [];
   const counselorOverview = authUser?.role === 'counselor' ? buildCounselorOverviewPayload(authUser.email) : null;
+  const linkedCounselorNotifications = buildLinkedCounselorNotificationPayload(authUser);
   const defaultTab = String(authUser ? defaultTabForRole(authUser.role) : 'reports');
   const shouldPrefetchDashboard = Boolean(authUser && ['admin', 'principal', 'hod'].includes(authUser.role));
   const shouldPrefetchActivity = Boolean(authUser && ['admin', 'principal', 'hod', 'deo'].includes(authUser.role));
@@ -5104,6 +5175,7 @@ app.get('/api/bootstrap', async (c) => {
     prefetched,
     counselorOverview,
     counselorTests,
+    linkedCounselorNotifications,
   });
 });
 
@@ -8616,10 +8688,14 @@ async function serveDesktopInstallerDownload(c: Context, requestedRelativePath: 
     const fileStat = await stat(artifactPath);
     if (!fileStat.isFile()) return c.text('Desktop installer file not found.', 404);
     const fileData = await readFile(artifactPath);
-    c.header('Content-Type', getStaticMimeType(artifactPath));
-    c.header('Cache-Control', artifactPath.endsWith('.appinstaller') ? 'no-store' : 'public, max-age=3600');
-    c.header('Content-Disposition', `attachment; filename="${artifactPath.split(/[/\\\\]/).pop() || 'download'}"`);
-    return new Response(new Uint8Array(fileData));
+    const fileName = artifactPath.split(/[/\\]/).pop() || 'download';
+    return new Response(new Uint8Array(fileData), {
+      headers: {
+        'Content-Type': getStaticMimeType(artifactPath),
+        'Cache-Control': artifactPath.endsWith('.appinstaller') ? 'no-store' : 'public, max-age=3600',
+        'Content-Disposition': `attachment; filename="${fileName}"`,
+      },
+    });
   } catch {
     return c.text('Desktop installer file not found.', 404);
   }

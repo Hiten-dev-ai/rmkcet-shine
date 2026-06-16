@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { SHINE_DB_PATH } from './config.js';
+import { DEFAULT_SYSTEM_ADMIN_EMAIL, DEFAULT_SYSTEM_ADMIN_PASSWORD, SHINE_DB_PATH } from './config.js';
 import type { AuthUser, Role, ScopeRow } from './roles.js';
 import { normalizeRole } from './roles.js';
 
@@ -24,6 +24,7 @@ function ensureColumn(database: Database.Database, tableName: string, columnName
 function configureDatabaseConnection(database: Database.Database) {
   database.pragma('foreign_keys = ON');
   database.pragma('journal_mode = WAL');
+  ensureBaseSchema(database);
   ensureColumn(database, 'active_sessions', 'auth_method', "TEXT NOT NULL DEFAULT 'password'");
   ensureColumn(database, 'users', 'locked_until', 'TEXT');
   ensureColumn(database, 'users', 'login_email', 'TEXT');
@@ -144,6 +145,283 @@ function configureDatabaseConnection(database: Database.Database) {
     // The table may not exist yet during first-run bootstrap.
   }
   return database;
+}
+
+function ensureBaseSchema(database: Database.Database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS app_config (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS departments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      color TEXT DEFAULT '#667eea',
+      is_active BOOLEAN DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      start_year INTEGER,
+      end_year INTEGER,
+      is_active BOOLEAN DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS semesters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      semester_number INTEGER NOT NULL,
+      is_active BOOLEAN DEFAULT 1,
+      FOREIGN KEY (batch_id) REFERENCES batches(id),
+      UNIQUE(batch_id, semester_number)
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE NOT NULL,
+      login_email TEXT,
+      password_hash TEXT NOT NULL,
+      name TEXT NOT NULL,
+      department TEXT,
+      year_level INTEGER DEFAULT 1,
+      role TEXT DEFAULT 'counselor',
+      designation TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_login TIMESTAMP,
+      last_activity TIMESTAMP,
+      session_id TEXT,
+      is_active BOOLEAN DEFAULT 1,
+      is_locked BOOLEAN DEFAULT 0,
+      lock_reason TEXT,
+      locked_until TEXT,
+      max_students INTEGER DEFAULT 30,
+      can_upload_students BOOLEAN DEFAULT 1,
+      disable_login_otp BOOLEAN DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS chief_admin_scopes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chief_admin_email TEXT NOT NULL,
+      department TEXT NOT NULL,
+      year_level INTEGER NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (chief_admin_email) REFERENCES users(email),
+      UNIQUE(chief_admin_email, department, year_level)
+    );
+
+    CREATE TABLE IF NOT EXISTS active_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT UNIQUE NOT NULL,
+      user_email TEXT NOT NULL,
+      login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      ip_address TEXT,
+      user_agent TEXT,
+      browser_info TEXT,
+      tab_id TEXT,
+      is_active BOOLEAN DEFAULT 1,
+      forced_logout BOOLEAN DEFAULT 0,
+      logout_reason TEXT,
+      auth_method TEXT NOT NULL DEFAULT 'password',
+      FOREIGN KEY (user_email) REFERENCES users(email)
+    );
+
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      token TEXT NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      used BOOLEAN DEFAULT 0,
+      FOREIGN KEY (user_email) REFERENCES users(email)
+    );
+
+    CREATE TABLE IF NOT EXISTS format_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      default_format TEXT DEFAULT 'message',
+      allowed_formats TEXT DEFAULT '["message","pdf","image"]',
+      bulk_format TEXT DEFAULT 'same_as_individual',
+      updated_by TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS tests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      semester_id INTEGER NOT NULL,
+      test_name TEXT NOT NULL,
+      test_date DATE,
+      max_marks INTEGER DEFAULT 100,
+      is_active BOOLEAN DEFAULT 1,
+      FOREIGN KEY (semester_id) REFERENCES semesters(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS test_metadata (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      test_id INTEGER UNIQUE NOT NULL,
+      batch_name TEXT,
+      semester INTEGER,
+      year_level INTEGER DEFAULT 1,
+      test_name TEXT,
+      department TEXT,
+      section TEXT,
+      file_hash TEXT,
+      is_blocked INTEGER DEFAULT 0,
+      academic_year TEXT,
+      subjects TEXT,
+      subject_columns TEXT,
+      header_row TEXT,
+      data_start_row INTEGER DEFAULT 7,
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      uploaded_by TEXT,
+      FOREIGN KEY (test_id) REFERENCES tests(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS student_marks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      test_id INTEGER NOT NULL,
+      reg_no TEXT NOT NULL,
+      student_name TEXT,
+      subject_name TEXT NOT NULL,
+      subject_code TEXT,
+      marks TEXT,
+      department TEXT,
+      section TEXT NOT NULL DEFAULT '',
+      uploaded_by TEXT,
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (test_id) REFERENCES tests(id),
+      UNIQUE(test_id, reg_no, subject_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS counselor_students (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      counselor_email TEXT NOT NULL,
+      reg_no TEXT NOT NULL,
+      student_name TEXT NOT NULL,
+      department TEXT,
+      parent_phone TEXT,
+      parent_email TEXT,
+      is_active BOOLEAN DEFAULT 1,
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (counselor_email) REFERENCES users(email),
+      UNIQUE(counselor_email, reg_no)
+    );
+
+    CREATE TABLE IF NOT EXISTS sent_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      counselor_email TEXT NOT NULL,
+      test_id INTEGER,
+      reg_no TEXT NOT NULL,
+      student_name TEXT NOT NULL,
+      message TEXT,
+      format TEXT DEFAULT 'message',
+      sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      status TEXT DEFAULT 'sent',
+      delivery_status TEXT DEFAULT 'pending',
+      whatsapp_link TEXT,
+      error_message TEXT,
+      session_id TEXT,
+      send_mode TEXT DEFAULT 'app',
+      FOREIGN KEY (counselor_email) REFERENCES users(email),
+      FOREIGN KEY (test_id) REFERENCES tests(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS counselor_mark_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      counselor_email TEXT NOT NULL,
+      test_id INTEGER NOT NULL,
+      reg_no TEXT NOT NULL,
+      subject_name TEXT NOT NULL,
+      marks TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (counselor_email) REFERENCES users(email),
+      FOREIGN KEY (test_id) REFERENCES tests(id),
+      UNIQUE(counselor_email, test_id, reg_no, subject_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS counselor_time_scores (
+      counselor_email TEXT PRIMARY KEY,
+      score_seconds INTEGER DEFAULT 0,
+      best_completion_seconds INTEGER,
+      last_event_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (counselor_email) REFERENCES users(email)
+    );
+
+    CREATE TABLE IF NOT EXISTS notices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT,
+      message_text TEXT,
+      send_to_all BOOLEAN DEFAULT 0,
+      created_by TEXT,
+      created_role TEXT,
+      public_token TEXT UNIQUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (created_by) REFERENCES users(email)
+    );
+
+    CREATE TABLE IF NOT EXISTS notice_scopes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      notice_id INTEGER NOT NULL,
+      department TEXT NOT NULL,
+      year_level INTEGER NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (notice_id) REFERENCES notices(id) ON DELETE CASCADE,
+      UNIQUE(notice_id, department, year_level)
+    );
+
+    CREATE TABLE IF NOT EXISTS notice_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      notice_id INTEGER NOT NULL,
+      stored_name TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER DEFAULT 0,
+      public_token TEXT UNIQUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (notice_id) REFERENCES notices(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS notice_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      notice_id INTEGER NOT NULL,
+      counselor_email TEXT NOT NULL,
+      reg_no TEXT NOT NULL,
+      student_name TEXT NOT NULL,
+      message TEXT,
+      sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      status TEXT DEFAULT 'sent',
+      delivery_status TEXT DEFAULT 'pending',
+      whatsapp_link TEXT,
+      error_message TEXT,
+      send_mode TEXT DEFAULT 'app',
+      FOREIGN KEY (notice_id) REFERENCES notices(id) ON DELETE CASCADE,
+      FOREIGN KEY (counselor_email) REFERENCES users(email),
+      UNIQUE (notice_id, counselor_email, reg_no)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_active_sessions_active_last_activity ON active_sessions(is_active, last_activity);
+    CREATE INDEX IF NOT EXISTS idx_active_sessions_user_active ON active_sessions(user_email, is_active, last_activity);
+    CREATE INDEX IF NOT EXISTS idx_counselor_students_email_active ON counselor_students(counselor_email, is_active);
+    CREATE INDEX IF NOT EXISTS idx_counselor_students_reg_no ON counselor_students(reg_no);
+    CREATE INDEX IF NOT EXISTS idx_notice_attachments_notice_id ON notice_attachments(notice_id);
+    CREATE INDEX IF NOT EXISTS idx_notice_deliveries_counselor_notice ON notice_deliveries(counselor_email, notice_id);
+    CREATE INDEX IF NOT EXISTS idx_notice_deliveries_notice_counselor ON notice_deliveries(notice_id, counselor_email, status);
+    CREATE INDEX IF NOT EXISTS idx_notice_scopes_notice_scope ON notice_scopes(notice_id, department, year_level);
+    CREATE INDEX IF NOT EXISTS idx_notices_created_at ON notices(created_at);
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_counselor_test_status ON sent_messages(counselor_email, test_id, status);
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_test_reg ON sent_messages(test_id, reg_no);
+    CREATE INDEX IF NOT EXISTS idx_student_marks_reg_test ON student_marks(reg_no, test_id);
+    CREATE INDEX IF NOT EXISTS idx_student_marks_test_id ON student_marks(test_id);
+    CREATE INDEX IF NOT EXISTS idx_test_metadata_scope ON test_metadata(department, year_level, semester, test_name);
+    CREATE INDEX IF NOT EXISTS idx_test_metadata_uploaded_at ON test_metadata(uploaded_at);
+    CREATE INDEX IF NOT EXISTS idx_test_metadata_uploaded_by ON test_metadata(uploaded_by, uploaded_at);
+    CREATE INDEX IF NOT EXISTS idx_users_role_department_year ON users(role, department, year_level);
+  `);
 }
 
 function createDatabaseConnection() {
@@ -455,6 +733,55 @@ export function hashPassword(password: string) {
   });
   return `scrypt:${N}:${r}:${p}$${salt}$${derived.toString('hex')}`;
 }
+
+function seedInitialData(database: Database.Database) {
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+  const insertConfig = database.prepare(`
+    INSERT OR IGNORE INTO app_config (key, value, updated_at)
+    VALUES (?, ?, ?)
+  `);
+  for (const [key, value] of Object.entries(APP_CONFIG_DEFAULTS)) {
+    insertConfig.run(key, value, now);
+  }
+
+  const insertDepartment = database.prepare(`
+    INSERT OR IGNORE INTO departments (code, name, color, is_active)
+    VALUES (?, ?, ?, 1)
+  `);
+  for (const [code, name, color] of [
+    ['ECE', 'Electronics and Communication Engineering', '#667eea'],
+    ['CSE', 'Computer Science Engineering', '#764ba2'],
+    ['EE(VLSI)', 'Electronics Engineering (VLSI Design and Technology)', '#3498db'],
+    ['AIDS', 'Artificial Intelligence and Data Science', '#667eea'],
+    ['CSE(CS)', 'Computer Science Engineering (Cyber Security)', '#667eea'],
+  ] as Array<[string, string, string]>) {
+    insertDepartment.run(code, name, color);
+  }
+
+  database.prepare(`
+    INSERT OR IGNORE INTO format_settings (id, default_format, allowed_formats, bulk_format, updated_at)
+    VALUES (1, 'message', '["message","pdf","image"]', 'same_as_individual', ?)
+  `).run(now);
+
+  const userCount = Number((database.prepare('SELECT COUNT(*) AS count FROM users').get() as { count?: number } | undefined)?.count || 0);
+  const defaultEmail = normalizeLoginEmail(DEFAULT_SYSTEM_ADMIN_EMAIL);
+  const defaultPassword = String(DEFAULT_SYSTEM_ADMIN_PASSWORD || '').trim();
+  if (!userCount && defaultEmail && defaultPassword) {
+    database.prepare(`
+      INSERT INTO users (
+        email, login_email, password_hash, name, role, department, year_level, max_students, can_upload_students, is_active
+      ) VALUES (?, ?, ?, ?, 'admin', NULL, 1, 30, 1, 1)
+    `).run(
+      defaultEmail,
+      defaultEmail,
+      hashPassword(defaultPassword),
+      'System Administrator',
+    );
+  }
+}
+
+seedInitialData(liveDb);
 
 export function getUserByIdentifier(identifier: string) {
   const ident = String(identifier || '').trim();
@@ -4417,7 +4744,12 @@ export function updateNotificationStatesForUser(userEmail: string, notificationK
     INSERT INTO notification_states (user_email, notification_key, status, updated_at)
     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(user_email, notification_key)
-    DO UPDATE SET status = excluded.status, updated_at = CURRENT_TIMESTAMP
+    DO UPDATE SET
+      status = CASE
+        WHEN notification_states.status = 'deleted' AND excluded.status = 'read' THEN notification_states.status
+        ELSE excluded.status
+      END,
+      updated_at = CURRENT_TIMESTAMP
   `);
   const transaction = db.transaction((keys: string[]) => {
     for (const key of keys) stmt.run(safeEmail, key, status);

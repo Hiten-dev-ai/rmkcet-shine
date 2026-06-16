@@ -327,11 +327,11 @@ a:hover { color: var(--accent); }
   width: 100%;
 }
 .logo-image { 
-  width: 190px;
-  max-width: 190px;
-  height: 130px;
-  min-height: 130px;
-  max-height: 130px;
+  width: 218px;
+  max-width: 218px;
+  height: 158px;
+  min-height: 158px;
+  max-height: 158px;
   background-image: url('../assets/shine-logo-optimized.png');
   background-repeat: no-repeat;
   background-position: center;
@@ -2468,8 +2468,8 @@ body.light-theme .global-footer {
 }
 
 .global-footer-inner {
-  min-height: 72px;
-  padding: 12px 28px;
+  min-height: 58px;
+  padding: 8px 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2480,15 +2480,18 @@ body.light-theme .global-footer {
 .global-footer-left {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
+  min-width: 0;
 }
 
 .global-footer-banner-image {
-  max-height: 60px;
+  height: 42px;
+  max-width: min(260px, 42vw);
   width: auto;
   display: block;
-  transform: scale(1.32);
-  transform-origin: left center;
+  object-fit: contain;
+  object-position: left center;
+  flex: 0 0 auto;
   opacity: .88;
 }
 
@@ -2500,6 +2503,7 @@ body.light-theme .global-footer-banner-image {
   font-size: .76rem;
   color: var(--text-dim);
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .global-footer-links {
@@ -3305,8 +3309,10 @@ body.light-theme .tutorial-card-meta {
   .test-status-button {
     width: 100%;
   }
-  .global-footer-inner { min-height: 64px; padding: 10px 16px; }
-  .global-footer-banner-image { max-height: 51px; transform: scale(1.2); }
+  .global-footer-inner { min-height: 52px; padding: 8px 16px; }
+  .global-footer-left { gap: 10px; }
+  .global-footer-banner-image { height: 36px; max-width: min(220px, 62vw); }
+  .global-footer-text { white-space: normal; }
   .login-layout {
     --login-triangle-span: 74vw;
   }

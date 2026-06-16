@@ -370,6 +370,17 @@ export interface CounselorOverviewPayload {
   pendingNotices: NoticeRecord[];
 }
 
+export interface LinkedCounselorNotificationPayload {
+  user: {
+    email: string;
+    name: string;
+    department: string;
+    year_level: number;
+  };
+  overview: CounselorOverviewPayload;
+  tests: CounselorVisibleTestRecord[];
+}
+
 export interface CounselorActivityRow {
   email: string;
   name: string;
@@ -870,4 +881,5 @@ export interface BootstrapPayload {
   };
   counselorOverview?: CounselorOverviewPayload | null;
   counselorTests?: CounselorVisibleTestRecord[];
+  linkedCounselorNotifications?: LinkedCounselorNotificationPayload | null;
 }

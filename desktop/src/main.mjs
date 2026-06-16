@@ -1,22 +1,32 @@
 import http from 'node:http';
 import https from 'node:https';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, BrowserView, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, screen, shell, ipcMain } from 'electron';
+const require = createRequire(import.meta.url);
+const electron = require('electron');
+const { autoUpdater } = require('electron-updater');
+
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, screen, shell, ipcMain } = electron;
+const EmbeddedBrowserView = electron.BrowserView || electron.WebContentsView;
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(currentDir, '..');
 const repoRoot = resolve(desktopRoot, '..');
 const WHATSAPP_DESKTOP_APP_ID = '5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App';
 const APP_USER_MODEL_ID = String(process.env.SHINE_DESKTOP_APP_ID || 'dev.rmkcet.shine').trim();
+const DEFAULT_LOCATOR_CSV_URL = 'https://drive.google.com/uc?export=download&id=1K1YZVkPF42X2F5oA6_ZQYfrB57JHhxma';
 const packagedReleaseConfigPath = resolve(process.resourcesPath, 'release-config.json');
 const isPackagedDesktopApp = app.isPackaged;
 const desktopSettingsPath = resolve(app.getPath('userData'), 'desktop-settings.json');
 const desktopUpdateRoot = resolve(app.getPath('userData'), 'updates');
+const desktopUpdateStatusHtmlPath = resolve(app.getPath('userData'), 'update-status.html');
+const desktopDiagnosticsLogPath = resolve(app.getPath('userData'), 'desktop-diagnostics.log');
 const desktopAppLock = app.requestSingleInstanceLock();
 
 const DEFAULT_DESKTOP_SETTINGS = {
@@ -28,8 +38,9 @@ const DEFAULT_DESKTOP_SETTINGS = {
   autoInstallUpdatesWhenIdle: true,
   notificationPollMinutes: 30,
   currentServerOriginOverride: '',
-  locatorCsvUrl: '',
+  locatorCsvUrl: DEFAULT_LOCATOR_CSV_URL,
   releaseChannelBaseUrl: '',
+  downloadPageUrl: '',
   higherOfficialDigestDay: 'monday',
   higherOfficialDigestScope: 'allocated',
 };
@@ -61,10 +72,11 @@ function normalizeHost(host) {
 }
 
 const defaultShellHost = (() => {
+  if (desktopMode === 'desktop-app') return '127.0.0.1';
   try {
-    return normalizeHost(new URL(apiOrigin).hostname || '::1');
+    return normalizeHost(new URL(apiOrigin).hostname || '127.0.0.1');
   } catch {
-    return '::1';
+    return '127.0.0.1';
   }
 })();
 
@@ -109,6 +121,7 @@ let mainWindowRef = null;
 let desktopWorkspaceRestoreBounds = null;
 let desktopWorkspaceActive = false;
 let desktopWhatsappView = null;
+let desktopWhatsappViewAttached = false;
 let desktopWhatsappViewLoading = false;
 let floatingSendWindow = null;
 let floatingSendPayload = null;
@@ -160,8 +173,9 @@ function sanitizeDesktopSettings(raw) {
     autoInstallUpdatesWhenIdle: Boolean(source.autoInstallUpdatesWhenIdle ?? DEFAULT_DESKTOP_SETTINGS.autoInstallUpdatesWhenIdle),
     notificationPollMinutes: Math.max(1, Math.min(120, Number(source.notificationPollMinutes || DEFAULT_DESKTOP_SETTINGS.notificationPollMinutes) || DEFAULT_DESKTOP_SETTINGS.notificationPollMinutes)),
     currentServerOriginOverride: normalizeOrigin(source.currentServerOriginOverride),
-    locatorCsvUrl: String(source.locatorCsvUrl || packagedReleaseConfig?.locatorCsvUrl || process.env.SHINE_DESKTOP_LOCATOR_CSV_URL || '').trim(),
+    locatorCsvUrl: String(source.locatorCsvUrl || packagedReleaseConfig?.locatorCsvUrl || process.env.SHINE_DESKTOP_LOCATOR_CSV_URL || DEFAULT_LOCATOR_CSV_URL).trim(),
     releaseChannelBaseUrl: String(source.releaseChannelBaseUrl || packagedReleaseConfig?.releaseChannelBaseUrl || '').trim(),
+    downloadPageUrl: String(source.downloadPageUrl || packagedReleaseConfig?.downloadPageUrl || '').trim(),
     higherOfficialDigestDay: ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].includes(String(source.higherOfficialDigestDay || '').trim().toLowerCase())
       ? String(source.higherOfficialDigestDay).trim().toLowerCase()
       : 'monday',
@@ -201,15 +215,18 @@ let desktopSettings = readDesktopSettingsSync();
 function applyLoginItemSettings(settings = desktopSettings) {
   if (process.platform !== 'win32') return;
   try {
+    const enabled = Boolean(settings.launchAtWindowsStartup);
     app.setLoginItemSettings({
-      openAtLogin: Boolean(settings.launchAtWindowsStartup),
+      openAtLogin: enabled,
       path: process.execPath,
-      args: ['--hidden'],
+      args: enabled ? ['--hidden'] : [],
     });
   } catch {
     // Ignore unsupported startup registration failures.
   }
 }
+
+applyLoginItemSettings(desktopSettings);
 
 function parseCsvLine(line) {
   const cells = [];
@@ -296,7 +313,7 @@ async function waitForApiOrigin(origin, attempts = 80, intervalMs = 500) {
 }
 
 function getReleaseChannelBaseUrl() {
-  return String(packagedReleaseConfig?.releaseChannelBaseUrl || desktopSettings.releaseChannelBaseUrl || '').trim()
+  return String(desktopSettings.releaseChannelBaseUrl || packagedReleaseConfig?.releaseChannelBaseUrl || '').trim()
     || `${apiOrigin}/api/desktop/installer`;
 }
 
@@ -327,8 +344,10 @@ async function resolveServerOriginWithLocator() {
       if (locatorOrigin && await probeApiOrigin(locatorOrigin)) {
         desktopSettings = await writeDesktopSettings({
           ...desktopSettings,
+          locatorCsvUrl,
           currentServerOriginOverride: locatorOrigin,
           releaseChannelBaseUrl: String(locator.releaseChannelBaseUrl || '').trim(),
+          downloadPageUrl: String(locator.downloadPageUrl || '').trim(),
         });
         apiOrigin = locatorOrigin;
         return { online: true, apiOrigin, source: 'locator', locator, error: '' };
@@ -353,22 +372,152 @@ let appTray = null;
 let appIsQuitting = false;
 let pendingUpdateInfo = null;
 let updateInstallInProgress = false;
+let desktopUpdateCheckTimer = null;
+const cachedDesktopIconPaths = new Map();
+const cachedDesktopIconImages = new Map();
 
 if (!desktopAppLock) {
   app.quit();
 }
 app.setAppUserModelId(APP_USER_MODEL_ID);
 
-function getDesktopIconPath() {
+function getDesktopIconPath(kind = 'window') {
+  const cacheKey = String(kind || 'window');
+  const cachedPath = cachedDesktopIconPaths.get(cacheKey);
+  if (cachedPath && existsSync(cachedPath)) return cachedPath;
+  const resourceRoot = process.resourcesPath || desktopRoot;
+  const candidatesByKind = {
+    notification: [
+      resolve(resourceRoot, 'assets', 'icon.png'),
+      resolve(desktopRoot, 'assets', 'icon.png'),
+      resolve(resourceRoot, 'assets', 'icon.ico'),
+      resolve(desktopRoot, 'assets', 'icon.ico'),
+    ],
+    tray: process.platform === 'win32' ? [
+      resolve(resourceRoot, 'assets', 'icon.ico'),
+      resolve(desktopRoot, 'assets', 'icon.ico'),
+      resolve(resourceRoot, 'assets', 'icon.png'),
+      resolve(desktopRoot, 'assets', 'icon.png'),
+    ] : [
+      resolve(resourceRoot, 'assets', 'icon.png'),
+      resolve(desktopRoot, 'assets', 'icon.png'),
+      resolve(resourceRoot, 'assets', 'icon.ico'),
+      resolve(desktopRoot, 'assets', 'icon.ico'),
+    ],
+    window: process.platform === 'win32' ? [
+      resolve(resourceRoot, 'assets', 'icon.ico'),
+      resolve(desktopRoot, 'assets', 'icon.ico'),
+      resolve(resourceRoot, 'assets', 'icon.png'),
+      resolve(desktopRoot, 'assets', 'icon.png'),
+    ] : [
+      resolve(resourceRoot, 'assets', 'icon.png'),
+      resolve(desktopRoot, 'assets', 'icon.png'),
+      resolve(resourceRoot, 'assets', 'icon.ico'),
+      resolve(desktopRoot, 'assets', 'icon.ico'),
+    ],
+  };
   const candidates = [
-    resolve(desktopRoot, 'assets', 'icon.ico'),
-    resolve(desktopRoot, 'assets', 'icon.png'),
-    resolve(process.resourcesPath || desktopRoot, 'assets', 'icon.ico'),
-    resolve(process.resourcesPath || desktopRoot, 'assets', 'icon.png'),
+    ...(candidatesByKind[cacheKey] || candidatesByKind.window),
     resolve(clientDistRoot, 'assets', 'shine-logo.png'),
     resolve(repoRoot, 'client', 'assets', 'shine-logo-optimized.png'),
   ];
-  return candidates.find((candidate) => existsSync(candidate)) || '';
+  const iconPath = candidates.find((candidate) => existsSync(candidate)) || '';
+  cachedDesktopIconPaths.set(cacheKey, iconPath);
+  return iconPath;
+}
+
+function getDesktopIconImage(kind = 'window', size = 256) {
+  const iconPath = getDesktopIconPath(kind);
+  if (!iconPath) return nativeImage.createEmpty();
+  const cacheKey = `${kind}:${iconPath}`;
+  let image = cachedDesktopIconImages.get(cacheKey);
+  if (!image || image.isEmpty()) {
+    image = nativeImage.createFromPath(iconPath);
+    cachedDesktopIconImages.set(cacheKey, image);
+  }
+  if (!image || image.isEmpty()) return nativeImage.createEmpty();
+  return size ? image.resize({ width: size, height: size }) : image;
+}
+
+async function writeDesktopDiagnosticsLine(message) {
+  try {
+    await mkdir(dirname(desktopDiagnosticsLogPath), { recursive: true });
+    await writeFile(
+      desktopDiagnosticsLogPath,
+      `[${new Date().toISOString()}] ${message}\n`,
+      { flag: 'a' },
+    );
+  } catch {
+    // Diagnostics must never block app startup.
+  }
+}
+
+function logDesktopIconDiagnostics() {
+  void writeDesktopDiagnosticsLine([
+    `mode=${desktopMode}`,
+    `appVersion=${app.getVersion()}`,
+    `appUserModelId=${APP_USER_MODEL_ID}`,
+    `execPath=${process.execPath}`,
+    `resourcesPath=${process.resourcesPath || ''}`,
+    `windowIcon=${getDesktopIconPath('window')}`,
+    `trayIcon=${getDesktopIconPath('tray')}`,
+    `notificationIcon=${getDesktopIconPath('notification')}`,
+  ].join(' | '));
+}
+
+function refreshWindowsShellIconCache() {
+  if (process.platform !== 'win32' || !isPackagedDesktopApp) return;
+  try {
+    const result = spawnSync('ie4uinit.exe', ['-show'], {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 3500,
+    });
+    void writeDesktopDiagnosticsLine(`shellIconCacheRefresh=ie4uinit -show | status=${result.status ?? 'unknown'} | signal=${result.signal || ''}`);
+  } catch (error) {
+    void writeDesktopDiagnosticsLine(`shellIconCacheRefreshFailed=${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+function refreshWindowsShortcutIcons() {
+  if (process.platform !== 'win32' || !isPackagedDesktopApp) return;
+  const iconPath = getDesktopIconPath('window');
+  if (!iconPath || !existsSync(iconPath)) return;
+  const shortcutNames = [
+    'RMKCET Shine.lnk',
+    'RMKCET Shine Desktop.lnk',
+    'rmkcet-shine-desktop.lnk',
+    'rmkcet_shine_app.lnk',
+  ];
+  const shortcutRoots = [
+    app.getPath('desktop'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'RMKCET Shine'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'StartMenu'),
+  ];
+  let refreshedCount = 0;
+  for (const root of shortcutRoots) {
+    for (const name of shortcutNames) {
+      const shortcutPath = resolve(root, name);
+      if (!existsSync(shortcutPath)) continue;
+      try {
+        shell.writeShortcutLink(shortcutPath, 'update', {
+          target: process.execPath,
+          cwd: dirname(process.execPath),
+          description: 'RMKCET Shine',
+          icon: iconPath,
+          iconIndex: 0,
+          appUserModelId: APP_USER_MODEL_ID,
+        });
+        refreshedCount += 1;
+        void writeDesktopDiagnosticsLine(`shortcutIconRefreshed=${shortcutPath} | icon=${iconPath}`);
+      } catch (error) {
+        void writeDesktopDiagnosticsLine(`shortcutIconRefreshFailed=${shortcutPath} | ${error instanceof Error ? error.message : 'unknown error'}`);
+      }
+    }
+  }
+  if (refreshedCount > 0) refreshWindowsShellIconCache();
 }
 
 function restoreMainWindow() {
@@ -386,7 +535,7 @@ function showDesktopNotification(payload = {}) {
   const notification = new Notification({
     title,
     body,
-    icon: getDesktopIconPath() || undefined,
+    icon: getDesktopIconPath('notification') || getDesktopIconImage('notification', 256),
     silent: Boolean(payload.silent),
   });
   notification.on('click', restoreMainWindow);
@@ -414,14 +563,20 @@ function updateTrayMenu() {
 
 function createTray() {
   if (appTray) return appTray;
-  const iconPath = getDesktopIconPath();
-  const image = existsSync(iconPath)
-    ? nativeImage.createFromPath(iconPath)
-    : nativeImage.createEmpty();
-  appTray = new Tray(image.resize({ width: 16, height: 16 }));
+  const trayIconPath = getDesktopIconPath('tray');
+  appTray = new Tray(process.platform === 'win32' && trayIconPath ? trayIconPath : getDesktopIconImage('tray', 16));
   appTray.on('click', restoreMainWindow);
   updateTrayMenu();
   return appTray;
+}
+
+function scheduleDesktopUpdateChecks() {
+  if (!isPackagedDesktopApp || desktopMode !== 'desktop-app' || desktopUpdateCheckTimer) return;
+  const intervalMinutes = Math.max(10, Math.min(120, Number(desktopSettings.notificationPollMinutes || 30) || 30));
+  desktopUpdateCheckTimer = setInterval(() => {
+    if (!desktopSettings.updateChecksEnabled || updateInstallInProgress) return;
+    void checkDesktopUpdate({ quiet: true });
+  }, intervalMinutes * 60 * 1000);
 }
 
 function openDesktopSettings() {
@@ -465,6 +620,64 @@ async function showNoInternetPage() {
   await mainWindowRef.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildNoInternetHtml())}`);
 }
 
+function buildStartupUpdateHtml(state = {}) {
+  const title = escapeHtml(state.title || 'Preparing RMKCET Shine');
+  const message = escapeHtml(state.message || 'Checking for the latest desktop update before opening the app.');
+  const detail = escapeHtml(state.detail || '');
+  const phase = escapeHtml(state.phase || 'Update check');
+  const progress = Number.isFinite(Number(state.progress))
+    ? Math.max(0, Math.min(100, Math.round(Number(state.progress))))
+    : null;
+  const progressLabel = progress === null ? 'Working...' : `${progress}%`;
+  const progressStyle = progress === null
+    ? 'width:42%;animation:move 1.25s ease-in-out infinite'
+    : `width:${progress}%`;
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>RMKCET Shine - Updating</title>
+  <style>
+    :root{font-family:Inter,Segoe UI,system-ui,sans-serif;color:#172033;background:#eef3f8}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:32px;background:linear-gradient(180deg,#f7fafc,#e9f0f7)}
+    main{width:min(760px,100%);border:1px solid #d7e0ea;border-radius:18px;padding:30px;background:#fff;box-shadow:0 22px 70px rgba(15,23,42,.14)}
+    .top{display:flex;align-items:center;gap:16px;margin-bottom:22px}.mark{width:54px;height:54px;border-radius:14px;display:grid;place-items:center;background:#0f766e;color:#fff;font-size:28px;font-weight:900;box-shadow:0 14px 26px rgba(15,118,110,.18)}
+    .brand{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:800}.phase{margin-top:3px;font-size:.82rem;color:#0f766e;font-weight:800}
+    h1{margin:0 0 10px;font-size:1.55rem;letter-spacing:0;color:#111827}p{margin:0;color:#526173;line-height:1.6}.detail{margin-top:18px;padding:13px 15px;border-radius:12px;background:#f8fafc;border:1px solid #e2e8f0;color:#334155;font-size:.9rem}
+    .meter{margin-top:24px}.bar{height:10px;border-radius:999px;overflow:hidden;background:#e2e8f0}.fill{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#0f766e,#f59e0b);${progressStyle}}
+    .meta{display:flex;justify-content:space-between;gap:12px;margin-top:10px;color:#64748b;font-size:.78rem;font-weight:700}
+    @keyframes move{0%{transform:translateX(-110%)}100%{transform:translateX(250%)}}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="top">
+      <div class="mark">S</div>
+      <div>
+        <div class="brand">RMKCET Shine Desktop</div>
+        <div class="phase">${phase}</div>
+      </div>
+    </div>
+    <h1>${title}</h1>
+    <p>${message}</p>
+    ${detail ? `<div class="detail">${detail}</div>` : ''}
+    <div class="meter">
+      <div class="bar"><span class="fill"></span></div>
+      <div class="meta"><span>Please keep Shine open</span><span>${progressLabel}</span></div>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+async function showStartupUpdatePage(state = {}) {
+  if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
+  await writeFile(desktopUpdateStatusHtmlPath, buildStartupUpdateHtml(state), 'utf8');
+  await mainWindowRef.loadFile(desktopUpdateStatusHtmlPath);
+  mainWindowRef.show();
+  maximizeMainWindow();
+}
+
 function compareVersions(left, right) {
   const leftParts = String(left || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
   const rightParts = String(right || '0.0.0').split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
@@ -485,30 +698,244 @@ function buildManifestUrl(baseUrl) {
   return `${raw}/api/desktop/installer/meta`;
 }
 
+function buildUpdaterFeedUrl(baseUrl) {
+  const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  if (/\/latest\.ya?ml$/i.test(raw)) return raw.replace(/\/latest\.ya?ml$/i, '');
+  if (/\/api\/desktop\/updater$/i.test(raw)) return raw;
+  if (/\/api\/desktop\/installer\/meta$/i.test(raw)) return raw.replace(/\/api\/desktop\/installer\/meta$/i, '/api/desktop/updater');
+  if (/\/api\/desktop\/installer$/i.test(raw)) return raw.replace(/\/api\/desktop\/installer$/i, '/api/desktop/updater');
+  return `${raw}/api/desktop/updater`;
+}
+
+function getDesktopUpdaterFeedUrl() {
+  return buildUpdaterFeedUrl(getReleaseChannelBaseUrl());
+}
+
+const desktopUpdaterLogger = {
+  info(message) {
+    console.log(`[desktop-updater] ${message}`);
+  },
+  warn(message) {
+    console.warn(`[desktop-updater] ${message}`);
+  },
+  error(message) {
+    console.error(`[desktop-updater] ${message}`);
+  },
+  debug(message) {
+    if (process.env.SHINE_DESKTOP_UPDATE_DEBUG === '1') console.log(`[desktop-updater] ${message}`);
+  },
+};
+
+let desktopUpdaterConfiguredFor = '';
+let desktopUpdaterEventsAttached = false;
+
+function attachDesktopUpdaterEvents() {
+  if (desktopUpdaterEventsAttached) return;
+  desktopUpdaterEventsAttached = true;
+  autoUpdater.on('download-progress', (progress = {}) => {
+    if (!updateInstallInProgress) return;
+    const percent = Number(progress.percent || 0);
+    const transferredMb = Math.round(Number(progress.transferred || 0) / 1024 / 1024);
+    const totalMb = Math.round(Number(progress.total || 0) / 1024 / 1024);
+    void showStartupUpdatePage({
+      phase: 'Downloading update',
+      title: `Downloading Shine ${pendingUpdateInfo?.version || 'update'}`,
+      message: 'The desktop app is downloading the latest installer from the release channel.',
+      detail: totalMb > 0 ? `${transferredMb} MB of ${totalMb} MB` : getDesktopUpdaterFeedUrl(),
+      progress: Number.isFinite(percent) ? percent : 0,
+    });
+  });
+  autoUpdater.on('update-downloaded', () => {
+    if (!updateInstallInProgress) return;
+    void showStartupUpdatePage({
+      phase: 'Installing update',
+      title: `Installing Shine ${pendingUpdateInfo?.version || 'update'}`,
+      message: 'Shine will launch the updater and reopen automatically.',
+      detail: 'Windows may ask for administrator permission to complete the update.',
+      progress: 100,
+    });
+  });
+  autoUpdater.on('error', (error) => {
+    desktopUpdaterLogger.error(error instanceof Error ? error.message : String(error));
+  });
+}
+
+function configureDesktopUpdater() {
+  if (!isPackagedDesktopApp || desktopMode !== 'desktop-app') return '';
+  const feedUrl = getDesktopUpdaterFeedUrl();
+  if (!/^https?:\/\//i.test(feedUrl)) return '';
+  if (desktopUpdaterConfiguredFor === feedUrl) return feedUrl;
+  autoUpdater.logger = desktopUpdaterLogger;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.allowDowngrade = false;
+  autoUpdater.disableWebInstaller = true;
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: feedUrl,
+  });
+  attachDesktopUpdaterEvents();
+  desktopUpdaterConfiguredFor = feedUrl;
+  return feedUrl;
+}
+
+function quoteCmdArg(value) {
+  return `"${String(value || '').replace(/"/g, '""')}"`;
+}
+
+function quotePowerShellSingle(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+function buildWindowsUpdateHandoffCommand({ installerPath, appPath, logPath }) {
+  const installer = quoteCmdArg(installerPath);
+  const appExe = quoteCmdArg(appPath);
+  const logFile = quoteCmdArg(logPath);
+  const installerPs = quotePowerShellSingle(installerPath);
+  const logFilePs = quotePowerShellSingle(logPath);
+  const elevatedInstallCommand = [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Start-Process -FilePath ${installerPs} -ArgumentList @('/S','/currentuser') -Verb RunAs -Wait -PassThru`,
+    `$code = if ($null -ne $p) { $p.ExitCode } else { -9999 }`,
+    `Add-Content -LiteralPath ${logFilePs} -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Elevated installer exit code: $code"`,
+    'exit $code',
+  ].join('; ');
+  return [
+    'set "SEE_MASK_NOZONECHECKS=1"',
+    `echo [%date% %time%] Starting Shine updater handoff > ${logFile}`,
+    `echo [%date% %time%] Installer: ${installer} >> ${logFile}`,
+    `echo [%date% %time%] App: ${appExe} >> ${logFile}`,
+    `if not exist ${installer} (echo [%date% %time%] Installer file is missing. >> ${logFile} & if exist ${appExe} start "" ${appExe} & exit /b 2)`,
+    'timeout /t 2 /nobreak >nul',
+    `echo [%date% %time%] Requesting administrator rights for installer. >> ${logFile}`,
+    `powershell.exe -NoProfile -Command ${quoteCmdArg(elevatedInstallCommand)} >> ${logFile} 2>&1`,
+    'set "SHINE_INSTALL_EXIT=!ERRORLEVEL!"',
+    `echo [%date% %time%] Installer exit code: !SHINE_INSTALL_EXIT! >> ${logFile}`,
+    'timeout /t 2 /nobreak >nul',
+    `if exist ${appExe} (echo [%date% %time%] Relaunching Shine. >> ${logFile} & start "" ${appExe}) else (echo [%date% %time%] App path missing after install; cannot relaunch. >> ${logFile})`,
+    'exit /b !SHINE_INSTALL_EXIT!',
+  ].join(' & ');
+}
+
+function getUpdateInstallerFileName(updateInfo) {
+  return String(updateInfo?.manifest?.files?.exe?.fileName || `RMKCET-Shine-Setup-${updateInfo?.version || 'latest'}.exe`).replace(/[\\/:*?"<>|]+/g, '-');
+}
+
+function getUpdateInstallerCachePaths(updateInfo) {
+  const targetDir = resolve(desktopUpdateRoot, String(updateInfo?.version || 'latest'));
+  const installerPath = resolve(targetDir, getUpdateInstallerFileName(updateInfo));
+  return {
+    targetDir,
+    installerPath,
+    metadataPath: resolve(targetDir, 'installer-cache.json'),
+    logPath: resolve(targetDir, 'install.log'),
+  };
+}
+
+function getExpectedInstallerSize(updateInfo) {
+  const raw = Number(updateInfo?.manifest?.files?.exe?.size || updateInfo?.manifest?.files?.exe?.bytes || 0);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+function getExpectedInstallerSha256(updateInfo) {
+  return String(updateInfo?.manifest?.files?.exe?.sha256 || updateInfo?.manifest?.files?.exe?.hash || '').trim().toLowerCase();
+}
+
+async function hashLocalFileSha256(filePath) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', rejectPromise);
+    stream.on('end', () => resolvePromise(hash.digest('hex')));
+  });
+}
+
+async function readCachedInstallerMetadata(metadataPath) {
+  try {
+    return JSON.parse(await readFile(metadataPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function validateCachedInstaller(updateInfo, paths) {
+  const details = await stat(paths.installerPath).catch(() => null);
+  if (!details?.isFile?.() || details.size <= 0) return { valid: false, reason: 'missing' };
+
+  const expectedSize = getExpectedInstallerSize(updateInfo);
+  if (expectedSize > 0 && details.size !== expectedSize) {
+    return { valid: false, reason: `size mismatch (${details.size}/${expectedSize})` };
+  }
+
+  const expectedSha256 = getExpectedInstallerSha256(updateInfo);
+  if (expectedSha256) {
+    const actualSha256 = await hashLocalFileSha256(paths.installerPath);
+    if (actualSha256 !== expectedSha256) return { valid: false, reason: 'sha256 mismatch' };
+    return { valid: true, reason: 'sha256 match', size: details.size, sha256: actualSha256 };
+  }
+  if (expectedSize > 0) return { valid: true, reason: 'size match', size: details.size };
+
+  const metadata = await readCachedInstallerMetadata(paths.metadataPath);
+  const metadataMatches = metadata
+    && String(metadata.version || '') === String(updateInfo?.version || '')
+    && String(metadata.exeUrl || '') === String(updateInfo?.exeUrl || '')
+    && Number(metadata.size || 0) === details.size;
+  return metadataMatches
+    ? { valid: true, reason: 'metadata match', size: details.size }
+    : { valid: false, reason: 'no trusted cache metadata' };
+}
+
+async function writeCachedInstallerMetadata(updateInfo, paths, size, sha256 = '') {
+  await writeFile(paths.metadataPath, JSON.stringify({
+    version: String(updateInfo?.version || ''),
+    exeUrl: String(updateInfo?.exeUrl || ''),
+    fileName: getUpdateInstallerFileName(updateInfo),
+    size,
+    sha256,
+    cachedAt: new Date().toISOString(),
+  }, null, 2), 'utf8');
+}
+
 async function checkDesktopUpdate(options = {}) {
-  if (!desktopSettings.updateChecksEnabled && !options.interactive) {
+  if (!desktopSettings.updateChecksEnabled && !options.interactive && !options.force) {
     return { available: false, skipped: true, reason: 'Update checks are disabled.' };
   }
-  const manifestUrl = buildManifestUrl(getReleaseChannelBaseUrl());
+  const feedUrl = configureDesktopUpdater();
+  const manifestUrl = feedUrl ? `${feedUrl}/latest.yml` : buildManifestUrl(getReleaseChannelBaseUrl());
+  const currentVersion = String(app.getVersion() || process.env.SHINE_DESKTOP_APP_VERSION || '0.1.0').trim();
+  if (!feedUrl) {
+    return {
+      available: false,
+      currentVersion,
+      error: isPackagedDesktopApp ? 'Desktop updater feed is not configured.' : 'Update checks run only in the packaged desktop app.',
+      manifestUrl,
+    };
+  }
   try {
-    const manifest = await fetchJson(manifestUrl, 10000);
-    const latestVersion = String(manifest.version || '').trim();
-    const currentVersion = String(app.getVersion() || process.env.SHINE_DESKTOP_APP_VERSION || '0.1.0').trim();
-    const exeUrl = String(manifest.exeUrl || '').trim()
-      || (manifest.files?.exe?.relativePath ? new URL(manifest.files.exe.relativePath, manifestUrl).toString() : '');
-    const available = Boolean(latestVersion && exeUrl && compareVersions(latestVersion, currentVersion) > 0);
+    const result = await autoUpdater.checkForUpdates();
+    const updateInfo = result?.updateInfo || null;
+    const latestVersion = String(updateInfo?.version || currentVersion).trim();
+    const available = Boolean(latestVersion && compareVersions(latestVersion, currentVersion) > 0);
     const info = {
       available,
       currentVersion,
       version: latestVersion || currentVersion,
       manifestUrl,
-      exeUrl,
-      releaseNotes: Array.isArray(manifest.releaseNotes) ? manifest.releaseNotes : [],
-      manifest,
+      exeUrl: '',
+      releaseNotes: Array.isArray(updateInfo?.releaseNotes) ? updateInfo.releaseNotes : [],
+      manifest: updateInfo,
     };
     pendingUpdateInfo = available ? info : null;
     if (available) {
-      showDesktopNotification({ title: 'Shine update available', body: `Version ${latestVersion} is ready to install.` });
+      if (!options.quiet) {
+        showDesktopNotification({ title: 'Shine update available', body: `Version ${latestVersion} is ready to install.` });
+      }
+      if (options.install) {
+        const installResult = await installDesktopUpdate(info);
+        return { ...info, installing: installResult.success, installResult };
+      }
       if (desktopSettings.autoInstallUpdatesWhenIdle && !desktopWorkspaceActive && !floatingSendWindow) {
         void promptAndInstallDesktopUpdate(info);
       }
@@ -539,41 +966,96 @@ async function checkDesktopUpdate(options = {}) {
 }
 
 async function installDesktopUpdate(updateInfo = pendingUpdateInfo) {
-  if (!updateInfo?.available || !updateInfo.exeUrl) {
-    return { success: false, error: 'No desktop update is available.' };
+  const targetUpdateInfo = updateInfo?.available ? updateInfo : await checkDesktopUpdate({ force: true, quiet: true });
+  if (!targetUpdateInfo?.available) {
+    return { success: false, error: targetUpdateInfo?.error || 'No desktop update is available.' };
   }
   if (desktopWorkspaceActive || floatingSendWindow) {
-    pendingUpdateInfo = updateInfo;
+    pendingUpdateInfo = targetUpdateInfo;
     return { success: false, deferred: true, error: 'A send workflow is active. The update will wait until it closes.' };
   }
   if (updateInstallInProgress) return { success: false, error: 'Update install is already running.' };
+  if (!configureDesktopUpdater()) return { success: false, error: 'Desktop updater feed is not configured.' };
   updateInstallInProgress = true;
+  pendingUpdateInfo = targetUpdateInfo;
   try {
-    showDesktopNotification({ title: 'Downloading Shine update', body: `Version ${updateInfo.version} is downloading.` });
-    const response = await fetch(updateInfo.exeUrl, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`Installer download failed with HTTP ${response.status}.`);
-    const bytes = Buffer.from(await response.arrayBuffer());
-    const fileName = String(updateInfo.manifest?.files?.exe?.fileName || `RMKCET-Shine-Setup-${updateInfo.version}.exe`).replace(/[\\/:*?"<>|]+/g, '-');
-    const targetDir = resolve(desktopUpdateRoot, String(updateInfo.version || 'latest'));
-    await mkdir(targetDir, { recursive: true });
-    const installerPath = resolve(targetDir, fileName);
-    await writeFile(installerPath, bytes);
-    showDesktopNotification({ title: 'Installing Shine update', body: 'The installer is starting now.' });
-    const child = spawn(installerPath, ['/S'], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false,
+    showDesktopNotification({ title: 'Downloading Shine update', body: `Version ${targetUpdateInfo.version} is downloading.` });
+    await showStartupUpdatePage({
+      phase: 'Downloading update',
+      title: `Downloading Shine ${targetUpdateInfo.version}`,
+      message: 'The desktop app is downloading the latest installer from the release channel.',
+      detail: targetUpdateInfo.manifestUrl || getDesktopUpdaterFeedUrl(),
+      progress: 0,
     });
-    child.unref();
+    await autoUpdater.downloadUpdate();
+    await showStartupUpdatePage({
+      phase: 'Installing update',
+      title: `Installing Shine ${targetUpdateInfo.version}`,
+      message: 'Shine will launch the signed NSIS updater and reopen automatically.',
+      detail: 'Windows may ask for administrator permission to complete the update.',
+      progress: 100,
+    });
+    showDesktopNotification({ title: 'Installing Shine update', body: 'The installer is starting now.' });
     appIsQuitting = true;
-    app.quit();
-    return { success: true, installerPath };
+    autoUpdater.quitAndInstall(true, true);
+    return { success: true };
   } catch (error) {
     updateInstallInProgress = false;
     const message = error instanceof Error ? error.message : 'Update install failed.';
     showDesktopNotification({ title: 'Shine update failed', body: message });
     return { success: false, error: message };
   }
+}
+
+async function runStartupUpdateGate() {
+  if (!isPackagedDesktopApp || desktopMode !== 'desktop-app') {
+    return { checked: false, reason: 'Startup update gate is only for packaged desktop app mode.' };
+  }
+  if (!lastConnectivityState.online) {
+    return { checked: false, reason: 'Server is offline.' };
+  }
+
+  await showStartupUpdatePage({
+    title: 'Checking for Shine updates',
+    message: 'The desktop app is contacting the release channel before opening.',
+    detail: `Server: ${apiOrigin}`,
+  });
+
+  let lastResult = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await showStartupUpdatePage({
+      title: 'Checking for Shine updates',
+      message: `Looking for the latest desktop package. Attempt ${attempt} of 3.`,
+      detail: `Release channel: ${getReleaseChannelBaseUrl()}`,
+    });
+    lastResult = await checkDesktopUpdate({ force: true, quiet: true, install: true });
+    if (lastResult?.installing) {
+      await showStartupUpdatePage({
+        title: 'Installing Shine update',
+        message: `Version ${lastResult.version} is downloading and installing. Shine will restart automatically.`,
+        detail: 'Please do not close this window.',
+      });
+      return { checked: true, installing: true, result: lastResult };
+    }
+    if (!lastResult?.error) {
+      await showStartupUpdatePage({
+        title: 'Shine is up to date',
+        message: 'Opening the desktop app now.',
+        detail: `Installed version: ${lastResult?.currentVersion || app.getVersion()}`,
+      });
+      await delay(650);
+      return { checked: true, updated: false, result: lastResult };
+    }
+    await delay(900);
+  }
+
+  await showStartupUpdatePage({
+    title: 'Update check could not complete',
+    message: 'Shine will open with the installed version. You can check updates again from the tray menu.',
+    detail: lastResult?.error || 'Unknown update check failure.',
+  });
+  await delay(1600);
+  return { checked: true, updated: false, error: lastResult?.error || 'Update check failed.' };
 }
 
 async function promptAndInstallDesktopUpdate(updateInfo) {
@@ -1332,19 +1814,28 @@ function syncEmbeddedWhatsappBounds() {
   const bounds = getEmbeddedWhatsappBounds();
   if (!bounds) return;
   desktopWhatsappView.setBounds(bounds);
-  desktopWhatsappView.setAutoResize({ width: true, height: true });
+  if (typeof desktopWhatsappView.setAutoResize === 'function') {
+    desktopWhatsappView.setAutoResize({ width: true, height: true });
+  }
 }
 
 function collapseEmbeddedWhatsappView() {
   if (!desktopWhatsappView) return;
   desktopWhatsappView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-  desktopWhatsappView.setAutoResize({ width: false, height: false });
+  if (typeof desktopWhatsappView.setAutoResize === 'function') {
+    desktopWhatsappView.setAutoResize({ width: false, height: false });
+  }
 }
 
 function detachDesktopWhatsappView() {
   if (!mainWindowRef || !desktopWhatsappView) return;
   try {
-    mainWindowRef.removeBrowserView(desktopWhatsappView);
+    if (typeof mainWindowRef.removeBrowserView === 'function') {
+      mainWindowRef.removeBrowserView(desktopWhatsappView);
+    } else if (mainWindowRef.contentView && typeof mainWindowRef.contentView.removeChildView === 'function') {
+      mainWindowRef.contentView.removeChildView(desktopWhatsappView);
+    }
+    desktopWhatsappViewAttached = false;
   } catch {
     // Ignore duplicate detach attempts.
   }
@@ -1385,7 +1876,10 @@ function ensureDesktopWhatsappView() {
   if (desktopWhatsappView && !desktopWhatsappView.webContents.isDestroyed()) {
     return desktopWhatsappView;
   }
-  const view = new BrowserView({
+  if (!EmbeddedBrowserView) {
+    throw new Error('This Electron runtime does not expose BrowserView or WebContentsView.');
+  }
+  const view = new EmbeddedBrowserView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1406,8 +1900,12 @@ function attachDesktopWhatsappView() {
   const attachedViews = typeof mainWindowRef.getBrowserViews === 'function'
     ? mainWindowRef.getBrowserViews()
     : [];
-  if (!attachedViews.includes(view)) {
+  if (typeof mainWindowRef.addBrowserView === 'function' && !attachedViews.includes(view)) {
     mainWindowRef.addBrowserView(view);
+    desktopWhatsappViewAttached = true;
+  } else if (!desktopWhatsappViewAttached && mainWindowRef.contentView && typeof mainWindowRef.contentView.addChildView === 'function') {
+    mainWindowRef.contentView.addChildView(view);
+    desktopWhatsappViewAttached = true;
   }
   void clearDesktopWhatsappExitOverlay(view);
   syncEmbeddedWhatsappBounds();
@@ -2575,7 +3073,9 @@ async function hideDesktopSendWorkspaceAnimated(preference = 'default_browser') 
 
   const startTime = Date.now();
   const durationMs = 340;
-  desktopWhatsappView.setAutoResize({ width: false, height: false });
+  if (typeof desktopWhatsappView.setAutoResize === 'function') {
+    desktopWhatsappView.setAutoResize({ width: false, height: false });
+  }
 
   while (true) {
     const elapsed = Date.now() - startTime;
@@ -2635,7 +3135,7 @@ async function createMainWindow() {
     backgroundColor: '#0b1220',
     show: false,
     title: 'RMKCET Shine',
-    icon: getDesktopIconPath() || undefined,
+    icon: getDesktopIconPath('window') || undefined,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
@@ -2658,6 +3158,9 @@ async function createMainWindow() {
   }
 
   attachExternalNavigationGuards(windowRef.webContents, rendererTarget);
+  const startupUpdate = await runStartupUpdateGate();
+  if (startupUpdate.installing) return;
+
   if (lastConnectivityState.online) {
     await windowRef.loadURL(rendererTarget);
   } else {
@@ -2777,6 +3280,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   appIsQuitting = true;
+  if (desktopUpdateCheckTimer) {
+    clearInterval(desktopUpdateCheckTimer);
+    desktopUpdateCheckTimer = null;
+  }
   if (!shellServer) return;
   await new Promise((resolvePromise) => shellServer.close(() => resolvePromise()));
   shellServer = null;
@@ -2790,9 +3297,12 @@ app.whenReady().then(async () => {
   app.setName('RMKCET Shine');
   process.env.SHINE_DESKTOP_APP_VERSION = String(app.getVersion() || '').trim() || '0.1.0';
   applyLoginItemSettings();
+  logDesktopIconDiagnostics();
+  refreshWindowsShortcutIcons();
   createTray();
   try {
     await createMainWindow();
+    scheduleDesktopUpdateChecks();
     if (desktopSettings.updateChecksEnabled) {
       setTimeout(() => void checkDesktopUpdate(), 4500);
     }

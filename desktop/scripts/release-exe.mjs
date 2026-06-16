@@ -7,15 +7,17 @@ import {
   computeDesktopBuildFingerprint,
   desktopBuildFingerprintPath,
   desktopInstallerLatestRoot,
+  getDesktopReleaseVersion,
   getDesktopExeFileName,
+  getNextDesktopReleaseVersion,
   getReleaseManifestFileName,
-  getRootAppVersion,
+  hasPublishedDesktopExe,
   writeRuntimeReleaseConfig,
 } from './release-utils.mjs';
 
 async function getLatestReleaseStatus(fingerprint) {
-  const version = getRootAppVersion();
-  const exePath = resolve(desktopInstallerLatestRoot, getDesktopExeFileName(version));
+  const version = getDesktopReleaseVersion();
+  const exePath = resolve(desktopInstallerLatestRoot, getDesktopExeFileName());
   const manifestPath = resolve(desktopInstallerLatestRoot, getReleaseManifestFileName());
   try {
     const [storedFingerprint, manifest] = await Promise.all([
@@ -35,8 +37,16 @@ async function getLatestReleaseStatus(fingerprint) {
 }
 
 export async function runReleaseExe() {
+  const hadPublishedExe = hasPublishedDesktopExe();
+  process.env.SHINE_DESKTOP_RELEASE_VERSION ||= getNextDesktopReleaseVersion();
   await writeRuntimeReleaseConfig();
   const fingerprint = await computeDesktopBuildFingerprint();
+  const releaseMode = hadPublishedExe ? 'update' : 'bootstrap';
+  console.log(
+    hadPublishedExe
+      ? `[desktop-release] Existing standalone EXE found; publishing update package ${fingerprint.version}.`
+      : `[desktop-release] No standalone EXE found; creating initial standalone EXE ${fingerprint.version}.`,
+  );
   if (process.env.SHINE_DESKTOP_SKIP_UNCHANGED === '1') {
     const status = await getLatestReleaseStatus(fingerprint);
     if (status === 'current') {
@@ -61,6 +71,7 @@ export async function runReleaseExe() {
   const exe = await runMakeExe();
   const published = await runPublishExe({ fingerprint });
   return {
+    releaseMode,
     exe,
     published,
   };

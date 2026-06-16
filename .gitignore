@@ -1,4 +1,5 @@
 .env
+.git.backup/
 node_modules/
 dist/
 logs/
@@ -11,6 +12,9 @@ server/node_modules/
 client/node_modules/
 desktop/node_modules/
 desktop/out/
+desktop/certs/
+desktop/.release-local.env
+desktop/.release-local.cmd
 desktop/runtime/release-config.json
 desktop/.workspace/
 server-out.log

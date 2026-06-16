@@ -27,6 +27,7 @@ export const SHINE_DB_PATH = process.env.SHINE_DB_PATH || resolve(DATA_ROOT, 'rm
 export const APP_NAME = 'RMKCET SHINE';
 export const APP_VERSION = readRootPackageVersion();
 export const DEFAULT_SYSTEM_ADMIN_EMAIL = process.env.DEFAULT_SYSTEM_ADMIN_EMAIL || 'admin@rmkcet.ac.in';
+export const DEFAULT_SYSTEM_ADMIN_PASSWORD = process.env.DEFAULT_SYSTEM_ADMIN_PASSWORD || 'admin123';
 export const SESSION_COOKIE = 'shine_sid';
 export const TEST_MODE_COOKIE = 'shine_test_mode_email';
 export const GOOGLE_STATE_COOKIE = 'shine_google_state';
