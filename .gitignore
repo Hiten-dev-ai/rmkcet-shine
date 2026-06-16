@@ -12,6 +12,7 @@ client/node_modules/
 desktop/node_modules/
 desktop/out/
 desktop/runtime/release-config.json
+desktop/.workspace/
 server-out.log
 client-out.log
 data/*
