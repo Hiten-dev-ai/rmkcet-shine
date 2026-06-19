@@ -15,7 +15,7 @@ import {
   writeRuntimeReleaseConfig,
 } from './release-utils.mjs';
 
-const DEFAULT_APP_ID = 'dev.rmkcet.shine';
+const DEFAULT_APP_ID = 'RMKCET.Shine.App';
 
 function buildUpdaterFeedUrl() {
   const explicit = String(process.env.SHINE_DESKTOP_UPDATER_FEED_URL || process.env.SHINE_DESKTOP_RELEASE_CHANNEL_URL || '').trim();

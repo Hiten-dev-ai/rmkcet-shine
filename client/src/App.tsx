@@ -1,5 +1,6 @@
 import { ChangeEvent, FormEvent, MouseEvent as ReactMouseEvent, Suspense, lazy, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import appCrestLogo from '../assets/logo-optimized.png';
 import appWordmarkLogo from '../assets/shine-logo-optimized.png';
 import {
@@ -98,6 +99,7 @@ import {
   verifyLoginOtp,
   verifyPasswordResetOtp,
   resolveGoogleLoginConflict,
+  saveUserPreferences,
 } from './api';
 import { clearPersistentCacheBucket, readPersistentCacheEntry, seedPersistentCacheEntries, writePersistentCacheEntry } from './readModelCache';
 import {
@@ -120,12 +122,14 @@ import {
   resolveDirectServerUrl,
   runtimeConfig,
   saveDesktopAppSettings,
-  showFloatingSendWindow,
   showDesktopNotification,
+  showFloatingSendWindow,
   showDesktopSendWorkspace,
   startGoogleOauth,
   installDesktopUpdate,
 } from './runtime';
+import { measureAsync } from './performance';
+import { queryKeys } from './queryKeys';
 import type {
   DesktopAppSettings,
   DesktopConnectivityState,
@@ -143,6 +147,19 @@ const MessagesTab = lazy(() => import('./tabs/MessagesTab'));
 const MonitoringTab = lazy(() => import('./tabs/MonitoringTab'));
 const ReportsTab = lazy(() => import('./tabs/ReportsTab'));
 const UsersTab = lazy(() => import('./tabs/UsersTab'));
+const CreditsPage = lazy(() => import('./features/credits/CreditsPage').then((module) => ({ default: module.CreditsPage })));
+const NotificationCenterPage = lazy(() => import('./features/notifications/NotificationCenterPage').then((module) => ({ default: module.NotificationCenterPage })));
+const SupportGuideLauncher = lazy(() => import('./features/tutorial/GuidedTutorial').then((module) => ({ default: module.SupportGuideLauncher })));
+
+const TAB_PRELOADERS: Record<string, () => Promise<unknown>> = {
+  dashboard: () => import('./tabs/DashboardTab'),
+  reports: () => import('./tabs/ReportsTab'),
+  activity: () => import('./tabs/ActivityTab'),
+  cdp: () => import('./tabs/CdpTab'),
+  users: () => import('./tabs/UsersTab'),
+  messages: () => import('./tabs/MessagesTab'),
+  monitoring: () => import('./tabs/MonitoringTab'),
+};
 
 import type {
   ActivityOverviewPayload,
@@ -278,6 +295,8 @@ const ADMIN_TAB_LABELS: Record<string, string> = {
 const DEFAULT_ADMIN_MESSAGES_LIMIT = 300;
 const SCOPE_CACHE_TTL_MS = 30 * 1000;
 const ADMIN_MESSAGES_LIMIT_STEP = 300;
+const MONITORING_CACHE_TTL_MS = 10 * 1000;
+const MONITORING_HISTORY_LIMIT = 75;
 const RESOURCE_TEMPLATES = [
   {
     key: 'counsellor-list',
@@ -378,6 +397,18 @@ type AppNotificationItem = {
   actionTab?: string;
 };
 
+type ForegroundNotificationToast = AppNotificationItem & {
+  expiresAt: number;
+};
+
+type TestNotificationKind =
+  | 'update'
+  | 'test-assigned'
+  | 'notice-assigned'
+  | 'pending-reminder'
+  | 'linked-counselor'
+  | 'digest';
+
 type FieldOrderEntry =
   | { type: 'subject'; label: string; rawKey: string; normalizedKey: string }
   | { type: 'metric'; metricKey: 'failed_subjects' | 'not_attended' | 'gpa'; label: string };
@@ -451,6 +482,29 @@ function applyTheme(theme: 'light' | 'dark') {
   document.body.classList.toggle('light-theme', theme === 'light');
 }
 
+function clampDesktopScale(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.max(0.8, Math.min(1.35, Math.round(numeric * 20) / 20));
+}
+
+function buildSyncedDesktopSettingsPatch(patch: Partial<DesktopAppSettings>) {
+  const allowedKeys: Array<keyof DesktopAppSettings> = [
+    'startMinimizedToTrayOnLogin',
+    'minimizeToTrayOnClose',
+    'desktopNotificationsEnabled',
+    'updateChecksEnabled',
+    'autoInstallUpdatesWhenIdle',
+    'higherOfficialDigestDay',
+    'higherOfficialDigestScope',
+  ];
+  return Object.fromEntries(
+    allowedKeys
+      .filter((key) => Object.prototype.hasOwnProperty.call(patch, key))
+      .map((key) => [key, patch[key]]),
+  );
+}
+
 function shouldUseBootLoaderOnInitialLoad() {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -461,6 +515,16 @@ function shouldUseBootLoaderOnInitialLoad() {
   } catch {
     return false;
   }
+}
+
+function waitForImageAsset(src: string) {
+  return new Promise<void>((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve();
+    image.onerror = () => resolve();
+    image.src = src;
+    if (image.complete) resolve();
+  });
 }
 
 function markAuthStateAuthenticated() {
@@ -537,6 +601,28 @@ function getTabsForUser(user: AuthUser | null) {
     return ['reports', 'notices', 'cdp', 'activity', 'subjects', 'users', 'messages'];
   }
   return ['recent-tests', 'notices', 'test-database', 'message-history'];
+}
+
+function isTruthyAppConfig(value: unknown, fallback = true) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return String(value).trim().toLowerCase() === 'true';
+}
+
+function isSupportGuideRole(role: Role | undefined) {
+  return role === 'counselor' || role === 'hod' || role === 'principal';
+}
+
+function isSupportGuideEnabledForUser(user: AuthUser | null, config: BootstrapPayload['appConfig'] | null | undefined) {
+  if (!user || !isSupportGuideRole(user.role)) return false;
+  if (!isTruthyAppConfig(config?.tutorial_master_enabled, true)) return false;
+  if (user.role === 'counselor') return isTruthyAppConfig(config?.tutorial_counselor_enabled, true);
+  if (user.role === 'hod') return isTruthyAppConfig(config?.tutorial_hod_enabled, true);
+  if (user.role === 'principal') return isTruthyAppConfig(config?.tutorial_principal_enabled, true);
+  return false;
+}
+
+function buildSupportGuideFirstPromptKey(user: AuthUser) {
+  return `shine_support_guide_first_prompt:${user.email || user.name || 'user'}:${user.role}`;
 }
 
 function getDefaultTab(user: AuthUser | null) {
@@ -641,13 +727,6 @@ function getRoleBadgeClass(role: Role) {
   if (role === 'admin' || role === 'principal') return 'badge-role-admin';
   if (role === 'hod') return 'badge-role-chief';
   return 'badge-role-counselor';
-}
-
-function getFooterSupportHref(user: AuthUser | null) {
-  if (!user) return '/assets/doc_admin.pdf';
-  if (user.role === 'counselor') return '/assets/doc_counsellor.pdf';
-  if (user.role === 'hod' || user.role === 'deo') return '/assets/doc_chief_admin.pdf';
-  return '/assets/doc_admin.pdf';
 }
 
 function getNotificationStorageKey(user: AuthUser | null) {
@@ -966,7 +1045,20 @@ function formatSemesterBadge(semester: string) {
 
 const DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE = 'The Following Counsellors are yet to send the specified Notices\n\n{entries}';
 const DEFAULT_ACTIVITY_DEFAULTER_COPY_TEMPLATE = 'The Following are all the counsellors who are yet to send results to their respective students\n\n{entries}';
-const DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE = "The following subjects's CDP is not yet filled ,\n\n{entries}";
+const DEFAULT_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE = "The following subjects's CDP Daily Attendence is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}";
+const DEFAULT_CDP_LECTURE_PLAN_COPY_TEMPLATE = "The following subjects's CDP Proposed Lecture Plan is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}";
+const DEFAULT_CDP_MARK_ENTRY_COPY_TEMPLATE = "The following subjects's CDP Mark Entry is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}";
+const DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE = DEFAULT_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE;
+const LEGACY_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE = "The following subjects's CDP Daily Attendence is not yet filled ,\n\n{entries}";
+const LEGACY_CDP_LECTURE_PLAN_COPY_TEMPLATE = "The following subjects's CDP Proposed Lecture Plan is not yet filled ,\n\n{entries}";
+const LEGACY_CDP_MARK_ENTRY_COPY_TEMPLATE = "The following subjects's CDP Mark Entry is not yet filled ,\n\n{entries}";
+
+function normalizeCdpTemplate(value: unknown, fallback: string, legacyFallbacks: string[] = []) {
+  const text = String(value || '').replace(/\r\n/g, '\n');
+  if (!text.trim()) return fallback;
+  if (legacyFallbacks.some((legacy) => text.trim() === legacy.trim())) return fallback;
+  return text;
+}
 
 function escapeSvgText(value: string) {
   return String(value || '')
@@ -1978,6 +2070,7 @@ export default function App() {
   const [studentQuickAdd, setStudentQuickAdd] = useState({ reg_no: '', student_name: '', parent_phone: '', parent_email: '' });
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [templateDownloadsOpen, setTemplateDownloadsOpen] = useState(false);
+  const [supportGuideOpen, setSupportGuideOpen] = useState(false);
   const [departments, setDepartments] = useState<DepartmentRecord[]>([]);
   const [departmentsLoading, setDepartmentsLoading] = useState(false);
   const [departmentForm, setDepartmentForm] = useState({ code: '', name: '' });
@@ -2050,11 +2143,14 @@ export default function App() {
   const cdpOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: CdpOverviewPayload }>());
   const activityOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: ActivityOverviewPayload }>());
   const activityScopeReportCacheRef = useRef(new Map<string, { timestamp: number; payload: ActivityScopeReportPayload }>());
+  const monitoringOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: MonitoringOverviewPayload }>());
+  const databaseOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: DatabaseOverviewPayload }>());
   const activityScopePrefetchRef = useRef(new Set<string>());
   const activityScopeSeededRef = useRef(new Set<string>());
   const tabWarmupKeyRef = useRef('');
   const [cdpLoading, setCdpLoading] = useState(false);
   const [cdpData, setCdpData] = useState<CdpOverviewPayload | null>(null);
+  const [cdpNavigationLoadingKey, setCdpNavigationLoadingKey] = useState('');
   const [counselorOverviewLoading, setCounselorOverviewLoading] = useState(false);
   const [counselorOverview, setCounselorOverview] = useState<CounselorOverviewPayload | null>(null);
   const [counselorTestsLoading, setCounselorTestsLoading] = useState(false);
@@ -2091,7 +2187,13 @@ export default function App() {
   const [desktopNoticeQueueState, setDesktopNoticeQueueState] = useState<Record<string, DesktopSendQueueState>>({});
   const [desktopSettingsPanelOpen, setDesktopSettingsPanelOpen] = useState(false);
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
-  const [loginNotificationPrompt, setLoginNotificationPrompt] = useState<AppNotificationItem | null>(null);
+  const [foregroundNotificationToasts, setForegroundNotificationToasts] = useState<ForegroundNotificationToast[]>([]);
+  const [creditsPageOpen, setCreditsPageOpen] = useState(false);
+  const [creditsHtml, setCreditsHtml] = useState('');
+  const [creditsLoading, setCreditsLoading] = useState(false);
+  const [creditsError, setCreditsError] = useState('');
+  const [testNotifications, setTestNotifications] = useState<AppNotificationItem[]>([]);
+  const testNotificationCounterRef = useRef(0);
   const [notificationSeenVersion, setNotificationSeenVersion] = useState(0);
   const [notificationDeletedVersion, setNotificationDeletedVersion] = useState(0);
   const [serverNotificationState, setServerNotificationState] = useState<{ readKeys: string[]; deletedKeys: string[] }>({ readKeys: [], deletedKeys: [] });
@@ -2103,6 +2205,8 @@ export default function App() {
   const [desktopUpdateInfo, setDesktopUpdateInfo] = useState<DesktopUpdateInfo | null>(null);
   const [desktopSettingsSaving, setDesktopSettingsSaving] = useState(false);
   const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
+  const userPreferencesAppliedRef = useRef('');
+  const serverThemePersistenceReadyRef = useRef(false);
   const [counselorSendVars, setCounselorSendVars] = useState({
     test_name: '',
     semester: '',
@@ -2225,6 +2329,12 @@ export default function App() {
       return 'light';
     }
   });
+  const [documentHidden, setDocumentHidden] = useState(() => (
+    typeof document !== 'undefined' ? document.visibilityState === 'hidden' : false
+  ));
+  const [appWindowFocused, setAppWindowFocused] = useState(() => (
+    typeof document !== 'undefined' ? document.hasFocus() : true
+  ));
   const counselorBatchTimerRef = useRef<number | null>(null);
   const counselorBatchQueueRef = useRef<CounselorSendReportRow[]>([]);
   const counselorBatchIndexRef = useRef(0);
@@ -2249,6 +2359,49 @@ export default function App() {
   const bootLoaderShownAtRef = useRef(typeof performance !== 'undefined' ? performance.now() : Date.now());
   const mainContentRef = useRef<HTMLElement | null>(null);
   const contentAreaRef = useRef<HTMLDivElement | null>(null);
+  const desktopNotificationBootstrapRefreshRef = useRef(0);
+  const floatingSendPayloadSignatureRef = useRef('');
+  const usersOverviewRequestSeqRef = useRef(0);
+  const noticesRequestSeqRef = useRef(0);
+  const reportsRequestSeqRef = useRef(0);
+  const subjectsRequestSeqRef = useRef(0);
+  const cdpRequestSeqRef = useRef(0);
+  const cdpDirectNavigationRef = useRef(false);
+  const dashboardRequestSeqRef = useRef(0);
+  const activityRequestSeqRef = useRef(0);
+  const adminMessagesRequestSeqRef = useRef(0);
+  const monitoringRequestSeqRef = useRef(0);
+  const databaseRequestSeqRef = useRef(0);
+  const configRequestSeqRef = useRef(0);
+  const counselorSendPageRequestSeqRef = useRef(0);
+  const counselorNoticeSendPageRequestSeqRef = useRef(0);
+  const counselorOverviewRequestSeqRef = useRef(0);
+  const counselorTestsRequestSeqRef = useRef(0);
+  const counselorMessagesRequestSeqRef = useRef(0);
+  const testDetailRequestSeqRef = useRef(0);
+  const serverConsoleRequestSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const updateVisibilityState = () => setDocumentHidden(document.visibilityState === 'hidden');
+    updateVisibilityState();
+    document.addEventListener('visibilitychange', updateVisibilityState);
+    return () => document.removeEventListener('visibilitychange', updateVisibilityState);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const updateFocusState = () => setAppWindowFocused(document.hasFocus());
+    updateFocusState();
+    window.addEventListener('focus', updateFocusState);
+    window.addEventListener('blur', updateFocusState);
+    document.addEventListener('visibilitychange', updateFocusState);
+    return () => {
+      window.removeEventListener('focus', updateFocusState);
+      window.removeEventListener('blur', updateFocusState);
+      document.removeEventListener('visibilitychange', updateFocusState);
+    };
+  }, []);
 
   function readOverviewCacheEntry<T>(
     ref: MutableRefObject<Map<string, { timestamp: number; payload: T }>>,
@@ -2392,7 +2545,47 @@ export default function App() {
     } catch {
       // Ignore storage failures.
     }
-  }, [theme]);
+    if (bootstrap?.user && serverThemePersistenceReadyRef.current) {
+      void saveUserPreferences({ theme }).catch(() => undefined);
+    }
+  }, [bootstrap?.user?.email, theme]);
+
+  useEffect(() => {
+    const preferenceUser = bootstrap?.user || null;
+    if (!preferenceUser) {
+      serverThemePersistenceReadyRef.current = false;
+      userPreferencesAppliedRef.current = '';
+      return;
+    }
+    const preferences = bootstrap?.userPreferences || null;
+    const signature = `${preferenceUser.email}::${JSON.stringify(preferences || {})}`;
+    if (userPreferencesAppliedRef.current === signature) return;
+    userPreferencesAppliedRef.current = signature;
+    if (preferences?.theme === 'light' || preferences?.theme === 'dark') {
+      setTheme(preferences.theme);
+    }
+    if (runtimeConfig.isDesktop && preferences?.desktopSettings && typeof preferences.desktopSettings === 'object') {
+      const syncedPatch = preferences.desktopSettings as Partial<DesktopAppSettings>;
+      setDesktopAppSettings((prev) => prev ? { ...prev, ...syncedPatch, desktopScale: prev.desktopScale } : prev);
+      void saveDesktopAppSettings({ ...syncedPatch, role: preferenceUser.role } as Partial<DesktopAppSettings> & { role?: string }).catch(() => undefined);
+    }
+    serverThemePersistenceReadyRef.current = true;
+  }, [bootstrap?.userPreferences, bootstrap?.user?.email, bootstrap?.user?.role]);
+
+  useEffect(() => {
+    if (!runtimeConfig.isDesktop) return;
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      const currentScale = clampDesktopScale(desktopAppSettings?.desktopScale || 1);
+      const nextScale = clampDesktopScale(currentScale + (event.deltaY < 0 ? 0.05 : -0.05));
+      if (nextScale === currentScale) return;
+      setDesktopAppSettings((prev) => prev ? { ...prev, desktopScale: nextScale } : prev);
+      void saveDesktopSettingPatch({ desktopScale: nextScale });
+    };
+    window.addEventListener('wheel', handleWheel, { passive: false });
+    return () => window.removeEventListener('wheel', handleWheel);
+  }, [desktopAppSettings?.desktopScale]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('mobile-sidebar-open', mobileSidebarOpen);
@@ -2525,6 +2718,24 @@ export default function App() {
     }
   }
 
+  function scheduleIdleWork(task: () => void, delayMs = 500, timeoutMs = 2500) {
+    let idleId: number | null = null;
+    const timerId = window.setTimeout(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(task, { timeout: timeoutMs });
+        return;
+      }
+      task();
+    }, delayMs);
+
+    return () => {
+      window.clearTimeout(timerId);
+      if (idleId !== null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }
+
   async function waitForNextPaint() {
     await new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => {
@@ -2540,8 +2751,24 @@ export default function App() {
     await new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
   }
 
+  async function waitForWorkspaceReady(tab: string) {
+    const normalizedTab = String(tab || '').trim();
+    setBootStatus('Preparing workspace...');
+    await Promise.allSettled([
+      TAB_PRELOADERS[normalizedTab]?.(),
+      waitForImageAsset('/assets/banner.png'),
+      waitForImageAsset(appCrestLogo),
+      waitForImageAsset(appWordmarkLogo),
+      document.fonts?.ready,
+    ].filter(Boolean) as Array<Promise<unknown>>);
+    await waitForNextPaint();
+    await waitForNextPaint();
+  }
+
   useEffect(() => {
     void (async () => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('auth') === 'google' && params.get('success') === '1') return;
       const showBootLoader = shouldUseBootLoaderOnInitialLoad();
       try {
         await refreshBootstrap({ showBootLoader, forceDefaultTab: true });
@@ -2582,11 +2809,13 @@ export default function App() {
         }
       })();
     } else if (success === '1') {
-      setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null, otp_code: '' }));
-      setLoginConflictInfoOpen(false);
-      setForgotPasswordState((prev) => ({ ...prev, loading: false, error: '' }));
-      setFlash({ type: 'success', message: 'Google sign-in completed successfully.' });
-      void refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
+      void (async () => {
+        setLoginState((prev) => ({ ...prev, loading: false, error: '', conflict: null, conflictAuthMethod: null, otp_code: '' }));
+        setLoginConflictInfoOpen(false);
+        setForgotPasswordState((prev) => ({ ...prev, loading: false, error: '' }));
+        await refreshBootstrap({ showBootLoader: true, forceDefaultTab: true });
+        setFlash({ type: 'success', message: 'Google sign-in completed successfully.' });
+      })();
     } else if (conflict === '1') {
       const nextConflict = {
         browser: String(params.get('browser') || 'Unknown'),
@@ -2693,7 +2922,7 @@ export default function App() {
       });
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [activeTab, adminMessageFilters.day, adminMessageFilters.day_num, adminMessageFilters.month, adminMessageFilters.year, adminMessageSearch, bootstrap?.user]);
+  }, [activeTab, adminMessageFilters.day, adminMessageFilters.day_num, adminMessageFilters.month, adminMessageFilters.year, adminMessageSearch, bootstrap?.user?.email, bootstrap?.user?.role]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -2734,7 +2963,8 @@ export default function App() {
     activeTab,
     counselorNoticeSendPage,
     counselorNoticeSendVerify,
-    bootstrap?.user,
+    bootstrap?.user?.email,
+    bootstrap?.user?.role,
     noticeFilters.date_from,
     noticeFilters.date_to,
     noticeFilters.department,
@@ -2747,7 +2977,7 @@ export default function App() {
     if (activeTab !== 'users') return;
     if (!['admin', 'principal', 'deo'].includes(bootstrap.user.role)) return;
     void refreshUsersOverview();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -2758,34 +2988,28 @@ export default function App() {
     void getDepartments()
       .then((payload) => setDepartments(payload.departments))
       .finally(() => setDepartmentsLoading(false));
-  }, [bootstrap?.user, activeTab]);
-
-  useEffect(() => {
-    if (!bootstrap?.user) return;
-    if (activeTab !== 'notices') return;
-    void loadNotices();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'reports') return;
     if (!['admin', 'principal', 'hod', 'deo'].includes(bootstrap.user.role)) return;
     void loadReports();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'subjects') return;
     if (!['admin', 'deo'].includes(bootstrap.user.role)) return;
     void loadSubjects();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'dashboard') return;
     if (!['admin', 'principal', 'hod'].includes(bootstrap.user.role)) return;
     void loadDashboardOverview();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     setAdminMessagesData(null);
@@ -2805,80 +3029,62 @@ export default function App() {
     if (activeTab !== 'activity') return;
     if (!['admin', 'principal', 'hod', 'deo'].includes(bootstrap.user.role)) return;
     void loadActivityOverview();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
-    if (!activityData?.showYearPicker) return;
-    const department = String(activityData.selectedDepartment || '').trim().toUpperCase();
-    if (!department) return;
-    for (const year of activityData.availableYears || []) {
-      const scopeKey = `${department}::${year}`;
-      if (activityScopePrefetchRef.current.has(scopeKey)) continue;
-      activityScopePrefetchRef.current.add(scopeKey);
-      void prefetchActivityScope({ department, year })
-        .then((prefetched) => {
-          for (const entry of prefetched.entries || []) {
-            const cacheKey = buildActivityOverviewCacheKey({
-              department: entry.selectedDepartment,
-              year: entry.selectedYear,
-              semester: entry.selectedSemester,
-              test_name: entry.selectedTestName,
-              q: entry.searchQuery,
-              sort: entry.sortMode,
-            });
-            writeOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey, entry, false);
-          }
-        })
-        .catch(() => {
-          activityScopePrefetchRef.current.delete(scopeKey);
-        });
-    }
-  }, [activityData?.availableYears, activityData?.selectedDepartment, activityData?.showYearPicker]);
-
-  useEffect(() => {
+    if (documentHidden) return;
     if (!activityData) return;
+    if (activeTab !== 'activity') return;
     if (activityData.showDepartmentPicker || activityData.showYearPicker) return;
     if (!activityData.selectedDepartment || !activityData.selectedYear) return;
-    void prefetchActivityScopeCombos(activityData);
+    return scheduleIdleWork(() => {
+      if (document.hidden) return;
+      void prefetchActivityScopeCombos(activityData);
+    }, 1600, 4000);
   }, [
     activityData?.selectedDepartment,
     activityData?.selectedYear,
     activityData?.showDepartmentPicker,
     activityData?.showYearPicker,
+    activeTab,
+    documentHidden,
     activityData?.testStatus,
   ]);
 
   useEffect(() => {
-    if (!activityData || activityData.showDepartmentPicker) return;
-    void warmActivityScopeReport({
-      department: activityData.selectedDepartment || undefined,
-      year: activityData.selectedYear || null,
-      semester: activityData.selectedSemester || undefined,
-      test_name: activityData.selectedTestName || undefined,
-    });
+    if (documentHidden) return;
+    if (!activityData || activityData.showDepartmentPicker || activityData.showYearPicker) return;
+    if (activeTab !== 'activity') return;
+    return scheduleIdleWork(() => {
+      if (document.hidden) return;
+      void warmActivityScopeReport({
+        department: activityData.selectedDepartment || undefined,
+        year: activityData.selectedYear || null,
+        semester: activityData.selectedSemester || undefined,
+        test_name: activityData.selectedTestName || undefined,
+      });
+    }, 2200, 5000);
   }, [
     activityData?.selectedDepartment,
     activityData?.selectedSemester,
     activityData?.selectedTestName,
     activityData?.selectedYear,
     activityData?.showDepartmentPicker,
+    activityData?.showYearPicker,
+    activeTab,
+    documentHidden,
   ]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'cdp') return;
     if (!['admin', 'principal', 'hod'].includes(bootstrap.user.role)) return;
-    void loadCdpOverview(
-      cdpData?.selectedDepartment
-        ? {
-          department: cdpData.selectedDepartment,
-          year: cdpData.selectedYear,
-          semester: cdpData.selectedSemester || undefined,
-          subject_id: cdpData.selectedSubjectId,
-        }
-        : undefined,
-    );
-  }, [bootstrap?.user, activeTab]);
+    if (cdpDirectNavigationRef.current) {
+      cdpDirectNavigationRef.current = false;
+      return;
+    }
+    void loadCdpOverview();
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     const viewer = bootstrap?.user;
@@ -2890,11 +3096,12 @@ export default function App() {
     tabWarmupKeyRef.current = warmupKey;
 
     const timer = window.setTimeout(() => {
-      const warmers: Array<Promise<unknown>> = [];
+      if (documentHidden || desktopWhatsappWorkspaceStarted || desktopWhatsappWorkspaceBusy) return;
+      const warmers: Array<() => Promise<unknown>> = [];
       const cacheDashboard = readOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', buildDashboardOverviewCacheKey());
       if (['admin', 'principal', 'hod'].includes(viewer.role) && (!cacheDashboard || Date.now() - cacheDashboard.timestamp >= SCOPE_CACHE_TTL_MS)) {
         warmers.push(
-          getDashboardOverview().then((payload) => {
+          () => getDashboardOverview().then((payload) => {
             writeOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', buildDashboardOverviewCacheKey(), payload);
           }),
         );
@@ -2904,7 +3111,7 @@ export default function App() {
       const cachedReports = readOverviewCacheEntry(reportsOverviewCacheRef, 'reports', reportsCacheKey);
       if (!cachedReports || Date.now() - cachedReports.timestamp >= SCOPE_CACHE_TTL_MS) {
         warmers.push(
-          getReportsOverview().then((payload) => {
+          () => getReportsOverview().then((payload) => {
             writeOverviewCacheEntry(reportsOverviewCacheRef, 'reports', reportsCacheKey, payload);
           }),
         );
@@ -2914,7 +3121,7 @@ export default function App() {
       const cachedActivity = readOverviewCacheEntry(activityOverviewCacheRef, 'activity', activityCacheKey);
       if (!cachedActivity || Date.now() - cachedActivity.timestamp >= SCOPE_CACHE_TTL_MS) {
         warmers.push(
-          getActivityOverview().then((payload) => {
+          () => getActivityOverview().then((payload) => {
             writeOverviewCacheEntry(
               activityOverviewCacheRef,
               'activity',
@@ -2930,7 +3137,7 @@ export default function App() {
       const cachedCdp = readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cdpCacheKey);
       if (['admin', 'principal', 'hod'].includes(viewer.role) && (!cachedCdp || Date.now() - cachedCdp.timestamp >= SCOPE_CACHE_TTL_MS)) {
         warmers.push(
-          getCdpOverview().then((payload) => {
+          () => getCdpOverview().then((payload) => {
             writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cdpCacheKey, payload);
           }),
         );
@@ -2940,17 +3147,29 @@ export default function App() {
       const cachedUsers = readOverviewCacheEntry(usersOverviewCacheRef, 'users', usersCacheKey);
       if (['admin', 'principal', 'deo'].includes(viewer.role) && (!cachedUsers || Date.now() - cachedUsers.timestamp >= SCOPE_CACHE_TTL_MS)) {
         warmers.push(
-          getUsers().then((payload) => {
+          () => getUsers().then((payload) => {
             writeOverviewCacheEntry(usersOverviewCacheRef, 'users', usersCacheKey, payload);
           }),
         );
       }
 
-      void Promise.allSettled(warmers);
-    }, 250);
+      const runWarmers = () => {
+        void (async () => {
+          for (const warm of warmers) {
+            if (documentHidden || desktopWhatsappWorkspaceStarted || desktopWhatsappWorkspaceBusy) break;
+            await warm().catch(() => undefined);
+          }
+        })();
+      };
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(runWarmers, { timeout: 3000 });
+      } else {
+        window.setTimeout(runWarmers, 500);
+      }
+    }, 5000);
 
     return () => window.clearTimeout(timer);
-  }, [bootstrap?.user?.email, bootstrap?.user?.role]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, desktopWhatsappWorkspaceBusy, desktopWhatsappWorkspaceStarted, documentHidden]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -2958,35 +3177,35 @@ export default function App() {
     if (!['admin', 'hod', 'deo'].includes(bootstrap.user.role)) return;
     if (adminMessagesData) return;
     void loadAdminMessages(undefined, DEFAULT_ADMIN_MESSAGES_LIMIT);
-  }, [bootstrap?.user, activeTab, adminMessagesData]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab, adminMessagesData]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'monitoring') return;
     if (bootstrap.user.role !== 'admin') return;
-    void loadMonitoringOverview();
-  }, [bootstrap?.user, activeTab]);
+    void loadMonitoringOverview({ preferCache: true });
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'database') return;
     if (!['admin', 'principal'].includes(bootstrap.user.role)) return;
     void loadDatabaseOverview();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'config') return;
     if (bootstrap.user.role !== 'admin') return;
     void loadConfigOverview();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
     if (activeTab !== 'server-console') return;
     if (bootstrap.user.role !== 'admin') return;
     void loadServerConsole();
-  }, [bootstrap?.user, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
 
   useEffect(() => {
     if (!bootstrap?.user || bootstrap.user.role !== 'counselor') return;
@@ -2996,9 +3215,9 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrap?.user || bootstrap.user.role !== 'counselor') return;
-    void refreshCounselorOverview();
-    void refreshCounselorTests();
-  }, [bootstrap?.user?.email]);
+    if (!bootstrap.counselorOverview) void refreshCounselorOverview();
+    if (!Array.isArray(bootstrap.counselorTests)) void refreshCounselorTests();
+  }, [bootstrap?.user?.email, bootstrap?.counselorOverview, bootstrap?.counselorTests]);
 
   useEffect(() => {
     if (counselorSendReturnRestoreRef.current) return;
@@ -3012,7 +3231,7 @@ export default function App() {
       return;
     }
     void openCounselorNoticeSendPage(returnState.id, 'web');
-  }, [bootstrap?.user]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role]);
 
   useEffect(() => {
     if (!bootstrap?.user || bootstrap.user.role !== 'counselor') return;
@@ -3308,7 +3527,7 @@ export default function App() {
     } catch {
       // Ignore malformed drafts.
     }
-  }, [bootstrap?.user]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role]);
   useEffect(() => {
     const authUser = bootstrap?.user || null;
     if (!authUser || !['admin', 'deo'].includes(authUser.role)) return;
@@ -3317,7 +3536,7 @@ export default function App() {
     } catch {
       // Ignore localStorage write failures.
     }
-  }, [bootstrap?.user, userCreateForm]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, userCreateForm]);
   useEffect(() => {
     if (!userCreateEmailExists) return;
     const existingName = String(userCreateExistingAccounts[0]?.name || '').trim();
@@ -3600,19 +3819,32 @@ export default function App() {
   }, [bootstrap?.counselorOverview, bootstrap?.counselorOverview?.pendingNotices, bootstrap?.user?.role, counselorOverview?.pendingNotices]);
 
   const currentUser = bootstrap?.user || null;
+  const queryClient = useQueryClient();
+  const lowPriorityPollingPaused = documentHidden || desktopWhatsappWorkspaceStarted || desktopWhatsappWorkspaceBusy;
+  const notificationStateQuery = useQuery({
+    queryKey: queryKeys.notifications(currentUser?.email || ''),
+    queryFn: () => measureAsync('client-api', 'notifications.state', getNotificationState),
+    enabled: Boolean(currentUser) && !lowPriorityPollingPaused,
+    refetchInterval: currentUser && !lowPriorityPollingPaused ? 30_000 : false,
+    refetchIntervalInBackground: false,
+    staleTime: 20_000,
+  });
   const deletedNotificationKeys = useMemo(
     () => new Set([...readDeletedNotificationKeys(currentUser), ...serverNotificationState.deletedKeys]),
     [currentUser?.email, notificationDeletedVersion, serverNotificationState.deletedKeys],
   );
   const appNotifications = useMemo(
-    () => buildAppNotifications(currentUser, counselorDashboardPendingNotices, counselorVisibleTests, {
-      pendingThresholdDays: Number(bootstrap?.appConfig?.notification_pending_threshold_days || 2) || 2,
-      updateInfo: desktopUpdateInfo,
-      appVersion: bootstrap?.appVersion,
-      desktopSettings: desktopAppSettings,
-      activityRows: activityData?.result?.rows || [],
-      linkedCounselorNotifications: bootstrap?.linkedCounselorNotifications || null,
-    }).filter((item) => !deletedNotificationKeys.has(item.key)),
+    () => [
+      ...testNotifications,
+      ...buildAppNotifications(currentUser, counselorDashboardPendingNotices, counselorVisibleTests, {
+        pendingThresholdDays: Number(bootstrap?.appConfig?.notification_pending_threshold_days || 2) || 2,
+        updateInfo: desktopUpdateInfo,
+        appVersion: bootstrap?.appVersion,
+        desktopSettings: desktopAppSettings,
+        activityRows: activityData?.result?.rows || [],
+        linkedCounselorNotifications: bootstrap?.linkedCounselorNotifications || null,
+      }),
+    ].filter((item) => !deletedNotificationKeys.has(item.key)),
     [
       activityData?.result?.rows,
       bootstrap?.appConfig?.notification_pending_threshold_days,
@@ -3624,6 +3856,7 @@ export default function App() {
       deletedNotificationKeys,
       desktopAppSettings,
       desktopUpdateInfo,
+      testNotifications,
     ],
   );
   const seenNotificationKeys = useMemo(
@@ -3633,6 +3866,10 @@ export default function App() {
   const unreadNotifications = useMemo(
     () => appNotifications.filter((item) => !seenNotificationKeys.has(item.key)),
     [appNotifications, seenNotificationKeys],
+  );
+  const unreadNotificationKeySignature = useMemo(
+    () => unreadNotifications.map((item) => item.key).sort().join('|'),
+    [unreadNotifications],
   );
   const unreadNotificationCount = unreadNotifications.length;
   const persistentCacheNamespace = useMemo(() => buildPersistentCacheNamespace(bootstrap), [bootstrap]);
@@ -3702,6 +3939,29 @@ export default function App() {
   const testMetaReadOnly = Boolean(testDetail?.isMetaReadOnly ?? testDetail?.isReadOnly);
   const testMarksReadOnly = Boolean(testDetail?.isMarksReadOnly ?? testDetail?.isReadOnly);
 
+  useEffect(() => {
+    if (!currentUser || !navTabs.length || supportGuideOpen) return;
+    if (!isSupportGuideEnabledForUser(currentUser, bootstrap?.appConfig)) return;
+    const storageKey = buildSupportGuideFirstPromptKey(currentUser);
+    try {
+      if (window.localStorage.getItem(storageKey)) return;
+      window.localStorage.setItem(storageKey, new Date().toISOString());
+    } catch {
+      // First-login guide prompt is convenience-only.
+    }
+    setSupportGuideOpen(true);
+  }, [
+    bootstrap?.appConfig?.tutorial_counselor_enabled,
+    bootstrap?.appConfig?.tutorial_hod_enabled,
+    bootstrap?.appConfig?.tutorial_master_enabled,
+    bootstrap?.appConfig?.tutorial_principal_enabled,
+    currentUser?.email,
+    currentUser?.name,
+    currentUser?.role,
+    navTabs.length,
+    supportGuideOpen,
+  ]);
+
   const loadDesktopRuntimeState = async () => {
     if (!runtimeConfig.isDesktop) return;
     const [settings, connectivity] = await Promise.all([
@@ -3709,38 +3969,31 @@ export default function App() {
       getDesktopConnectivityState(),
     ]);
     if (settings) {
+      const syncedDesktopSettings = bootstrap?.userPreferences?.desktopSettings && typeof bootstrap.userPreferences.desktopSettings === 'object'
+        ? bootstrap.userPreferences.desktopSettings as Partial<DesktopAppSettings>
+        : {};
+      const mergedSettings = { ...settings, ...syncedDesktopSettings, desktopScale: settings.desktopScale };
       setDesktopAppSettings(currentUser?.role === 'admin'
-        ? settings
-        : { ...settings, updateChecksEnabled: true, autoInstallUpdatesWhenIdle: true });
+        ? mergedSettings
+        : { ...mergedSettings, updateChecksEnabled: true, autoInstallUpdatesWhenIdle: true });
+      if (Object.keys(syncedDesktopSettings).length) {
+        void saveDesktopAppSettings({ ...syncedDesktopSettings, role: currentUser?.role } as Partial<DesktopAppSettings> & { role?: string }).catch(() => undefined);
+      }
     }
     if (connectivity) setDesktopConnectivity(connectivity);
   };
 
   useEffect(() => {
-    let cancelled = false;
     if (!currentUser) {
       setServerNotificationState({ readKeys: [], deletedKeys: [] });
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
-    const refreshNotificationState = async () => {
-      try {
-        const state = await getNotificationState();
-        if (!cancelled) {
-          setServerNotificationState((prev) => mergeNotificationState(prev, state));
-        }
-      } catch {
-        if (!cancelled) setServerNotificationState({ readKeys: [], deletedKeys: [] });
-      }
-    };
-    void refreshNotificationState();
-    const timerId = window.setInterval(() => void refreshNotificationState(), 30_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timerId);
-    };
-  }, [currentUser?.email]);
+    if (notificationStateQuery.data) {
+      setServerNotificationState((prev) => mergeNotificationState(prev, notificationStateQuery.data));
+    } else if (notificationStateQuery.isError) {
+      setServerNotificationState({ readKeys: [], deletedKeys: [] });
+    }
+  }, [currentUser?.email, notificationStateQuery.data, notificationStateQuery.isError]);
 
   const markNotificationsRead = (keys: string[]) => {
     const uniqueKeys = normalizeNotificationKeys(keys);
@@ -3750,8 +4003,14 @@ export default function App() {
     writeSeenNotificationKeys(currentUser, seen);
     setServerNotificationState((prev) => mergeNotificationState(prev, { readKeys: uniqueKeys }));
     setNotificationSeenVersion((prev) => prev + 1);
+    queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), (prev: { readKeys?: string[]; deletedKeys?: string[] } | undefined) => (
+      mergeNotificationState(prev || { readKeys: [], deletedKeys: [] }, { readKeys: uniqueKeys })
+    ));
     void markNotificationKeysRead(uniqueKeys)
-      .then((state) => setServerNotificationState((prev) => mergeNotificationState(prev, state)))
+      .then((state) => {
+        queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), state);
+        setServerNotificationState((prev) => mergeNotificationState(prev, state));
+      })
       .catch(() => undefined);
   };
 
@@ -3764,25 +4023,158 @@ export default function App() {
     writeDeletedNotificationKeys(currentUser, deleted);
     setServerNotificationState((prev) => mergeNotificationState(prev, { readKeys: uniqueKeys, deletedKeys: uniqueKeys }));
     setNotificationDeletedVersion((prev) => prev + 1);
+    queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), (prev: { readKeys?: string[]; deletedKeys?: string[] } | undefined) => (
+      mergeNotificationState(prev || { readKeys: [], deletedKeys: [] }, { readKeys: uniqueKeys, deletedKeys: uniqueKeys })
+    ));
     void deleteNotificationKeys(uniqueKeys)
-      .then((state) => setServerNotificationState((prev) => mergeNotificationState(prev, state)))
+      .then((state) => {
+        queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), state);
+        setServerNotificationState((prev) => mergeNotificationState(prev, state));
+      })
       .catch(() => undefined);
   };
 
   const openNotificationCenter = () => {
+    setCreditsPageOpen(false);
     setNotificationCenterOpen(true);
-    setLoginNotificationPrompt(null);
+  };
+
+  const closeUtilityPages = () => {
+    setNotificationCenterOpen(false);
+    setCreditsPageOpen(false);
+  };
+
+  const openCreditsPage = async (forceRefresh = false) => {
+    setNotificationCenterOpen(false);
+    setCreditsPageOpen(true);
+    if (!forceRefresh && (creditsHtml || creditsLoading)) return;
+    setCreditsLoading(true);
+    setCreditsError('');
+    if (forceRefresh) setCreditsHtml('');
+    try {
+      const response = await fetch('/assets/credits_compiled.html', { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+      if (!response.ok) throw new Error('Credits could not be loaded.');
+      setCreditsHtml(await response.text());
+    } catch (error) {
+      setCreditsError(error instanceof Error ? error.message : 'Credits could not be loaded.');
+    } finally {
+      setCreditsLoading(false);
+    }
+  };
+
+  const showForegroundNotificationToast = (items: AppNotificationItem[], options?: { markRead?: boolean }) => {
+    const normalizedItems = items.filter((item) => item?.key);
+    if (!normalizedItems.length) return;
+    const expiresAt = Date.now() + 5000;
+    const keys = normalizedItems.map((item) => item.key);
+    setForegroundNotificationToasts((prev) => {
+      const existing = new Set(prev.map((item) => item.key));
+      const nextItems = normalizedItems
+        .filter((item) => !existing.has(item.key))
+        .map((item) => ({ ...item, expiresAt }));
+      return [...nextItems, ...prev].slice(0, 4);
+    });
+    window.setTimeout(() => {
+      setForegroundNotificationToasts((prev) => prev.filter((item) => !keys.includes(item.key)));
+    }, 5000);
+    if (options?.markRead) {
+      markNotificationsRead(keys);
+    }
+  };
+
+  const buildTestNotification = (kind: TestNotificationKind, sequence: number, createdAt: string): AppNotificationItem => {
+    const dayCount = Math.max(1, Number(bootstrap?.appConfig?.notification_pending_threshold_days || 2) || 2);
+    const baseKey = `test-notification:${kind}:${currentUser?.email || 'guest'}:${Date.now()}:${sequence}`;
+    if (kind === 'update') {
+      return {
+        key: baseKey,
+        severity: 'critical',
+        title: 'Update released',
+        body: 'Shine 9.9.9-test is available.',
+        createdAt,
+        actionTab: currentUser?.role === 'admin' ? 'config' : undefined,
+      };
+    }
+    if (kind === 'test-assigned') {
+      return {
+        key: baseKey,
+        severity: 'info',
+        title: 'Test assigned',
+        body: `MODEL EXAM ${formatSemesterBadge('1')} is available for CSE ${formatYearLevel(1)}.`,
+        createdAt,
+        actionTab: 'test-database',
+      };
+    }
+    if (kind === 'notice-assigned') {
+      return {
+        key: baseKey,
+        severity: 'critical',
+        title: 'Notice assigned',
+        body: 'Internal assessment schedule has been published.',
+        createdAt,
+        actionTab: 'notices',
+      };
+    }
+    if (kind === 'linked-counselor') {
+      return {
+        key: baseKey,
+        severity: 'critical',
+        title: 'Counselor role: test pending',
+        body: `MODEL EXAM has 7 pending students for CSE ${formatYearLevel(1)}. Switch to counselor role to send it.`,
+        createdAt,
+      };
+    }
+    if (kind === 'digest') {
+      return {
+        key: baseKey,
+        severity: 'critical',
+        title: 'Pending counselor digest',
+        body: '4 counselors have pending work in your allocated scope.',
+        createdAt,
+        actionTab: 'activity',
+      };
+    }
+    return {
+      key: baseKey,
+      severity: 'critical',
+      title: 'Pending reminder',
+      body: `MODEL EXAM has 5 pending students for more than ${dayCount} days.`,
+      createdAt,
+      actionTab: 'test-database',
+    };
+  };
+
+  const sendTestNotification = (kindOrAll: TestNotificationKind | 'all') => {
+    const now = new Date().toISOString();
+    const kinds: TestNotificationKind[] = kindOrAll === 'all'
+      ? ['update', 'test-assigned', 'notice-assigned', 'pending-reminder', 'linked-counselor', 'digest']
+      : [kindOrAll];
+    const items = kinds.map((kind) => {
+      const counter = testNotificationCounterRef.current + 1;
+      testNotificationCounterRef.current = counter;
+      return buildTestNotification(kind, counter, now);
+    });
+    setTestNotifications((prev) => [...items, ...prev].slice(0, 30));
+    showForegroundNotificationToast(items.slice(0, 4), { markRead: true });
+    setFlash({ type: 'success', message: `${items.length} test notification${items.length === 1 ? '' : 's'} sent to this session.` });
   };
 
   const saveDesktopSettingPatch = async (patch: Partial<DesktopAppSettings>) => {
     if (!runtimeConfig.isDesktop) return;
     setDesktopSettingsSaving(true);
     try {
+      const normalizedPatch = Object.prototype.hasOwnProperty.call(patch, 'desktopScale')
+        ? { ...patch, desktopScale: clampDesktopScale(patch.desktopScale) }
+        : patch;
       const nextSettings = await saveDesktopAppSettings({
-        ...patch,
+        ...normalizedPatch,
         role: currentUser?.role,
       } as Partial<DesktopAppSettings> & { role?: string });
       if (nextSettings) setDesktopAppSettings(nextSettings);
+      const syncedPatch = buildSyncedDesktopSettingsPatch(normalizedPatch);
+      if (Object.keys(syncedPatch).length) {
+        void saveUserPreferences({ desktopSettings: syncedPatch }).catch(() => undefined);
+      }
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to save desktop settings.' });
     } finally {
@@ -3822,6 +4214,7 @@ export default function App() {
     if (!runtimeConfig.isDesktop) return;
     void loadDesktopRuntimeState();
     return onOpenDesktopSettings(() => {
+      closeUtilityPages();
       setDesktopSettingsPanelOpen(true);
       if (currentUser?.role === 'admin') {
         setActiveTab('config');
@@ -3862,14 +4255,26 @@ export default function App() {
   }, [bootstrap?.appVersion, currentUser?.email]);
 
   useEffect(() => {
-    if (runtimeConfig.isDesktop || !currentUser) return;
-    if (notificationCenterOpen) return;
-    if (loginNotificationPrompt) return;
-    const latestCritical = unreadNotifications.find((item) => item.severity === 'critical');
-    if (latestCritical) {
-      setLoginNotificationPrompt(latestCritical);
+    if (runtimeConfig.isDesktop || !currentUser || notificationCenterOpen) return;
+    const storageKey = `shine_web_toast_seen:${currentUser.email || currentUser.name || 'user'}`;
+    let notifiedKeys = new Set<string>();
+    try {
+      notifiedKeys = new Set(JSON.parse(window.localStorage.getItem(storageKey) || '[]') as string[]);
+    } catch {
+      notifiedKeys = new Set<string>();
     }
-  }, [currentUser, loginNotificationPrompt, notificationCenterOpen, unreadNotifications]);
+    const newItems = unreadNotifications
+      .filter((item) => !notifiedKeys.has(item.key))
+      .slice(0, 4);
+    if (!newItems.length) return;
+    showForegroundNotificationToast(newItems, { markRead: true });
+    for (const item of newItems) notifiedKeys.add(item.key);
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-300)));
+    } catch {
+      // Toast dedupe is best-effort.
+    }
+  }, [currentUser?.email, currentUser?.name, notificationCenterOpen, unreadNotificationKeySignature]);
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
@@ -3880,40 +4285,85 @@ export default function App() {
     } catch {
       notifiedKeys = new Set<string>();
     }
-    const notificationsToShow = unreadNotifications
+    const newItems = unreadNotifications
       .filter((item) => !notifiedKeys.has(item.key))
-      .slice(0, 5);
-    if (!notificationsToShow.length) return;
-    for (const item of notificationsToShow) {
-      notifiedKeys.add(item.key);
-      void showDesktopNotification({ title: item.title, body: item.body });
+      .slice(0, 50);
+    if (!newItems.length) return;
+
+    if (!documentHidden && appWindowFocused) {
+      showForegroundNotificationToast(newItems.slice(0, 4));
+      const keys = newItems.map((item) => item.key);
+      for (const key of keys) notifiedKeys.add(key);
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-300)));
+      } catch {
+        // Toast dedupe is best-effort.
+      }
+      markNotificationsRead(keys);
+      return;
     }
-    window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-200)));
-  }, [currentUser, desktopAppSettings?.desktopNotificationsEnabled, unreadNotifications]);
+
+    let cancelled = false;
+    const showUnreadToasts = async () => {
+      const attemptedKeys: string[] = [];
+      for (const item of newItems) {
+        if (cancelled) return;
+        attemptedKeys.push(item.key);
+        const payload = { title: item.title, body: item.body };
+        const shown = await showDesktopNotification(payload);
+        if (!shown && !cancelled) {
+          window.setTimeout(() => {
+            void showDesktopNotification(payload);
+          }, 350);
+        }
+      }
+      if (cancelled) return;
+      for (const key of attemptedKeys) notifiedKeys.add(key);
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-300)));
+      } catch {
+        // Toast dedupe is best-effort.
+      }
+      markNotificationsRead(attemptedKeys);
+    };
+
+    void showUnreadToasts();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    appWindowFocused,
+    currentUser?.email,
+    currentUser?.name,
+    desktopAppSettings?.desktopNotificationsEnabled,
+    documentHidden,
+    unreadNotificationKeySignature,
+  ]);
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
-    let cancelled = false;
+    if (lowPriorityPollingPaused) return;
     const refreshDesktopNotifications = async () => {
+      const now = Date.now();
+      const heavyRefreshSeconds = Math.max(
+        300,
+        Number(bootstrap?.appConfig?.desktop_notification_poll_seconds || bootstrap?.appConfig?.desktop_notification_poll_minutes || 30) || 30,
+      );
+      if (now - desktopNotificationBootstrapRefreshRef.current < heavyRefreshSeconds * 1000) return;
+      desktopNotificationBootstrapRefreshRef.current = now;
       try {
         await refreshBootstrap();
       } catch {
-        // Desktop notification refresh is best-effort.
+        desktopNotificationBootstrapRefreshRef.current = 0;
       }
     };
-    const pollSeconds = Math.max(10, Number(bootstrap?.appConfig?.desktop_notification_poll_seconds || bootstrap?.appConfig?.desktop_notification_poll_minutes || 30) || 30);
-    const timerId = window.setInterval(() => {
-      if (!cancelled) void refreshDesktopNotifications();
-    }, pollSeconds * 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timerId);
-    };
+    void refreshDesktopNotifications();
   }, [
     bootstrap?.appConfig?.desktop_notification_poll_minutes,
     bootstrap?.appConfig?.desktop_notification_poll_seconds,
     currentUser?.email,
     desktopAppSettings?.desktopNotificationsEnabled,
+    lowPriorityPollingPaused,
   ]);
 
   useEffect(() => {
@@ -3955,6 +4405,7 @@ export default function App() {
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop || !desktopWhatsappWorkspaceReady || desktopWhatsappWorkspaceStarted) return;
+    if (documentHidden) return;
     let cancelled = false;
 
     const syncState = async () => {
@@ -3973,11 +4424,12 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timerId);
     };
-  }, [bootstrap?.appConfig, desktopWhatsappWorkspaceReady, desktopWhatsappWorkspaceStarted]);
+  }, [bootstrap?.appConfig, desktopWhatsappWorkspaceReady, desktopWhatsappWorkspaceStarted, documentHidden]);
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop) return;
     if (!desktopWhatsappWorkspaceStarted) {
+      floatingSendPayloadSignatureRef.current = '';
       void closeFloatingSendWindow('inactive');
       return;
     }
@@ -4023,12 +4475,16 @@ export default function App() {
     }
 
     if (payload) {
+      const payloadSignature = JSON.stringify(payload);
+      if (floatingSendPayloadSignatureRef.current === payloadSignature) return;
+      floatingSendPayloadSignatureRef.current = payloadSignature;
       void showFloatingSendWindow(payload).then((result) => {
         if (!result.success && result.error) {
           setFlash({ type: 'warning', message: result.error });
         }
       });
     } else {
+      floatingSendPayloadSignatureRef.current = '';
       void closeFloatingSendWindow('inactive');
     }
   }, [
@@ -4130,13 +4586,6 @@ export default function App() {
     const userChanged = previousEmail !== nextEmail;
     applyThemeColors(payload.appConfig);
     seedBootstrapOverviewCaches(payload);
-    const warmed = showBootLoader && payload.user ? await warmInitialUiCaches(payload, targetTab || undefined) : null;
-    startTransition(() => {
-      if (warmed?.dashboard) setDashboardData(warmed.dashboard);
-      if (warmed?.reports) setReportsData(warmed.reports);
-      if (warmed?.activity) setActivityData((prev) => prev || warmed.activity || null);
-      if (warmed?.cdp) setCdpData((prev) => prev || warmed.cdp || null);
-    });
     if (showBootLoader && payload.user) {
       setBootStatus('Opening workspace...');
     }
@@ -4162,7 +4611,7 @@ export default function App() {
       setCounselorSendVerify(null);
       setCounselorNoticeSendPage(null);
       setCounselorNoticeSendVerify(null);
-      return;
+      return 'reports';
     }
     markAuthStateAuthenticated();
     setLoginRoleSelectionState(null);
@@ -4177,15 +4626,20 @@ export default function App() {
     }
     setLoginOtpState(null);
     if (forceDefaultTab || targetTab) {
-      setActiveTab(targetTab || payload.defaultTab || getDefaultTab(payload.user));
+      const nextTab = targetTab || payload.defaultTab || getDefaultTab(payload.user);
+      setActiveTab(nextTab);
       setMobileSidebarOpen(false);
-      return;
+      return nextTab;
     }
     const allowHiddenConfig = activeTab === 'config' && payload.user.role === 'admin';
     if (!payload.navTabs.includes(activeTab) && !allowHiddenConfig) {
-      setActiveTab(payload.defaultTab || getDefaultTab(payload.user));
+      const nextTab = payload.defaultTab || getDefaultTab(payload.user);
+      setActiveTab(nextTab);
+      setMobileSidebarOpen(false);
+      return nextTab;
     }
     setMobileSidebarOpen(false);
+    return activeTab;
   }
 
   async function refreshBootstrap(options?: { showBootLoader?: boolean; forceDefaultTab?: boolean; targetTab?: string }) {
@@ -4198,7 +4652,10 @@ export default function App() {
     }
     try {
       const payload = await getBootstrap();
-      await applyBootstrapPayload(payload, options);
+      const landingTab = await applyBootstrapPayload(payload, options);
+      if (showBootLoader && payload.user) {
+        await waitForWorkspaceReady(landingTab);
+      }
     } finally {
       if (showBootLoader) {
         await waitForMinimumBootLoaderTime();
@@ -4501,7 +4958,7 @@ export default function App() {
     setForgotPasswordState((prev) => ({ ...prev, loading: false, error: '' }));
     setFlash(null);
     if (!startGoogleOauth()) {
-      setFlash({ type: 'info', message: 'Google sign-in will be added to the desktop shell after the core login workflow is stabilized. Please use password login for desktop testing right now.' });
+      setFlash({ type: 'error', message: 'Unable to open Google sign-in. Please try again or use password login.' });
     }
   }
 
@@ -4697,6 +5154,8 @@ export default function App() {
 
   async function refreshUsersOverview(options?: { preferCache?: boolean }) {
     if (!currentUser || !['admin', 'principal', 'deo'].includes(currentUser.role)) return;
+    const requestSeq = usersOverviewRequestSeqRef.current + 1;
+    usersOverviewRequestSeqRef.current = requestSeq;
     const preferCache = options?.preferCache !== false;
     const cacheKey = buildUsersOverviewCacheKey();
     const cached = preferCache ? readOverviewCacheEntry(usersOverviewCacheRef, 'users', cacheKey) : null;
@@ -4707,12 +5166,15 @@ export default function App() {
     setUsersLoading(!cached);
     try {
       const payload = await getUsers();
+      if (usersOverviewRequestSeqRef.current !== requestSeq) return;
       writeOverviewCacheEntry(usersOverviewCacheRef, 'users', cacheKey, payload);
       applyUsersOverviewPayload(payload);
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load users.' });
     } finally {
-      setUsersLoading(false);
+      if (usersOverviewRequestSeqRef.current === requestSeq) {
+        setUsersLoading(false);
+      }
     }
   }
 
@@ -4829,43 +5291,61 @@ export default function App() {
   }
 
   async function refreshCounselorOverview() {
+    const requestSeq = counselorOverviewRequestSeqRef.current + 1;
+    counselorOverviewRequestSeqRef.current = requestSeq;
     setCounselorOverviewLoading(true);
     try {
       const payload = await getCounselorOverview();
+      if (counselorOverviewRequestSeqRef.current !== requestSeq) return;
       setCounselorOverview(payload);
     } catch (error) {
+      if (counselorOverviewRequestSeqRef.current !== requestSeq) return;
       setCounselorOverview(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load counselor dashboard.' });
     } finally {
-      setCounselorOverviewLoading(false);
+      if (counselorOverviewRequestSeqRef.current === requestSeq) {
+        setCounselorOverviewLoading(false);
+      }
     }
   }
 
   async function refreshCounselorTests() {
+    const requestSeq = counselorTestsRequestSeqRef.current + 1;
+    counselorTestsRequestSeqRef.current = requestSeq;
     setCounselorTestsLoading(true);
     try {
       const payload = await getCounselorTests();
+      if (counselorTestsRequestSeqRef.current !== requestSeq) return;
       setCounselorTests(payload.tests);
     } catch (error) {
+      if (counselorTestsRequestSeqRef.current !== requestSeq) return;
       setCounselorTests([]);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load counselor tests.' });
     } finally {
-      setCounselorTestsLoading(false);
+      if (counselorTestsRequestSeqRef.current === requestSeq) {
+        setCounselorTestsLoading(false);
+      }
     }
   }
 
   async function refreshCounselorMessages() {
+    const requestSeq = counselorMessagesRequestSeqRef.current + 1;
+    counselorMessagesRequestSeqRef.current = requestSeq;
     setCounselorMessagesLoading(true);
     try {
       const payload = await getCounselorMessages();
+      if (counselorMessagesRequestSeqRef.current !== requestSeq) return;
       setCounselorMessages(payload.messages);
       setCounselorMessageStats(payload.stats);
     } catch (error) {
+      if (counselorMessagesRequestSeqRef.current !== requestSeq) return;
       setCounselorMessages([]);
       setCounselorMessageStats(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load counselor messages.' });
     } finally {
-      setCounselorMessagesLoading(false);
+      if (counselorMessagesRequestSeqRef.current === requestSeq) {
+        setCounselorMessagesLoading(false);
+      }
     }
   }
 
@@ -4905,9 +5385,12 @@ export default function App() {
     date_to?: string;
     edit_id?: number | null;
   }) {
+    const requestSeq = noticesRequestSeqRef.current + 1;
+    noticesRequestSeqRef.current = requestSeq;
     setNoticesLoading(true);
     try {
       const payload = await getNoticesOverview(filters);
+      if (noticesRequestSeqRef.current !== requestSeq) return;
       setNoticesData(payload);
       setNoticeFilters({
         department: payload.filters.department || '',
@@ -4918,11 +5401,15 @@ export default function App() {
       });
       applyNoticeEditState(payload.editNotice);
     } finally {
-      setNoticesLoading(false);
+      if (noticesRequestSeqRef.current === requestSeq) {
+        setNoticesLoading(false);
+      }
     }
   }
 
   async function loadReports(department?: string, year?: number | null, options?: { preferCache?: boolean }) {
+    const requestSeq = reportsRequestSeqRef.current + 1;
+    reportsRequestSeqRef.current = requestSeq;
     const cacheKey = buildReportsOverviewCacheKey(department, year);
     const cached = options?.preferCache === false ? null : readOverviewCacheEntry(reportsOverviewCacheRef, 'reports', cacheKey);
     if (cached) {
@@ -4933,11 +5420,14 @@ export default function App() {
     setReportsLoading(!cached);
     try {
       const payload = await getReportsOverview(department, year);
+      if (reportsRequestSeqRef.current !== requestSeq) return;
       writeOverviewCacheEntry(reportsOverviewCacheRef, 'reports', cacheKey, payload);
       setReportsData(payload);
       setTestDetail(null);
     } finally {
-      setReportsLoading(false);
+      if (reportsRequestSeqRef.current === requestSeq) {
+        setReportsLoading(false);
+      }
     }
   }
 
@@ -5078,6 +5568,8 @@ export default function App() {
   }
 
   async function loadSubjects(department?: string, year?: number | null, semester?: string) {
+    const requestSeq = subjectsRequestSeqRef.current + 1;
+    subjectsRequestSeqRef.current = requestSeq;
     const cacheKey = JSON.stringify({
       department: String(department || '').trim().toUpperCase(),
       year: Number(year || 0) || 0,
@@ -5094,6 +5586,7 @@ export default function App() {
     setSubjectsLoading(true);
     try {
       const payload = await getSubjectsOverview(department, year, semester);
+      if (subjectsRequestSeqRef.current !== requestSeq) return;
       subjectsOverviewCacheRef.current.set(cacheKey, { timestamp: Date.now(), payload });
       setSubjectsData(payload);
       if (!payload.selectedDepartment || !payload.selectedYear || !payload.selectedSemester || (subjectEditId && !payload.records.some((record) => record.id === subjectEditId))) {
@@ -5103,7 +5596,9 @@ export default function App() {
       setSubjectsData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load subjects.' });
     } finally {
-      setSubjectsLoading(false);
+      if (subjectsRequestSeqRef.current === requestSeq) {
+        setSubjectsLoading(false);
+      }
     }
   }
 
@@ -5113,6 +5608,8 @@ export default function App() {
     semester?: string;
     subject_id?: number | null;
   }, options?: { preferCache?: boolean }) {
+    const requestSeq = cdpRequestSeqRef.current + 1;
+    cdpRequestSeqRef.current = requestSeq;
     const cacheKey = buildCdpOverviewCacheKey(filters);
     const cached = options?.preferCache === false ? null : readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey);
     if (cached) {
@@ -5122,13 +5619,52 @@ export default function App() {
     setCdpLoading(!cached);
     try {
       const payload = await getCdpOverview(filters);
+      if (cdpRequestSeqRef.current !== requestSeq) return;
       writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey, payload);
       setCdpData(payload);
     } catch (error) {
       setCdpData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load CDP overview.' });
     } finally {
+      if (cdpRequestSeqRef.current === requestSeq) {
+        setCdpLoading(false);
+      }
+    }
+  }
+
+  function buildCdpNavigationKey(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    subject_id?: number | null;
+  }) {
+    return buildCdpOverviewCacheKey(filters);
+  }
+
+  async function navigateToCdpWithPrefetch(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    subject_id?: number | null;
+  }) {
+    const navigationKey = buildCdpNavigationKey(filters);
+    setCdpNavigationLoadingKey(navigationKey);
+    try {
+      const cached = readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', navigationKey);
+      let payload = cached?.payload || null;
+      if (!payload || Date.now() - cached!.timestamp >= SCOPE_CACHE_TTL_MS) {
+        payload = await getCdpOverview(filters);
+        writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', navigationKey, payload);
+      }
+      cdpDirectNavigationRef.current = true;
+      setCdpData(payload);
       setCdpLoading(false);
+      startTransition(() => setActiveTab('cdp'));
+      setMobileSidebarOpen(false);
+    } catch (error) {
+      setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to open CDP entry.' });
+    } finally {
+      setCdpNavigationLoadingKey('');
     }
   }
 
@@ -5137,6 +5673,7 @@ export default function App() {
     year: number;
     semester: string;
     subject_id?: number | null;
+    force?: boolean;
   }) {
     setCdpLoading(true);
     setCdpData(null);
@@ -5306,6 +5843,8 @@ export default function App() {
   }
 
   async function loadDashboardOverview(options?: { preferCache?: boolean }) {
+    const requestSeq = dashboardRequestSeqRef.current + 1;
+    dashboardRequestSeqRef.current = requestSeq;
     const cacheKey = buildDashboardOverviewCacheKey();
     const cached = options?.preferCache === false ? null : readOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', cacheKey);
     if (cached) {
@@ -5315,13 +5854,16 @@ export default function App() {
     setDashboardLoading(!cached);
     try {
       const payload = await getDashboardOverview();
+      if (dashboardRequestSeqRef.current !== requestSeq) return;
       writeOverviewCacheEntry(dashboardOverviewCacheRef, 'dashboard', cacheKey, payload);
       setDashboardData(payload);
     } catch (error) {
       setDashboardData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load dashboard overview.' });
     } finally {
-      setDashboardLoading(false);
+      if (dashboardRequestSeqRef.current === requestSeq) {
+        setDashboardLoading(false);
+      }
     }
   }
 
@@ -5330,29 +5872,32 @@ export default function App() {
     if (payload.prefetchedResults?.length && scopeSeedKey && !activityScopeSeededRef.current.has(scopeSeedKey)) {
       activityScopeSeededRef.current.add(scopeSeedKey);
       const basePayload = stripActivityPrefetchedResults(payload);
-      for (const entry of payload.prefetchedResults || []) {
-        const cacheKey = buildActivityOverviewCacheKey({
-          department: entry.department,
-          year: entry.year_level,
-          semester: entry.semester,
-          test_name: entry.test_name,
-          q: '',
-          sort: 'pending_first',
-        });
-        writeOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey, {
-          ...basePayload,
-          selectedDepartment: entry.department,
-          selectedYear: entry.year_level,
-          selectedSemester: entry.semester,
-          selectedTestName: entry.test_name,
-          searchQuery: '',
-          sortMode: 'pending_first',
-          showDepartmentPicker: false,
-          showYearPicker: false,
-          showSemesterPicker: false,
-          result: entry,
-        }, false);
-      }
+      const prefetchedResults = payload.prefetchedResults || [];
+      scheduleIdleWork(() => {
+        for (const entry of prefetchedResults) {
+          const cacheKey = buildActivityOverviewCacheKey({
+            department: entry.department,
+            year: entry.year_level,
+            semester: entry.semester,
+            test_name: entry.test_name,
+            q: '',
+            sort: 'pending_first',
+          });
+          writeOverviewCacheEntry(activityOverviewCacheRef, 'activity', cacheKey, {
+            ...basePayload,
+            selectedDepartment: entry.department,
+            selectedYear: entry.year_level,
+            selectedSemester: entry.semester,
+            selectedTestName: entry.test_name,
+            searchQuery: '',
+            sortMode: 'pending_first',
+            showDepartmentPicker: false,
+            showYearPicker: false,
+            showSemesterPicker: false,
+            result: entry,
+          }, false);
+        }
+      }, 100, 2000);
     }
     const nextPayload = stripActivityPrefetchedResults(payload);
     startTransition(() => {
@@ -5376,6 +5921,8 @@ export default function App() {
     q?: string;
     sort?: string;
   }, options?: { preferCache?: boolean }) {
+    const requestSeq = activityRequestSeqRef.current + 1;
+    activityRequestSeqRef.current = requestSeq;
     const normalizedFilters = {
       department: String(filters?.department || '').trim().toUpperCase(),
       year: Number(filters?.year || 0) || 0,
@@ -5400,6 +5947,7 @@ export default function App() {
         q: normalizedFilters.q || undefined,
         sort: normalizedFilters.sort,
       });
+      if (activityRequestSeqRef.current !== requestSeq) return;
       writeOverviewCacheEntry(
         activityOverviewCacheRef,
         'activity',
@@ -5412,7 +5960,9 @@ export default function App() {
       setActivityData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load counselor activity.' });
     } finally {
-      setActivityLoading(false);
+      if (activityRequestSeqRef.current === requestSeq) {
+        setActivityLoading(false);
+      }
     }
   }
 
@@ -5423,10 +5973,13 @@ export default function App() {
     month?: string;
     day_num?: string;
   }, limit = adminMessagesLimit) {
+    const requestSeq = adminMessagesRequestSeqRef.current + 1;
+    adminMessagesRequestSeqRef.current = requestSeq;
     setAdminMessagesLoading(true);
     try {
       const normalizedLimit = Math.max(100, limit || DEFAULT_ADMIN_MESSAGES_LIMIT);
       const payload = await getAdminMessagesOverview({ ...filters, limit: normalizedLimit });
+      if (adminMessagesRequestSeqRef.current !== requestSeq) return;
       setAdminMessagesData(payload);
       setAdminMessagesLimit(normalizedLimit);
       setAdminMessageFilters({
@@ -5439,10 +5992,13 @@ export default function App() {
       setAdminMessageSearch(payload.filters.q || '');
       setSelectedAdminMessageIds([]);
     } catch (error) {
+      if (adminMessagesRequestSeqRef.current !== requestSeq) return;
       setAdminMessagesData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load message logs.' });
     } finally {
-      setAdminMessagesLoading(false);
+      if (adminMessagesRequestSeqRef.current === requestSeq) {
+        setAdminMessagesLoading(false);
+      }
     }
   }
 
@@ -5458,30 +6014,57 @@ export default function App() {
     return loadAdminMessages(filters, nextLimit);
   }
 
-  async function loadMonitoringOverview() {
-    setMonitoringLoading(true);
+  async function loadMonitoringOverview(options?: { preferCache?: boolean }) {
+    const requestSeq = monitoringRequestSeqRef.current + 1;
+    monitoringRequestSeqRef.current = requestSeq;
+    const cacheKey = 'monitoring-overview';
+    const cached = options?.preferCache === false ? null : monitoringOverviewCacheRef.current.get(cacheKey);
+    if (cached) {
+      setMonitoringData(cached.payload);
+      if (Date.now() - cached.timestamp < MONITORING_CACHE_TTL_MS) return;
+    }
+    setMonitoringLoading(!cached);
     try {
-      const payload = await getMonitoringOverview();
+      const payload = await getMonitoringOverview({ historyLimit: MONITORING_HISTORY_LIMIT });
+      if (monitoringRequestSeqRef.current !== requestSeq) return;
+      monitoringOverviewCacheRef.current.set(cacheKey, { timestamp: Date.now(), payload });
       setMonitoringData(payload);
     } catch (error) {
-      setMonitoringData(null);
+      if (monitoringRequestSeqRef.current !== requestSeq) return;
+      if (!cached) setMonitoringData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load session monitoring.' });
     } finally {
-      setMonitoringLoading(false);
+      if (monitoringRequestSeqRef.current === requestSeq) {
+        setMonitoringLoading(false);
+      }
     }
   }
 
-  async function loadDatabaseOverview() {
-    setDatabaseLoading(true);
+  async function loadDatabaseOverview(options?: { preferCache?: boolean }) {
+    const requestSeq = databaseRequestSeqRef.current + 1;
+    databaseRequestSeqRef.current = requestSeq;
+    const cacheKey = 'database-overview';
+    const cached = options?.preferCache === false ? null : databaseOverviewCacheRef.current.get(cacheKey);
+    if (cached) {
+      setDatabaseData(cached.payload);
+      setDatabaseBatchName(cached.payload.currentBatchYear || '');
+      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+    }
+    setDatabaseLoading(!cached);
     try {
       const payload = await getDatabaseOverview();
+      if (databaseRequestSeqRef.current !== requestSeq) return;
+      databaseOverviewCacheRef.current.set(cacheKey, { timestamp: Date.now(), payload });
       setDatabaseData(payload);
       setDatabaseBatchName(payload.currentBatchYear || '');
     } catch (error) {
-      setDatabaseData(null);
+      if (databaseRequestSeqRef.current !== requestSeq) return;
+      if (!cached) setDatabaseData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load database tools.' });
     } finally {
-      setDatabaseLoading(false);
+      if (databaseRequestSeqRef.current === requestSeq) {
+        setDatabaseLoading(false);
+      }
     }
   }
 
@@ -5518,7 +6101,10 @@ export default function App() {
       activity_copy_as_image: toBooleanString(payload.appConfig.activity_copy_as_image),
       notice_defaulter_copy_template: payload.appConfig.notice_defaulter_copy_template || DEFAULT_NOTICE_DEFAULTER_COPY_TEMPLATE,
       activity_defaulter_copy_template: payload.appConfig.activity_defaulter_copy_template || DEFAULT_ACTIVITY_DEFAULTER_COPY_TEMPLATE,
-      cdp_defaulter_copy_template: payload.appConfig.cdp_defaulter_copy_template || DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE,
+      cdp_defaulter_copy_template: normalizeCdpTemplate(payload.appConfig.cdp_daily_attendance_copy_template || payload.appConfig.cdp_defaulter_copy_template, DEFAULT_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE, [LEGACY_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE]),
+      cdp_daily_attendance_copy_template: normalizeCdpTemplate(payload.appConfig.cdp_daily_attendance_copy_template || payload.appConfig.cdp_defaulter_copy_template, DEFAULT_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE, [LEGACY_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE]),
+      cdp_lecture_plan_copy_template: normalizeCdpTemplate(payload.appConfig.cdp_lecture_plan_copy_template, DEFAULT_CDP_LECTURE_PLAN_COPY_TEMPLATE, [LEGACY_CDP_LECTURE_PLAN_COPY_TEMPLATE]),
+      cdp_mark_entry_copy_template: normalizeCdpTemplate(payload.appConfig.cdp_mark_entry_copy_template, DEFAULT_CDP_MARK_ENTRY_COPY_TEMPLATE, [LEGACY_CDP_MARK_ENTRY_COPY_TEMPLATE]),
       backup_storage_mode: payload.appConfig.backup_storage_mode || 'local',
       smtp_server: payload.appConfig.smtp_server || '',
       smtp_port: payload.appConfig.smtp_port || '587',
@@ -5529,7 +6115,8 @@ export default function App() {
       google_oauth_client_id: payload.appConfig.google_oauth_client_id || '',
       google_oauth_client_secret: '',
       google_oauth_allowed_domain: payload.appConfig.google_oauth_allowed_domain || '',
-      google_oauth_redirect_base_url: payload.appConfig.google_oauth_redirect_base_url || '',
+      public_app_base_url: payload.appConfig.public_app_base_url || payload.appConfig.google_oauth_redirect_base_url || '',
+      google_oauth_redirect_base_url: payload.appConfig.public_app_base_url || payload.appConfig.google_oauth_redirect_base_url || '',
       google_oauth_bulk_password_mode: payload.appConfig.google_oauth_bulk_password_mode || 'sheet',
       google_oauth_bulk_override_password: '',
       google_drive_refresh_token: '',
@@ -5540,38 +6127,53 @@ export default function App() {
   }
 
   async function loadConfigOverview() {
+    const requestSeq = configRequestSeqRef.current + 1;
+    configRequestSeqRef.current = requestSeq;
     setConfigLoading(true);
     try {
       const payload = await getConfigOverview();
+      if (configRequestSeqRef.current !== requestSeq) return;
       applyConfigPayload(payload);
     } catch (error) {
+      if (configRequestSeqRef.current !== requestSeq) return;
       setConfigData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load settings.' });
     } finally {
-      setConfigLoading(false);
+      if (configRequestSeqRef.current === requestSeq) {
+        setConfigLoading(false);
+      }
     }
   }
 
   async function loadServerConsole(limit = 30) {
+    const requestSeq = serverConsoleRequestSeqRef.current + 1;
+    serverConsoleRequestSeqRef.current = requestSeq;
     setServerConsoleLoading(true);
     try {
       const payload = await getServerConsole(limit);
+      if (serverConsoleRequestSeqRef.current !== requestSeq) return;
       setServerConsoleData(payload);
     } catch (error) {
+      if (serverConsoleRequestSeqRef.current !== requestSeq) return;
       setServerConsoleData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load server console.' });
     } finally {
-      setServerConsoleLoading(false);
+      if (serverConsoleRequestSeqRef.current === requestSeq) {
+        setServerConsoleLoading(false);
+      }
     }
   }
 
   async function loadTestDetail(testId: number) {
+    const requestSeq = testDetailRequestSeqRef.current + 1;
+    testDetailRequestSeqRef.current = requestSeq;
     setTestDetailLoading(true);
     try {
       if (currentUser?.role === 'counselor') {
         setActiveTab('test-database');
       }
       const payload = await getTestDetail(testId);
+      if (testDetailRequestSeqRef.current !== requestSeq) return;
       setTestDetail(payload);
       testDetailOriginalMarksRef.current = buildTestDetailMarksSnapshot(payload);
       setTestMetaDraft({
@@ -5581,9 +6183,12 @@ export default function App() {
         section: payload.meta.section || '',
       });
     } catch (error) {
+      if (testDetailRequestSeqRef.current !== requestSeq) return;
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load test details.' });
     } finally {
-      setTestDetailLoading(false);
+      if (testDetailRequestSeqRef.current === requestSeq) {
+        setTestDetailLoading(false);
+      }
     }
   }
 
@@ -5597,6 +6202,8 @@ export default function App() {
   }
 
   async function openCounselorSendPage(testId: number, mode: CounselorSendMode = 'app') {
+    const requestSeq = counselorSendPageRequestSeqRef.current + 1;
+    counselorSendPageRequestSeqRef.current = requestSeq;
     const resolvedMode = mode;
     setActiveTab('test-database');
     setCounselorSendVerify(null);
@@ -5606,6 +6213,7 @@ export default function App() {
     setCounselorSendLoading(true);
     try {
       const payload = await getCounselorSendPage(testId, resolveCounselorSendBackendMode(resolvedMode));
+      if (counselorSendPageRequestSeqRef.current !== requestSeq) return;
       const defaultOrder = buildDefaultOrderList(payload.rows);
       let storedValues: Partial<typeof counselorSendVars> = {};
       try {
@@ -5634,9 +6242,12 @@ export default function App() {
       stopCounselorBatchSend();
       setTestDetail(null);
     } catch (error) {
+      if (counselorSendPageRequestSeqRef.current !== requestSeq) return;
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to open send results page.' });
     } finally {
-      setCounselorSendLoading(false);
+      if (counselorSendPageRequestSeqRef.current === requestSeq) {
+        setCounselorSendLoading(false);
+      }
     }
   }
 
@@ -5727,6 +6338,8 @@ export default function App() {
   }
 
   async function openCounselorNoticeSendPage(noticeId: number, mode: CounselorSendMode = 'app') {
+    const requestSeq = counselorNoticeSendPageRequestSeqRef.current + 1;
+    counselorNoticeSendPageRequestSeqRef.current = requestSeq;
     const resolvedMode = mode;
     setActiveTab('notices');
     setCounselorNoticeSendVerify(null);
@@ -5736,6 +6349,7 @@ export default function App() {
     setCounselorNoticeSendLoading(true);
     try {
       const payload = await getCounselorNoticeSendPage(noticeId, resolveCounselorSendBackendMode(resolvedMode));
+      if (counselorNoticeSendPageRequestSeqRef.current !== requestSeq) return;
       let storedValues: Partial<typeof counselorNoticeSendVars> = {};
       try {
         storedValues = JSON.parse(localStorage.getItem(`notice_send_vars_${payload.noticeId}`) || '{}');
@@ -5762,9 +6376,12 @@ export default function App() {
       counselorNoticeBatchQueueRef.current = [];
       stopCounselorNoticeBatchSend();
     } catch (error) {
+      if (counselorNoticeSendPageRequestSeqRef.current !== requestSeq) return;
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to open send notice page.' });
     } finally {
-      setCounselorNoticeSendLoading(false);
+      if (counselorNoticeSendPageRequestSeqRef.current === requestSeq) {
+        setCounselorNoticeSendLoading(false);
+      }
     }
   }
 
@@ -7306,17 +7923,17 @@ export default function App() {
 
   async function handleLogoutAllUsers() {
     const confirmed = await requestConfirm({
-      title: 'Logout All Users',
-      message: 'Logout all active users now?',
-      confirmLabel: 'Logout All',
+      title: 'Logout Other Users',
+      message: 'Logout every other active session now? Your current admin session will stay signed in.',
+      confirmLabel: 'Logout Others',
       confirmClassName: 'btn btn-warning btn-sm',
       iconClassName: 'fas fa-power-off',
     });
     if (!confirmed) return;
     try {
       await logoutAllSessions();
-      setFlash({ type: 'success', message: 'All active sessions were logged out.' });
-      await loadMonitoringOverview();
+      setFlash({ type: 'success', message: 'Other active sessions were logged out.' });
+      await loadMonitoringOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to logout all users.' });
     }
@@ -7333,7 +7950,7 @@ export default function App() {
     if (!confirmed) return;
     try {
       await forceLogoutSession(email);
-      await loadMonitoringOverview();
+      await loadMonitoringOverview({ preferCache: false });
       setFlash({ type: 'success', message: `${email} was logged out.` });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to force logout user.' });
@@ -7344,7 +7961,7 @@ export default function App() {
     try {
       await cleanupSessions();
       setFlash({ type: 'success', message: 'Inactive sessions were cleaned up.' });
-      await loadMonitoringOverview();
+      await loadMonitoringOverview({ preferCache: false });
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to clean inactive sessions.' });
     }
@@ -7361,7 +7978,7 @@ export default function App() {
       const result = await createDatabaseBackup(databaseBatchName, databaseOverwrite);
       setFlash({ type: 'success', message: result.message });
       setDatabaseOverwrite(false);
-      await loadDatabaseOverview();
+      await loadDatabaseOverview({ preferCache: false });
       setDatabaseProgress(null);
     } catch (error) {
       setDatabaseProgress(null);
@@ -7392,7 +8009,7 @@ export default function App() {
         setArchiveYearStart('');
         setArchiveYearEnd('');
         setArchiveYearOverwrite(false);
-        await loadDatabaseOverview();
+        await loadDatabaseOverview({ preferCache: false });
         return;
       }
 
@@ -7401,7 +8018,7 @@ export default function App() {
         setFlash({ type: 'success', message: `Deleted archive ${databaseBackupAction.backupName}.` });
         setDatabaseBackupAction(null);
         setDatabaseActionPassword('');
-        await loadDatabaseOverview();
+        await loadDatabaseOverview({ preferCache: false });
         return;
       }
 
@@ -7417,7 +8034,7 @@ export default function App() {
         setFlash({ type: 'success', message: 'Active database cleared successfully.' });
         setDatabaseBackupAction(null);
         setDatabaseActionPassword('');
-        await loadDatabaseOverview();
+        await loadDatabaseOverview({ preferCache: false });
         return;
       }
 
@@ -7426,7 +8043,7 @@ export default function App() {
         setFlash({ type: 'success', message: `Deleted backup ${databaseBackupAction.backupName}.` });
         setDatabaseBackupAction(null);
         setDatabaseActionPassword('');
-        await loadDatabaseOverview();
+        await loadDatabaseOverview({ preferCache: false });
         return;
       }
 
@@ -7443,7 +8060,7 @@ export default function App() {
         setFlash({ type: 'success', message: `Restored archive ${databaseBackupAction.backupName}.` });
         setDatabaseBackupAction(null);
         setDatabaseActionPassword('');
-        await loadDatabaseOverview();
+        await loadDatabaseOverview({ preferCache: false });
         return;
       }
 
@@ -7459,7 +8076,7 @@ export default function App() {
       setFlash({ type: 'success', message: `Restored backup ${databaseBackupAction.backupName}.` });
       setDatabaseBackupAction(null);
       setDatabaseActionPassword('');
-      await loadDatabaseOverview();
+      await loadDatabaseOverview({ preferCache: false });
     } catch (error) {
       setDatabaseProgress(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Database action failed.' });
@@ -7494,7 +8111,7 @@ export default function App() {
       }
       setDatabaseProgress(null);
       await refreshBootstrap({ targetTab: activeTab });
-      await loadDatabaseOverview();
+      await loadDatabaseOverview({ preferCache: false });
     } catch (error) {
       setDatabaseProgress(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to open archive view.' });
@@ -7514,7 +8131,7 @@ export default function App() {
       }
       setDatabaseProgress(null);
       await refreshBootstrap({ targetTab: activeTab });
-      await loadDatabaseOverview();
+      await loadDatabaseOverview({ preferCache: false });
     } catch (error) {
       setDatabaseProgress(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to exit archive view.' });
@@ -7597,11 +8214,9 @@ export default function App() {
       setPendingConfigTab(tab);
       return;
     }
-    setActiveTab(tab);
+    closeUtilityPages();
+    startTransition(() => setActiveTab(tab));
     setMobileSidebarOpen(false);
-    if (tab === 'reports') {
-      void loadReports();
-    }
     if (tab === 'test-database') {
       setTestDetail(null);
       setCounselorSendPage(null);
@@ -8263,8 +8878,32 @@ export default function App() {
             </div>
           </div>
           {desktopConnectivity?.error ? <div className="alert alert-warning" style={{ marginBottom: 14 }}>{desktopConnectivity.error}</div> : null}
+          <div className="card mb-3" style={{ padding: 14, background: 'rgba(148,163,184,.055)', border: '1px solid var(--border)' }}>
+            <div className="d-flex justify-between align-center flex-wrap" style={{ gap: 12 }}>
+              <div>
+                <div className="form-label">Desktop Scale</div>
+                <div className="inline-muted">Local to this PC. Hold Ctrl and scroll to adjust quickly.</div>
+              </div>
+              <div className="d-flex align-center" style={{ gap: 10, minWidth: 280 }}>
+                <input
+                  type="range"
+                  min="0.8"
+                  max="1.35"
+                  step="0.05"
+                  value={clampDesktopScale(desktopAppSettings?.desktopScale || 1)}
+                  onChange={(event) => {
+                    const nextScale = clampDesktopScale(event.target.value);
+                    setDesktopAppSettings((prev) => prev ? { ...prev, desktopScale: nextScale } : prev);
+                    void saveDesktopSettingPatch({ desktopScale: nextScale });
+                  }}
+                  style={{ flex: 1 }}
+                />
+                <span className="badge badge-muted">{Math.round(clampDesktopScale(desktopAppSettings?.desktopScale || 1) * 100)}%</span>
+              </div>
+            </div>
+          </div>
           {[
-            ['launchAtWindowsStartup', 'Start With Windows', 'Launch Shine into the tray on login.'],
+            ['launchAtWindowsStartup', 'Start With Windows', 'Always enabled. Shine launches quietly into the tray on login.'],
             ['startMinimizedToTrayOnLogin', 'Startup Minimized To Tray', 'Keep startup quiet until the app is opened manually.'],
             ['minimizeToTrayOnClose', 'Close Minimizes To Tray', 'Use the tray Quit action to fully exit.'],
             ['desktopNotificationsEnabled', 'Desktop Notifications', 'Show update and counselor alert notifications.'],
@@ -8280,9 +8919,10 @@ export default function App() {
               <label className="settings-slider">
                 <input
                   type="checkbox"
-                  checked={Boolean(desktopAppSettings?.[key as keyof DesktopAppSettings])}
-                  disabled={desktopSettingsSaving}
+                  checked={key === 'launchAtWindowsStartup' ? true : Boolean(desktopAppSettings?.[key as keyof DesktopAppSettings])}
+                  disabled={desktopSettingsSaving || key === 'launchAtWindowsStartup'}
                   onChange={(event) => {
+                    if (key === 'launchAtWindowsStartup') return;
                     const nextValue = event.target.checked;
                     setDesktopAppSettings((prev) => prev ? { ...prev, [key]: nextValue } : prev);
                     void saveDesktopSettingPatch({ [key]: nextValue } as Partial<DesktopAppSettings>);
@@ -8346,58 +8986,32 @@ export default function App() {
   );
 
   const renderNotificationCenterPage = () => (
-    <section className="notification-page">
-      <div className="card mb-3">
-        <div className="notification-page-header">
-          <button type="button" className="btn btn-outline btn-sm" onClick={() => setNotificationCenterOpen(false)}>
-            <i className="fas fa-arrow-left"></i> Back
-          </button>
-          <div>
-            <div className="card-title" style={{ marginBottom: 2 }}><i className="fas fa-bell"></i> Notification Center</div>
-            <div className="inline-muted">{unreadNotificationCount} unread notification{unreadNotificationCount === 1 ? '' : 's'}</div>
-          </div>
-          {appNotifications.length ? (
-            <button type="button" className="btn btn-outline btn-sm" onClick={() => markNotificationsRead(appNotifications.map((item) => item.key))}>
-              <i className="fas fa-check-double"></i> Mark All Read
-            </button>
-          ) : null}
-        </div>
-      </div>
-      {appNotifications.length ? (
-        <div className="notification-page-list">
-          {appNotifications.map((item) => {
-            const unread = !seenNotificationKeys.has(item.key);
-            return (
-              <article key={item.key} className={`notification-page-item ${unread ? 'unread' : ''} notification-${item.severity}`}>
-                <button
-                  type="button"
-                  className="notification-page-main"
-                  onClick={() => {
-                    markNotificationsRead([item.key]);
-                    if (item.actionTab) {
-                      setActiveTab(item.actionTab);
-                      setNotificationCenterOpen(false);
-                    }
-                  }}
-                >
-                  <span className="notification-dot" aria-hidden="true"></span>
-                  <span className="notification-content">
-                    <strong>{item.title}</strong>
-                    <span>{item.body}</span>
-                    {item.createdAt ? <small>{formatUtcSqlDateTime(item.createdAt)}</small> : null}
-                  </span>
-                </button>
-                <button type="button" className="btn btn-outline btn-sm" onClick={() => deleteNotifications([item.key])}>
-                  <i className="fas fa-trash"></i> Delete
-                </button>
-              </article>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="card"><div className="panel-placeholder">No notifications right now.</div></div>
-      )}
-    </section>
+    <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading notification center...</div></div>}>
+      <NotificationCenterPage
+        notifications={appNotifications}
+        seenKeys={seenNotificationKeys}
+        unreadCount={unreadNotificationCount}
+        formatDateTime={formatUtcSqlDateTime}
+        onBack={() => setNotificationCenterOpen(false)}
+        onMarkRead={markNotificationsRead}
+        onDelete={deleteNotifications}
+        onOpenTab={(tab) => {
+          handleSidebarTabNavigation(tab);
+        }}
+      />
+    </Suspense>
+  );
+
+  const renderCreditsPage = () => (
+    <Suspense fallback={<div className="card"><div className="panel-placeholder">Loading credits...</div></div>}>
+      <CreditsPage
+        compiledHtml={creditsHtml}
+        loading={creditsLoading}
+        error={creditsError}
+        onBack={() => setCreditsPageOpen(false)}
+        onRefresh={() => void openCreditsPage(true)}
+      />
+    </Suspense>
   );
 
   return (
@@ -8415,11 +9029,12 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="sidebar-nav">
+        <nav className="sidebar-nav" data-tour-id="app-navigation">
           {navTabs.map((tab) => (
             <button
               key={tab}
               type="button"
+              data-tour-id={`nav-${tab}`}
               className={`nav-link tab-nav ${activeTab === tab ? 'active' : ''}`}
               onClick={() => handleSidebarTabNavigation(tab)}
               style={{ width: '100%', border: 'none', background: activeTab === tab ? undefined : 'transparent', textAlign: 'left', fontFamily: 'inherit', fontSize: 'inherit' }}
@@ -8475,7 +9090,9 @@ export default function App() {
           {embeddedWhatsappSidepaneLayoutActive ? null : (
             <button className="mobile-toggle" type="button" onClick={() => setMobileSidebarOpen(true)}><i className="fas fa-bars"></i></button>
           )}
-          <h1 className="page-title">{notificationCenterOpen ? 'Notification Center' : getPageTitle(activeTab, currentUser)}</h1>
+          <h1 className="page-title">
+            {creditsPageOpen ? 'Credits' : notificationCenterOpen ? 'Notification Center' : getPageTitle(activeTab, currentUser)}
+          </h1>
           <div className="header-actions">
             <div className="icon-group">
               {archiveViewActive ? (
@@ -8499,6 +9116,7 @@ export default function App() {
                   type="button"
                   title={smtpIndicator.detail}
                   onClick={() => {
+                    closeUtilityPages();
                     setActiveTab('config');
                     void loadConfigOverview();
                   }}
@@ -8545,6 +9163,7 @@ export default function App() {
                   type="button"
                   className="btn btn-outline btn-sm icon-btn"
                   onClick={() => {
+                    closeUtilityPages();
                     setActiveTab('config');
                     void loadConfigOverview();
                   }}
@@ -8557,6 +9176,7 @@ export default function App() {
                   type="button"
                   className="btn btn-outline btn-sm icon-btn"
                   onClick={() => {
+                    closeUtilityPages();
                     setDesktopSettingsPanelOpen(true);
                     void loadDesktopRuntimeState();
                     openDesktopSettings();
@@ -8586,6 +9206,27 @@ export default function App() {
             </div>
           </div>
         ) : null}
+        {foregroundNotificationToasts.length ? (
+          <div className="notification-toast-stack" role="status" aria-live="polite">
+            {foregroundNotificationToasts.map((item) => (
+              <article key={item.key} className={`notification-toast-card notification-${item.severity}`}>
+                <span className="notification-toast-dot" aria-hidden="true"></span>
+                <div className="notification-toast-content">
+                  <strong>{item.title}</strong>
+                  <span>{item.body}</span>
+                </div>
+                <button
+                  type="button"
+                  className="notification-toast-close"
+                  aria-label="Close notification"
+                  onClick={() => setForegroundNotificationToasts((prev) => prev.filter((toast) => toast.key !== item.key))}
+                >
+                  <i className="fas fa-xmark"></i>
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : null}
         {desktopWhatsappWorkspaceTransition ? (
           <div className={`desktop-embed-transition-overlay ${desktopWhatsappWorkspaceTransition === 'exit' ? 'is-exit' : ''}`} role="status" aria-live="polite">
             <div className="desktop-embed-transition-card">
@@ -8603,7 +9244,9 @@ export default function App() {
         ) : null}
 
         <div className={`content-area ${embeddedWhatsappSidepaneLayoutActive ? 'embed-sidepanel-content' : ''} ${desktopWhatsappWorkspaceExiting ? 'embed-sidepanel-content-exiting' : ''}`} ref={contentAreaRef}>
-          {notificationCenterOpen ? (
+          {creditsPageOpen ? (
+            renderCreditsPage()
+          ) : notificationCenterOpen ? (
             renderNotificationCenterPage()
           ) : currentUser.role === 'counselor' && activeTab === 'test-database' && counselorSendVerify ? (
             <>
@@ -8702,6 +9345,7 @@ export default function App() {
                 {counselorSendEmbeddedWhatsappActive ? (
                   <div
                     className={`desktop-send-workspace-layout ${embeddedWhatsappSidepaneLayoutActive ? 'is-compact' : ''}`}
+                    data-tour-id="counselor-send-workspace"
                     ref={desktopReportWorkspaceRef}
                   >
                     <div className="desktop-send-workspace-main">
@@ -8804,6 +9448,7 @@ export default function App() {
                             <button
                               type="button"
                               className="btn btn-success desktop-send-start-btn"
+                              data-tour-id="counselor-send-start-workflow"
                               disabled={desktopWhatsappWorkspaceBusy}
                               onClick={() => void startDesktopWhatsappWorkspace('report')}
                             >
@@ -8903,7 +9548,7 @@ export default function App() {
                   </div>
                 ) : (
                 <>
-                <div className="card mb-3">
+                <div className="card mb-3" data-tour-id="counselor-send-workspace">
                   <div className="card-title"><i className="fas fa-sliders"></i> Common Variables</div>
                   <div className="form-row">
                     <div className="form-group">
@@ -9199,6 +9844,7 @@ export default function App() {
                 {counselorNoticeEmbeddedWhatsappActive ? (
                   <div
                     className={`desktop-send-workspace-layout ${embeddedWhatsappSidepaneLayoutActive ? 'is-compact' : ''}`}
+                    data-tour-id="counselor-notice-send-workspace"
                     ref={desktopNoticeWorkspaceRef}
                   >
                     <div className="desktop-send-workspace-main">
@@ -9271,6 +9917,7 @@ export default function App() {
                             <button
                               type="button"
                               className="btn btn-success desktop-send-start-btn"
+                              data-tour-id="counselor-notice-start-workflow"
                               disabled={desktopWhatsappWorkspaceBusy}
                               onClick={() => void startDesktopWhatsappWorkspace('notice')}
                             >
@@ -9419,7 +10066,7 @@ export default function App() {
                   </div>
                 ) : (
                 <>
-                <div className="card mb-3">
+                <div className="card mb-3" data-tour-id="counselor-notice-send-workspace">
                   <div className="card-title"><i className="fas fa-pen-to-square"></i> Message Template</div>
                     <div className="form-row">
                       <div className="form-group">
@@ -9652,7 +10299,7 @@ export default function App() {
             ) : null
           ) : currentUser.role === 'counselor' && activeTab === 'recent-tests' ? (
             <>
-              <div className="metrics-grid mb-3">
+              <div className="metrics-grid mb-3" data-tour-id="counselor-dashboard">
                 <div className="metric-card">
                   <div className="metric-label">My Students</div>
                   <div className="metric-value">{counselorOverview?.studentCount ?? bootstrap?.metrics.studentCount ?? 0}</div>
@@ -9678,7 +10325,7 @@ export default function App() {
               <h3 className="section-title"><i className="fas fa-gauge"></i> Dashboard</h3>
 
               <div className="counselor-insights-stack mb-3">
-                <div className="card counselor-insight-card" id="topPerformingStudentsCard" style={{ padding: 14 }}>
+                <div className="card counselor-insight-card" id="topPerformingStudentsCard" data-tour-id="counselor-top-students" style={{ padding: 14 }}>
                   <div className="card-title"><i className="fas fa-trophy"></i> Top Performing Students</div>
                   {counselorTopPerformingStudents.length ? (
                     <div className="student-performance-list">
@@ -9703,7 +10350,7 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="card counselor-insight-card" id="studentsNeedImprovementCard" style={{ padding: 14 }}>
+                <div className="card counselor-insight-card" id="studentsNeedImprovementCard" data-tour-id="counselor-improvement-students" style={{ padding: 14 }}>
                   <div className="card-title"><i className="fas fa-chart-line"></i> Students Who Need Improvements</div>
                   {counselorStudentsNeedImprovement.length ? (
                     <div className="student-performance-list">
@@ -9733,7 +10380,7 @@ export default function App() {
               </div>
 
               <h3 className="section-title" id="recentTestsSectionTitle"><i className="fas fa-clipboard-list"></i> Dashboard - Recent Tests</h3>
-              <div className="table-wrapper mb-3">
+              <div className="table-wrapper mb-3" data-tour-id="counselor-recent-tests">
                 <table>
                   <thead>
                     <tr>
@@ -9770,7 +10417,7 @@ export default function App() {
                             <button type="button" className="btn btn-outline btn-sm" onClick={() => void loadTestDetail(test.id)}>
                               <i className="fas fa-eye"></i> View/Edit
                             </button>
-                            <button type="button" className="btn btn-primary btn-sm" disabled={sendResultOpeningId === test.id} onClick={() => startCounselorSendFlow(test.id, test.test_name)}>
+                            <button type="button" className="btn btn-primary btn-sm" data-tour-id="counselor-send-entry" disabled={sendResultOpeningId === test.id} onClick={() => startCounselorSendFlow(test.id, test.test_name)}>
                               <i className={`fas ${sendResultOpeningId === test.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendResultOpeningId === test.id ? 'Opening...' : 'Send Results'}
                             </button>
                           </div>
@@ -9783,7 +10430,7 @@ export default function App() {
                 </table>
               </div>
 
-              <div className="card mt-3" id="dashboardPendingNoticesCard">
+              <div className="card mt-3" id="dashboardPendingNoticesCard" data-tour-id="counselor-pending-notices">
                 <div className="card-title"><i className="fas fa-bullhorn"></i> Pending Notices</div>
                 {counselorDashboardPendingNotices.length ? (
                   <div className="table-wrapper table-scroll-lg">
@@ -9810,7 +10457,7 @@ export default function App() {
                               <span className="badge badge-warning">{notice.sent_students || 0}/{notice.student_count || notice.total_students || 0} sent</span>
                             </td>
                             <td>
-                              <button type="button" className="btn btn-primary btn-sm" disabled={sendNoticeOpeningId === notice.id} onClick={() => startCounselorNoticeSendFlow(notice)}>
+                              <button type="button" className="btn btn-primary btn-sm" data-tour-id="counselor-notice-send-entry" disabled={sendNoticeOpeningId === notice.id} onClick={() => startCounselorNoticeSendFlow(notice)}>
                                 <i className={`fas ${sendNoticeOpeningId === notice.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendNoticeOpeningId === notice.id ? 'Opening...' : 'Send Notice'}
                               </button>
                             </td>
@@ -9843,7 +10490,7 @@ export default function App() {
               <h3 className="section-title"><i className="fas fa-bullhorn"></i> Notices</h3>
 
               {currentUser.role !== 'counselor' ? (
-                <div className="card mb-3" id="noticeComposerCard" ref={noticeComposerRef}>
+                <div className="card mb-3" id="noticeComposerCard" data-tour-id="notice-composer" ref={noticeComposerRef}>
                   <div className="card-title">
                     <i className="fas fa-pen-to-square"></i> {noticeForm.notice_id ? 'Edit Notice' : 'Create Notice'}
                   </div>
@@ -10054,7 +10701,7 @@ export default function App() {
               ) : null}
 
               {currentUser.role === 'counselor' ? (
-                <div className="card" id="noticeRecordsCard">
+                <div className="card" id="noticeRecordsCard" data-tour-id="counselor-notices">
                 <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12, marginBottom: 14 }}>
                   <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list"></i> Notice Records</div>
                 </div>
@@ -10157,7 +10804,7 @@ export default function App() {
                           <td>
                             <div className="btn-group">
                               {currentUser.role === 'counselor' ? (
-                                <button type="button" className="btn btn-primary btn-sm" disabled={sendNoticeOpeningId === notice.id} onClick={() => startCounselorNoticeSendFlow(notice)}>
+                                <button type="button" className="btn btn-primary btn-sm" data-tour-id="counselor-notice-send-entry" disabled={sendNoticeOpeningId === notice.id} onClick={() => startCounselorNoticeSendFlow(notice)}>
                                   <i className={`fas ${sendNoticeOpeningId === notice.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendNoticeOpeningId === notice.id ? 'Opening...' : 'Send Notice'}
                                 </button>
                               ) : notice.can_manage_fully ? (
@@ -10185,7 +10832,7 @@ export default function App() {
               ) : null}
 
               {currentUser.role !== 'counselor' ? (
-                <div className="card mt-3" id="noticeCompletionCard">
+                <div className="card mt-3" id="noticeCompletionCard" data-tour-id="notice-completion">
                   <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
                     <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list-check"></i> Notice Completion List</div>
                   </div>
@@ -10290,7 +10937,7 @@ export default function App() {
 
               {currentUser.role !== 'counselor' ? (
                 <>
-                  <div className="card mt-3" id="noticeRecordsCard">
+                  <div className="card mt-3" id="noticeRecordsCard" data-tour-id="notice-records">
                     <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
                       <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-list"></i> Notice Records</div>
                     </div>
@@ -10450,7 +11097,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="card">
+              <div className="card" data-tour-id="counselor-message-history">
                 <div className="card-title"><i className="fas fa-envelope-open-text"></i> Message History</div>
                 <div className="table-wrapper">
                   <table>
@@ -10705,16 +11352,28 @@ export default function App() {
                         <button
                           type="button"
                           className="btn btn-outline btn-sm"
+                          disabled={cdpNavigationLoadingKey === buildCdpNavigationKey({
+                            department: subjectsData.selectedDepartment,
+                            year: subjectsData.selectedYear,
+                            semester: subjectsData.selectedSemester,
+                          })}
                           onClick={() => {
-                            setActiveTab('cdp');
-                            void loadCdpOverview({
+                            void navigateToCdpWithPrefetch({
                               department: subjectsData.selectedDepartment,
                               year: subjectsData.selectedYear,
                               semester: subjectsData.selectedSemester,
                             });
                           }}
                         >
-                          <i className="fas fa-arrow-right"></i> Open CDP
+                          <i className={`fas ${cdpNavigationLoadingKey === buildCdpNavigationKey({
+                            department: subjectsData.selectedDepartment,
+                            year: subjectsData.selectedYear,
+                            semester: subjectsData.selectedSemester,
+                          }) ? 'fa-spinner fa-spin' : 'fa-arrow-right'}`}></i> {cdpNavigationLoadingKey === buildCdpNavigationKey({
+                            department: subjectsData.selectedDepartment,
+                            year: subjectsData.selectedYear,
+                            semester: subjectsData.selectedSemester,
+                          }) ? 'Opening...' : 'Open CDP'}
                         </button>
                       </div>
                     </div>
@@ -10915,9 +11574,14 @@ export default function App() {
                                       <button
                                         type="button"
                                         className="btn btn-outline btn-sm"
+                                        disabled={cdpNavigationLoadingKey === buildCdpNavigationKey({
+                                          department: subject.department,
+                                          year: subject.year_level,
+                                          semester: subject.semester,
+                                          subject_id: subject.id,
+                                        })}
                                         onClick={() => {
-                                          setActiveTab('cdp');
-                                          void rebuildCdpScopeOverview({
+                                          void navigateToCdpWithPrefetch({
                                             department: subject.department,
                                             year: subject.year_level,
                                             semester: subject.semester,
@@ -10925,7 +11589,17 @@ export default function App() {
                                           });
                                         }}
                                       >
-                                        <i className="fas fa-arrow-up-right-from-square"></i> CDP
+                                        <i className={`fas ${cdpNavigationLoadingKey === buildCdpNavigationKey({
+                                          department: subject.department,
+                                          year: subject.year_level,
+                                          semester: subject.semester,
+                                          subject_id: subject.id,
+                                        }) ? 'fa-spinner fa-spin' : 'fa-arrow-up-right-from-square'}`}></i> {cdpNavigationLoadingKey === buildCdpNavigationKey({
+                                          department: subject.department,
+                                          year: subject.year_level,
+                                          semester: subject.semester,
+                                          subject_id: subject.id,
+                                        }) ? 'Opening...' : 'CDP'}
                                       </button>
                                       {subjectsData.canManage ? (
                                         <>
@@ -10963,7 +11637,11 @@ export default function App() {
                 getSemesterLabel={getSemesterLabel}
                 onLoadCdpOverview={(filters) => void loadCdpOverview(filters)}
                 onRebuildScope={(filters) => void rebuildCdpScopeOverview(filters)}
-                copyTemplate={String(bootstrap?.appConfig?.cdp_defaulter_copy_template || DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE)}
+                copyTemplates={{
+                  dailyAttendance: normalizeCdpTemplate(bootstrap?.appConfig?.cdp_daily_attendance_copy_template || bootstrap?.appConfig?.cdp_defaulter_copy_template, DEFAULT_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE, [LEGACY_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE]),
+                  lecturePlan: normalizeCdpTemplate(bootstrap?.appConfig?.cdp_lecture_plan_copy_template, DEFAULT_CDP_LECTURE_PLAN_COPY_TEMPLATE, [LEGACY_CDP_LECTURE_PLAN_COPY_TEMPLATE]),
+                  markEntry: normalizeCdpTemplate(bootstrap?.appConfig?.cdp_mark_entry_copy_template, DEFAULT_CDP_MARK_ENTRY_COPY_TEMPLATE, [LEGACY_CDP_MARK_ENTRY_COPY_TEMPLATE]),
+                }}
                 onShowNoDefaultersNotice={(message) => {
                   setFlash({ type: 'warning', message });
                 }}
@@ -11265,7 +11943,7 @@ export default function App() {
                   setMonitoringAuthFilter('all');
                   setMonitoringSortBy('last_activity_desc');
                 }}
-                onMonitoringRefresh={() => void loadMonitoringOverview()}
+                onMonitoringRefresh={() => void loadMonitoringOverview({ preferCache: false })}
                 onLogoutAllUsers={() => void handleLogoutAllUsers()}
                 onForceLogout={(email) => void handleForceLogout(email)}
                 formatUtcSqlDateTime={formatUtcSqlDateTime}
@@ -11409,6 +12087,36 @@ export default function App() {
                   </div>
 
                   <div className="card mb-3">
+                    <div className="card-title"><i className="fas fa-bell"></i> Notification Test Panel</div>
+                    <p style={{ fontSize: '.84rem', color: 'var(--text-dim)', marginBottom: 12 }}>
+                      Sends test notifications to this signed-in session using the same badge, dialog, notification center, read/delete, and desktop toast paths as live notifications.
+                    </p>
+                    <div className="btn-group" style={{ gap: 10, flexWrap: 'wrap' }}>
+                      <button type="button" className="btn btn-primary btn-sm" onClick={() => sendTestNotification('all')}>
+                        <i className="fas fa-layer-group"></i> Send All Types
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => sendTestNotification('update')}>
+                        <i className="fas fa-cloud-arrow-down"></i> Update Released
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => sendTestNotification('test-assigned')}>
+                        <i className="fas fa-file-lines"></i> Test Assigned
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => sendTestNotification('notice-assigned')}>
+                        <i className="fas fa-envelope-open-text"></i> Notice Assigned
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => sendTestNotification('pending-reminder')}>
+                        <i className="fas fa-clock"></i> Pending Reminder
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => sendTestNotification('linked-counselor')}>
+                        <i className="fas fa-user-clock"></i> Linked Counselor
+                      </button>
+                      <button type="button" className="btn btn-outline btn-sm" onClick={() => sendTestNotification('digest')}>
+                        <i className="fas fa-list-check"></i> Pending Digest
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="card mb-3">
                     <div className="card-title"><i className="fas fa-person-chalkboard"></i> Guided Tutorial Settings</div>
                     <label className="form-check" style={{ marginBottom: 12 }}>
                       <input type="checkbox" checked={Boolean(configForm.tutorial_master_enabled)} onChange={(event) => setConfigForm((prev) => ({ ...prev, tutorial_master_enabled: event.target.checked }))} />
@@ -11504,18 +12212,63 @@ export default function App() {
                         Use {'{entries}'} for the generated activity rows, {'{count}'} for pending counselors, and {'{mode}'} for the copy scope.
                       </small>
                     </div>
-                    <div className="form-group" style={{ marginTop: 12 }}>
-                      <label className="form-label">CDP Copy Template</label>
-                      <textarea
-                        className="form-control"
-                        rows={5}
-                        value={String(configForm.cdp_defaulter_copy_template || '')}
-                        onChange={(event) => setConfigForm((prev) => ({ ...prev, cdp_defaulter_copy_template: event.target.value }))}
-                        placeholder={DEFAULT_CDP_DEFAULTER_COPY_TEMPLATE}
-                      />
-                      <small style={{ fontSize: '.74rem', color: 'var(--text-dim)' }}>
-                        Use {'{entries}'} for subject blocks, {'{count}'} for pending faculty count, and {'{scope}'} for the selected CDP scope.
-                      </small>
+                    <div className="cdp-settings-panel">
+                      <div className="cdp-settings-header">
+                        <div>
+                          <div className="cdp-section-eyebrow">CDP Section</div>
+                          <div className="cdp-section-title"><i className="fas fa-clipboard-list"></i> CDP Copy Format</div>
+                          <div className="cdp-section-subtitle">Controls the copied CDP defaulter message for scope and subject pages.</div>
+                        </div>
+                        <span className="badge badge-muted">Subject CDP</span>
+                      </div>
+                      <div className="cdp-settings-grid">
+                        <div className="cdp-settings-token-panel">
+                          <strong>Available tokens</strong>
+                          <span><code>{'{subject}'}</code> subject code and subject name</span>
+                          <span><code>{'{scope}'}</code> department / year / semester scope</span>
+                          <span><code>{'{faculty}'}</code> faculty name, use <code>*{'{faculty}'}*</code> for bold</span>
+                          <span><code>{'{class}'}</code> class or section label</span>
+                          <span><code>{'{pending}'}</code> pending dates, units, or tests</span>
+                          <span><code>{'{next}'}</code> separator before the next subject</span>
+                          <span><code>{'{entries}'}</code> legacy complete generated block</span>
+                        </div>
+                        <div className="cdp-template-editor-stack">
+                          <div className="form-group cdp-template-editor">
+                            <label className="form-label">Daily Attendance Copy Template</label>
+                            <textarea
+                              className="form-control"
+                              rows={8}
+                              value={String(configForm.cdp_daily_attendance_copy_template || configForm.cdp_defaulter_copy_template || '')}
+                              onChange={(event) => setConfigForm((prev) => ({
+                                ...prev,
+                                cdp_daily_attendance_copy_template: event.target.value,
+                                cdp_defaulter_copy_template: event.target.value,
+                              }))}
+                              placeholder={DEFAULT_CDP_DAILY_ATTENDANCE_COPY_TEMPLATE}
+                            />
+                          </div>
+                          <div className="form-group cdp-template-editor">
+                            <label className="form-label">Proposed Lecture Plan Copy Template</label>
+                            <textarea
+                              className="form-control"
+                              rows={8}
+                              value={String(configForm.cdp_lecture_plan_copy_template || '')}
+                              onChange={(event) => setConfigForm((prev) => ({ ...prev, cdp_lecture_plan_copy_template: event.target.value }))}
+                              placeholder={DEFAULT_CDP_LECTURE_PLAN_COPY_TEMPLATE}
+                            />
+                          </div>
+                          <div className="form-group cdp-template-editor">
+                            <label className="form-label">Internal Mark Entry Copy Template</label>
+                            <textarea
+                              className="form-control"
+                              rows={8}
+                              value={String(configForm.cdp_mark_entry_copy_template || '')}
+                              onChange={(event) => setConfigForm((prev) => ({ ...prev, cdp_mark_entry_copy_template: event.target.value }))}
+                              placeholder={DEFAULT_CDP_MARK_ENTRY_COPY_TEMPLATE}
+                            />
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -11611,6 +12364,20 @@ export default function App() {
                   </div>
 
                   <div className="card mb-3">
+                    <div className="card-title"><i className="fas fa-globe"></i> Public Shine Domain</div>
+                    <div className="form-group">
+                      <label className="form-label">Public Shine Domain</label>
+                      <input
+                        className="form-control"
+                        value={String(configForm.public_app_base_url || configForm.google_oauth_redirect_base_url || '')}
+                        onChange={(event) => setConfigForm((prev) => ({ ...prev, public_app_base_url: event.target.value, google_oauth_redirect_base_url: event.target.value }))}
+                        placeholder="https://shine.athergrid.dev"
+                      />
+                      <div className="inline-muted" style={{ marginTop: 6 }}>Used for Google OAuth callback and notice attachment links.</div>
+                    </div>
+                  </div>
+
+                  <div className="card mb-3">
                     <div className="card-title"><i className="fab fa-google"></i> Google OAuth Sign-In</div>
                     <label className="form-check" style={{ marginBottom: 12 }}>
                       <input type="checkbox" checked={Boolean(configForm.google_oauth_enabled)} onChange={(event) => setConfigForm((prev) => ({ ...prev, google_oauth_enabled: event.target.checked }))} />
@@ -11630,10 +12397,6 @@ export default function App() {
                       <div className="form-group">
                         <label className="form-label">Allowed Google Domain (Optional)</label>
                         <input className="form-control" value={String(configForm.google_oauth_allowed_domain || '')} onChange={(event) => setConfigForm((prev) => ({ ...prev, google_oauth_allowed_domain: event.target.value }))} placeholder="rmkcet.ac.in" />
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Redirect Base URL (Optional)</label>
-                        <input className="form-control" value={String(configForm.google_oauth_redirect_base_url || '')} onChange={(event) => setConfigForm((prev) => ({ ...prev, google_oauth_redirect_base_url: event.target.value }))} placeholder="https://your-domain.example" />
                       </div>
                     </div>
                     <div className="card" style={{ padding: 14, background: 'rgba(255,255,255,.03)', border: '1px solid var(--border)', marginTop: 10 }}>
@@ -12072,9 +12835,18 @@ export default function App() {
                     Windows App
                   </a>
                 ) : null}
-                <a className="global-footer-link global-footer-btn" href="/api/footer/credits">Credits</a>
+                <button type="button" className="global-footer-link global-footer-btn" onClick={() => void openCreditsPage()}>
+                  Credits
+                </button>
                 {currentUser.role !== 'admin' ? (
-                  <a className="global-footer-link global-footer-btn" href={getFooterSupportHref(currentUser)} target="_blank" rel="noreferrer">Support</a>
+                  <button
+                    type="button"
+                    className="global-footer-link global-footer-btn"
+                    data-tour-id="support-guide-button"
+                    onClick={() => setSupportGuideOpen(true)}
+                  >
+                    Support
+                  </button>
                 ) : null}
               </div>
             </div>
@@ -12103,6 +12875,20 @@ export default function App() {
             </div>
           </div>
         </div>
+      ) : null}
+
+      {supportGuideOpen ? (
+        <Suspense fallback={null}>
+          <SupportGuideLauncher
+            open={supportGuideOpen}
+            user={currentUser}
+            appConfig={bootstrap?.appConfig || null}
+            activeTab={activeTab}
+            navTabs={navTabs}
+            onClose={() => setSupportGuideOpen(false)}
+            onNavigateTab={(tab) => handleSidebarTabNavigation(tab)}
+          />
+        </Suspense>
       ) : null}
 
       {databaseProgress ? (
@@ -12191,35 +12977,6 @@ export default function App() {
               </button>
             </div>
             {renderDesktopAppSettingsPanel()}
-          </div>
-        </div>
-      ) : null}
-
-      {loginNotificationPrompt ? (
-        <div className="modal-overlay open" onClick={() => setLoginNotificationPrompt(null)}>
-          <div className="modal" style={{ maxWidth: 520 }} onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h3><i className="fas fa-circle-exclamation"></i> Notification</h3>
-            </div>
-            <div className="notification-login-body">
-              <strong>{loginNotificationPrompt.title}</strong>
-              <p>{loginNotificationPrompt.body}</p>
-            </div>
-            <div className="btn-group" style={{ justifyContent: 'flex-end' }}>
-              <button type="button" className="btn btn-outline btn-sm" onClick={() => {
-                markNotificationsRead([loginNotificationPrompt.key]);
-                setLoginNotificationPrompt(null);
-                openNotificationCenter();
-              }}>
-                Check Notification Center
-              </button>
-              <button type="button" className="btn btn-primary btn-sm" onClick={() => {
-                markNotificationsRead([loginNotificationPrompt.key]);
-                setLoginNotificationPrompt(null);
-              }}>
-                OK
-              </button>
-            </div>
           </div>
         </div>
       ) : null}

@@ -32,8 +32,34 @@ import {
   reloadCurrentApp,
   resolveDirectServerUrl,
 } from './runtime';
+import { recordPerformanceEvent } from './performance';
+
+function recordApiServerTiming(response: Response) {
+  const serverTiming = response.headers.get('Server-Timing') || '';
+  const appMatch = /app;dur=([0-9.]+)/i.exec(serverTiming);
+  if (!appMatch) return;
+  const durationMs = Number(appMatch[1]);
+  if (!Number.isFinite(durationMs)) return;
+  let path = response.url;
+  try {
+    path = new URL(response.url).pathname;
+  } catch {
+    // Keep the raw response URL when URL parsing is unavailable.
+  }
+  recordPerformanceEvent({
+    area: 'server-api',
+    name: path,
+    durationMs,
+    status: response.ok ? 'ok' : 'error',
+    meta: {
+      status: response.status,
+      method: 'response',
+    },
+  });
+}
 
 async function parseJson<T>(response: Response, options?: { redirectOn401?: boolean }): Promise<T> {
+  recordApiServerTiming(response);
   const raw = await response.text();
   let payload: any = null;
   if (raw) {
@@ -622,6 +648,7 @@ export async function rebuildCdpScope(filters: {
   year: number;
   semester: string;
   subject_id?: number | null;
+  force?: boolean;
 }) {
   const response = await fetch('/api/cdp/rebuild-scope', {
     method: 'POST',
@@ -993,8 +1020,11 @@ export async function deleteAdminMessages(ids: number[]) {
   return parseJson<{ success: boolean; deleted: number }>(response);
 }
 
-export async function getMonitoringOverview() {
-  const response = await fetch('/api/monitoring/overview', {
+export async function getMonitoringOverview(options?: { historyLimit?: number }) {
+  const params = new URLSearchParams();
+  if (options?.historyLimit) params.set('historyLimit', String(options.historyLimit));
+  const query = params.toString();
+  const response = await fetch(`/api/monitoring/overview${query ? `?${query}` : ''}`, {
     credentials: 'include',
     headers: { Accept: 'application/json' },
   });
@@ -1246,6 +1276,26 @@ export async function deleteNotificationKeys(keys: string[]) {
     body: JSON.stringify({ keys }),
   });
   return parseJson<{ success: true; readKeys: string[]; deletedKeys: string[] }>(response);
+}
+
+export async function saveUserPreferences(payload: {
+  theme?: 'light' | 'dark';
+  desktopSettings?: Record<string, unknown>;
+}) {
+  const response = await fetch('/api/user/preferences', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<{
+    success: true;
+    theme?: 'light' | 'dark' | '';
+    desktopSettings?: Record<string, unknown>;
+  }>(response);
 }
 
 export async function updateEnvContent(env_content: string) {

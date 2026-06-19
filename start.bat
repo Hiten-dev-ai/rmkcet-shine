@@ -12,17 +12,19 @@ echo.
 
 cd /d "%~dp0"
 
-set "LOOPBACK_IPV4=127.0.0.1"
-set "CLIENT_URL=http://%LOOPBACK_IPV4%:5000"
-set "SERVER_URL=http://%LOOPBACK_IPV4%:5001"
-set "DESKTOP_SHELL_URL=http://%LOOPBACK_IPV4%:5123"
-set "HOST=%LOOPBACK_IPV4%"
+set "LOOPBACK_HOST=localhost"
+set "SHELL_HOST=localhost"
+set "DESKTOP_SHELL_HOST=localhost"
+set "CLIENT_URL=http://%LOOPBACK_HOST%:5000"
+set "SERVER_URL=http://%LOOPBACK_HOST%:5001"
+set "DESKTOP_SHELL_URL=http://%DESKTOP_SHELL_HOST%:5123"
+set "HOST=%SHELL_HOST%"
 set "CLIENT_ORIGIN=%CLIENT_URL%"
 set "DESKTOP_SHELL_ORIGIN=%DESKTOP_SHELL_URL%"
 set "SERVER_ORIGIN=%SERVER_URL%"
 set "SHINE_DESKTOP_DEV_URL=%CLIENT_URL%"
 set "SHINE_DESKTOP_API_ORIGIN=%SERVER_URL%"
-set "SHINE_DESKTOP_SHELL_HOST=%LOOPBACK_IPV4%"
+set "SHINE_DESKTOP_SHELL_HOST=%DESKTOP_SHELL_HOST%"
 
 where node >nul 2>&1
 if errorlevel 1 (
@@ -123,21 +125,9 @@ if "%LAUNCH_MODE%"=="3" (
 
 if "%LAUNCH_MODE%"=="6" (
     set "PORTS_TO_KILL=5000 5001 5123"
-    set "NPM_SCRIPT=prod:desktop-web:release-exe"
+    set "NPM_SCRIPT=prod:desktop-web"
     set "OPEN_BROWSER=2"
-    set "MODE_LABEL=Production web + desktop app + EXE release"
-    set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://rmkcetshine.me"
-    set /p "PACKAGE_API_ORIGIN=Enter hosted Shine server domain [!PACKAGE_DEFAULT_ORIGIN!]: "
-    if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
-    if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
-    set "SHINE_DESKTOP_RELEASE_API_ORIGIN=!PACKAGE_API_ORIGIN!"
-    set "SHINE_DESKTOP_PUBLIC_BASE_URL=!PACKAGE_API_ORIGIN!"
-    set "SHINE_DESKTOP_RELEASE_CHANNEL_URL=!PACKAGE_API_ORIGIN!/api/desktop/installer"
-    set "SHINE_DESKTOP_UPDATER_FEED_URL=!PACKAGE_API_ORIGIN!/api/desktop/updater"
-    set /p "PACKAGE_LOCATOR_CSV=Enter public Google Sheet locator CSV URL (optional) [!SHINE_DESKTOP_LOCATOR_CSV_URL!]: "
-    if not "!PACKAGE_LOCATOR_CSV!"=="" set "SHINE_DESKTOP_LOCATOR_CSV_URL=!PACKAGE_LOCATOR_CSV!"
-    set "SHINE_DESKTOP_SKIP_UNCHANGED=1"
+    set "MODE_LABEL=Production web + desktop app"
 )
 
 if "%LAUNCH_MODE%"=="5" (
@@ -158,7 +148,7 @@ if "%PACKAGE_BUILD%"=="1" (
 
     if "!PACKAGE_MODE!"=="1" (
         set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://127.0.0.1:5001"
+        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://localhost:5001"
         set /p "PACKAGE_API_ORIGIN=Enter local Shine server URL for the packaged app [!PACKAGE_DEFAULT_ORIGIN!]: "
         if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
         if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
@@ -187,7 +177,7 @@ if "%PACKAGE_BUILD%"=="1" (
 
     if "!PACKAGE_MODE!"=="3" (
         set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://127.0.0.1:5001"
+        if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=http://localhost:5001"
         set /p "PACKAGE_API_ORIGIN=Enter local Shine server URL for the packaged app [!PACKAGE_DEFAULT_ORIGIN!]: "
         if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
         if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
@@ -215,7 +205,7 @@ if "%PACKAGE_BUILD%"=="1" (
     )
 
     set "PACKAGE_DEFAULT_ORIGIN=!SHINE_DESKTOP_RELEASE_API_ORIGIN!"
-    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://rmkcetshine.me"
+    if not defined PACKAGE_DEFAULT_ORIGIN set "PACKAGE_DEFAULT_ORIGIN=https://shine.athergrid.dev"
     set /p "PACKAGE_API_ORIGIN=Enter hosted Shine URL for the packaged app [!PACKAGE_DEFAULT_ORIGIN!]: "
     if errorlevel 1 set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
     if "!PACKAGE_API_ORIGIN!"=="" set "PACKAGE_API_ORIGIN=!PACKAGE_DEFAULT_ORIGIN!"
@@ -276,17 +266,17 @@ if "%PACKAGE_BUILD%"=="1" (
 
 if "%LAUNCH_MODE%"=="2" (
     echo  [INFO] Closing existing Shine desktop processes...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process | Where-Object { $_.Path -eq 'D:\RMKCET\rmkcet-shine\desktop\node_modules\electron\dist\electron.exe' } | Stop-Process -Force" >nul 2>&1
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$target = Join-Path (Get-Location) 'desktop\node_modules\electron\dist\electron.exe'; Get-Process | Where-Object { $_.Path -eq $target } | Stop-Process -Force" >nul 2>&1
 )
 
 if "%LAUNCH_MODE%"=="3" (
     echo  [INFO] Closing existing Shine desktop processes...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process | Where-Object { $_.Path -eq 'D:\RMKCET\rmkcet-shine\desktop\node_modules\electron\dist\electron.exe' } | Stop-Process -Force" >nul 2>&1
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$target = Join-Path (Get-Location) 'desktop\node_modules\electron\dist\electron.exe'; Get-Process | Where-Object { $_.Path -eq $target } | Stop-Process -Force" >nul 2>&1
 )
 
 if "%LAUNCH_MODE%"=="6" (
     echo  [INFO] Closing existing Shine desktop processes...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process | Where-Object { $_.Path -eq 'D:\RMKCET\rmkcet-shine\desktop\node_modules\electron\dist\electron.exe' } | Stop-Process -Force" >nul 2>&1
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$target = Join-Path (Get-Location) 'desktop\node_modules\electron\dist\electron.exe'; Get-Process | Where-Object { $_.Path -eq $target } | Stop-Process -Force" >nul 2>&1
 )
 
 echo  [INFO] Checking for existing processes on required ports...
@@ -306,9 +296,6 @@ if "%LAUNCH_MODE%"=="2" echo   Client : %CLIENT_URL%
 if "%LAUNCH_MODE%"=="3" echo   Desktop shell : %DESKTOP_SHELL_URL%
 if "%LAUNCH_MODE%"=="6" echo   Web app : %CLIENT_URL%
 if "%LAUNCH_MODE%"=="6" echo   Desktop shell : %DESKTOP_SHELL_URL%
-if "%LAUNCH_MODE%"=="6" echo   Hosted URL : !SHINE_DESKTOP_RELEASE_API_ORIGIN!
-if "%LAUNCH_MODE%"=="6" echo   Installer : !SHINE_DESKTOP_RELEASE_API_ORIGIN!/api/desktop/installer
-if "%LAUNCH_MODE%"=="6" echo   EXE build : data\desktop-installer\latest
 echo   Press Ctrl+C in this window to stop the running services.
 echo  ============================================
 echo.

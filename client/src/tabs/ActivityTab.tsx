@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from 'react';
 import type { ComponentType } from 'react';
 import { VirtualizedRowsTable } from '../components/VirtualizedRowsTable';
 import type { ActivityOverviewPayload, CounselorActivityRow, DepartmentRecord } from '../types';
@@ -65,6 +66,41 @@ export default function ActivityTab({
   onCopyActivityDefaulters,
   onDownloadActivityScopePdf,
 }: ActivityTabProps) {
+  const activityColumns = useMemo(() => [
+    {
+      key: 'counselor',
+      label: 'Counselor',
+      width: '2.4fr',
+      className: 'virtualized-table-cell-stack',
+      render: (row: CounselorActivityRow) => (
+        <div className="virtualized-counselor-cell">
+          <strong>{row.name}</strong>
+          <span className="inline-muted virtualized-email-text">{row.email}</span>
+        </div>
+      ),
+    },
+    { key: 'department', label: 'Department', width: '0.9fr', render: (row: CounselorActivityRow) => row.department },
+    {
+      key: 'status',
+      label: 'Status',
+      width: '0.95fr',
+      render: (row: CounselorActivityRow) => <span className={`badge ${row.work_status === 'Complete' ? 'badge-success' : 'badge-warning'}`}>{row.work_status}</span>,
+    },
+    { key: 'completion', label: 'Completion %', width: '0.95fr', render: (row: CounselorActivityRow) => `${row.completion_pct}%` },
+    { key: 'year', label: 'Year', width: '0.9fr', render: (row: CounselorActivityRow) => formatYearLevel(row.year_level || 1) },
+    { key: 'students', label: 'Students', width: '0.75fr', render: (row: CounselorActivityRow) => row.student_count },
+    { key: 'reached', label: 'Reached', width: '0.75fr', render: (row: CounselorActivityRow) => row.unique_students_messaged },
+    { key: 'pending', label: 'Pending', width: '0.75fr', render: (row: CounselorActivityRow) => row.pending_count },
+    {
+      key: 'lastLogin',
+      label: 'Last Login',
+      width: '1.2fr',
+      className: 'virtualized-table-cell-muted',
+      render: (row: CounselorActivityRow) => formatDateTime(row.last_login || 'Never'),
+    },
+  ], [formatDateTime, formatYearLevel]);
+  const activityRowKey = useCallback((row: CounselorActivityRow) => row.email, []);
+
   if (activityLoading && !activityData) {
     return (
       <div className="card">
@@ -74,7 +110,7 @@ export default function ActivityTab({
   }
 
   return (
-    <>
+    <div data-tour-id="activity-workspace">
       {activityData?.showDepartmentPicker ? (
         <div className="mb-3">
           <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 10 }}>
@@ -264,47 +300,15 @@ export default function ActivityTab({
           </div>
 
           <VirtualizedRowsTable
-            columns={[
-              {
-                key: 'counselor',
-                label: 'Counselor',
-                width: '2.4fr',
-                className: 'virtualized-table-cell-stack',
-                render: (row: CounselorActivityRow) => (
-                  <div className="virtualized-counselor-cell">
-                    <strong>{row.name}</strong>
-                    <span className="inline-muted virtualized-email-text">{row.email}</span>
-                  </div>
-                ),
-              },
-              { key: 'department', label: 'Department', width: '0.9fr', render: (row: CounselorActivityRow) => row.department },
-              {
-                key: 'status',
-                label: 'Status',
-                width: '0.95fr',
-                render: (row: CounselorActivityRow) => <span className={`badge ${row.work_status === 'Complete' ? 'badge-success' : 'badge-warning'}`}>{row.work_status}</span>,
-              },
-              { key: 'completion', label: 'Completion %', width: '0.95fr', render: (row: CounselorActivityRow) => `${row.completion_pct}%` },
-              { key: 'year', label: 'Year', width: '0.9fr', render: (row: CounselorActivityRow) => formatYearLevel(row.year_level || 1) },
-              { key: 'students', label: 'Students', width: '0.75fr', render: (row: CounselorActivityRow) => row.student_count },
-              { key: 'reached', label: 'Reached', width: '0.75fr', render: (row: CounselorActivityRow) => row.unique_students_messaged },
-              { key: 'pending', label: 'Pending', width: '0.75fr', render: (row: CounselorActivityRow) => row.pending_count },
-              {
-                key: 'lastLogin',
-                label: 'Last Login',
-                width: '1.2fr',
-                className: 'virtualized-table-cell-muted',
-                render: (row: CounselorActivityRow) => formatDateTime(row.last_login || 'Never'),
-              },
-            ]}
+            columns={activityColumns}
             rows={activityDisplayRows}
-            rowKey={(row) => row.email}
+            rowKey={activityRowKey}
             rowHeight={72}
             maxHeight={640}
             emptyMessage="No counselor rows found for the current search and sort filters."
           />
         </>
       ) : null}
-    </>
+    </div>
   );
 }

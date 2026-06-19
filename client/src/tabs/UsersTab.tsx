@@ -153,7 +153,7 @@ export default function UsersTab({
   }, [filteredUsers]);
 
   return (
-    <>
+    <div data-tour-id="users-workspace">
       <div className="metrics-grid mb-3">
         <div className="metric-card">
           <div className="metric-label">Total Users</div>
@@ -537,6 +537,6 @@ export default function UsersTab({
           </form>
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

@@ -1,4 +1,8 @@
+import { useEffect, useMemo, useState } from 'react';
 import type { MonitoringOverviewPayload, SessionHistoryRecord, SessionMonitoringRecord } from '../types';
+
+const SESSION_PAGE_SIZE = 40;
+const HISTORY_PAGE_SIZE = 50;
 
 type MonitoringTabProps = {
   currentUserEmail: string;
@@ -41,6 +45,31 @@ export default function MonitoringTab({
   onForceLogout,
   formatUtcSqlDateTime,
 }: MonitoringTabProps) {
+  const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE);
+  const [visibleHistoryCount, setVisibleHistoryCount] = useState(HISTORY_PAGE_SIZE);
+
+  useEffect(() => {
+    setVisibleSessionCount(SESSION_PAGE_SIZE);
+    setVisibleHistoryCount(HISTORY_PAGE_SIZE);
+  }, [
+    filteredMonitoringHistory.length,
+    filteredMonitoringSessions.length,
+    monitoringAuthFilter,
+    monitoringSearch,
+    monitoringSortBy,
+    monitoringStatusFilter,
+  ]);
+
+  const visibleMonitoringSessions = useMemo(
+    () => filteredMonitoringSessions.slice(0, visibleSessionCount),
+    [filteredMonitoringSessions, visibleSessionCount],
+  );
+  const visibleMonitoringHistory = useMemo(
+    () => filteredMonitoringHistory.slice(0, visibleHistoryCount),
+    [filteredMonitoringHistory, visibleHistoryCount],
+  );
+  const normalizedCurrentUserEmail = String(currentUserEmail || '').trim().toLowerCase();
+
   return (
     <>
       {!monitoringData?.sessionLog.ok ? (
@@ -125,11 +154,11 @@ export default function MonitoringTab({
         <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
           <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-desktop"></i> Active Sessions ({filteredMonitoringSessions.length})</div>
           <div className="btn-group">
-            <button type="button" className="btn btn-outline btn-sm" onClick={onMonitoringRefresh}>
-              <i className="fas fa-rotate"></i> Refresh
+            <button type="button" className="btn btn-outline btn-sm" onClick={onMonitoringRefresh} disabled={monitoringLoading}>
+              <i className={`fas fa-rotate ${monitoringLoading ? 'fa-spin' : ''}`}></i> Refresh
             </button>
             <button type="button" className="btn btn-danger btn-sm" onClick={onLogoutAllUsers}>
-              <i className="fas fa-power-off"></i> Logout All
+              <i className="fas fa-power-off"></i> Logout Others
             </button>
           </div>
         </div>
@@ -149,7 +178,10 @@ export default function MonitoringTab({
             <tbody>
               {monitoringLoading && !monitoringData ? (
                 <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>Loading sessions...</td></tr>
-              ) : filteredMonitoringSessions.length ? filteredMonitoringSessions.map((session) => (
+              ) : filteredMonitoringSessions.length ? visibleMonitoringSessions.map((session) => {
+                const sessionEmail = String(session.user_email || '').trim().toLowerCase();
+                const isCurrentUser = Boolean(sessionEmail && sessionEmail === normalizedCurrentUserEmail);
+                return (
                 <tr key={session.session_id}>
                   <td><strong>{session.name || session.login_email || session.user_email}</strong><br /><span className="inline-muted">{session.login_email || session.user_email}</span></td>
                   <td><span className="badge badge-primary">{session.role || 'N/A'}</span></td>
@@ -161,21 +193,32 @@ export default function MonitoringTab({
                     <div className="inline-muted">{session.time_ago || '--'}</div>
                   </td>
                   <td>
-                    {String(session.user_email || '').trim().toLowerCase() === String(currentUserEmail || '').trim().toLowerCase() ? (
+                    {isCurrentUser ? (
                       <span className="badge badge-muted">Current Session</span>
                     ) : (
-                      <button type="button" className="btn btn-danger btn-sm" onClick={() => onForceLogout(session.user_email)}>
+                      <button type="button" className="btn btn-danger btn-sm" disabled={!sessionEmail} onClick={() => onForceLogout(session.user_email)}>
                         <i className="fas fa-sign-out-alt"></i> Kick
                       </button>
                     )}
                   </td>
                 </tr>
-              )) : (
+                );
+              }) : (
                 <tr><td colSpan={7} className="text-center text-muted" style={{ padding: 24 }}>No active sessions matched the current filters.</td></tr>
               )}
             </tbody>
           </table>
         </div>
+        {filteredMonitoringSessions.length > SESSION_PAGE_SIZE ? (
+          <div className="d-flex justify-between align-center flex-wrap mt-2" style={{ gap: 10 }}>
+            <span className="inline-muted">Showing {Math.min(visibleSessionCount, filteredMonitoringSessions.length)} of {filteredMonitoringSessions.length} active sessions</span>
+            {visibleSessionCount < filteredMonitoringSessions.length ? (
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => setVisibleSessionCount((count) => count + SESSION_PAGE_SIZE)}>
+                <i className="fas fa-chevron-down"></i> Show More
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div className="card">
@@ -195,8 +238,8 @@ export default function MonitoringTab({
               </tr>
             </thead>
             <tbody>
-              {filteredMonitoringHistory.length ? filteredMonitoringHistory.map((entry) => (
-                <tr key={`${entry.session_id}:${entry.last_activity}`}>
+              {filteredMonitoringHistory.length ? visibleMonitoringHistory.map((entry) => (
+                <tr key={`${entry.session_id}:${entry.login_time}:${entry.last_activity}`}>
                   <td><strong>{entry.name || entry.login_email || entry.user_email}</strong><br /><span className="inline-muted">{entry.login_email || entry.user_email}</span></td>
                   <td>{entry.role || 'N/A'}</td>
                   <td>
@@ -222,6 +265,16 @@ export default function MonitoringTab({
             </tbody>
           </table>
         </div>
+        {filteredMonitoringHistory.length > HISTORY_PAGE_SIZE ? (
+          <div className="d-flex justify-between align-center flex-wrap mt-2" style={{ gap: 10 }}>
+            <span className="inline-muted">Showing {Math.min(visibleHistoryCount, filteredMonitoringHistory.length)} of {filteredMonitoringHistory.length} history rows</span>
+            {visibleHistoryCount < filteredMonitoringHistory.length ? (
+              <button type="button" className="btn btn-outline btn-sm" onClick={() => setVisibleHistoryCount((count) => count + HISTORY_PAGE_SIZE)}>
+                <i className="fas fa-chevron-down"></i> Show More
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </>
   );

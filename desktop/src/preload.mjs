@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('__SHINE_DESKTOP__', {
   featureFlags: {
     googleLoginSupported: false,
     desktopSendWorkspaceSupported: true,
+    localOauth: process.env.SHINE_DESKTOP_LOCAL_OAUTH === '1',
   },
   openExternal(url) {
     return ipcRenderer.invoke('shine:openExternal', url);

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 type Column<T> = {
@@ -29,7 +29,14 @@ export function VirtualizedRowsTable<T>({
   emptyMessage,
 }: VirtualizedRowsTableProps<T>) {
   const [scrollTop, setScrollTop] = useState(0);
+  const pendingScrollTopRef = useRef(0);
+  const scrollFrameRef = useRef<number | null>(null);
   const templateColumns = useMemo(() => columns.map((column) => column.width).join(' '), [columns]);
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+  }, []);
   const viewportCount = Math.max(1, Math.ceil(maxHeight / rowHeight));
   const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
   const endIndex = Math.min(rows.length, startIndex + viewportCount + OVERSCAN_ROWS * 2);
@@ -49,7 +56,14 @@ export function VirtualizedRowsTable<T>({
       <div
         className="virtualized-table-body"
         style={{ maxHeight }}
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        onScroll={(event) => {
+          pendingScrollTopRef.current = event.currentTarget.scrollTop;
+          if (scrollFrameRef.current !== null) return;
+          scrollFrameRef.current = window.requestAnimationFrame(() => {
+            scrollFrameRef.current = null;
+            setScrollTop(pendingScrollTopRef.current);
+          });
+        }}
       >
         {rows.length ? (
           <div style={{ height: totalHeight, position: 'relative' }}>

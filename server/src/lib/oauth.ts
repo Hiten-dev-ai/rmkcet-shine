@@ -24,7 +24,7 @@ export function getGoogleOauthSettings(config = getAppConfig()): GoogleOauthSett
     .trim()
     .toLowerCase()
     .replace(/^@/, '');
-  const redirectBaseUrl = normalizeGoogleRedirectBaseUrl(String(config.google_oauth_redirect_base_url || ''));
+  const redirectBaseUrl = normalizeGoogleRedirectBaseUrl(String(config.public_app_base_url || config.google_oauth_redirect_base_url || ''));
   const requested = String(config.google_oauth_enabled || 'false').trim().toLowerCase() === 'true';
 
   return {

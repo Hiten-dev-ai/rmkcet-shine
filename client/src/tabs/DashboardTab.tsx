@@ -30,7 +30,7 @@ export default function DashboardTab({
   }
 
   return (
-    <>
+    <div data-tour-id="dashboard-overview">
       <div className="d-flex justify-between align-center flex-wrap mb-3" style={{ gap: 12 }}>
         <h3 className="section-title" style={{ marginBottom: 0 }}>
           <i className="fas fa-gauge"></i> Dashboard
@@ -65,54 +65,33 @@ export default function DashboardTab({
             </div>
           </div>
 
-          <div className="dashboard-dual-grid mb-3">
-            <div className="card dashboard-status-card">
-              <div className="card-title"><i className="fas fa-envelope"></i> SMTP Status</div>
-              <div className="dashboard-summary-row">
-                <span className={`badge ${dashboardData.admin_status.smtp.state === 'ready' ? 'badge-success' : 'badge-warning'}`}>{dashboardData.admin_status.smtp.label}</span>
-              </div>
-              <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.smtp.detail}</p>
-              <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                <div><strong>Server:</strong> {dashboardData.admin_status.smtp.config.server || '--'}</div>
-                <div><strong>Username:</strong> {dashboardData.admin_status.smtp.config.username || '--'}</div>
-                <div><strong>From:</strong> {dashboardData.admin_status.smtp.config.email_from || '--'}</div>
-                <div><strong>Port:</strong> {dashboardData.admin_status.smtp.config.port || '--'}</div>
-              </div>
-            </div>
-
+          <div className="dashboard-status-grid mb-3">
             <div className="card dashboard-status-card">
               <div className="card-title"><i className="fas fa-hard-drive"></i> Backup Status</div>
               <div className="dashboard-summary-row">
                 <span className={`badge ${dashboardData.admin_status.backup.health === 'healthy' ? 'badge-success' : dashboardData.admin_status.backup.health === 'warning' ? 'badge-warning' : 'badge-danger'}`}>{dashboardData.admin_status.backup.label}</span>
                 <span className="badge badge-primary">{dashboardData.admin_status.backup.storage_mode === 'gdrive' ? 'Google Drive' : 'Local'}</span>
               </div>
-              <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.backup.detail}</p>
               <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                <div><strong>Auto Backups:</strong> {dashboardData.admin_status.backup.auto_backup_count}</div>
-                <div><strong>Manual Backups:</strong> {dashboardData.admin_status.backup.backup_count}</div>
+                <div><strong>Backups:</strong> {dashboardData.admin_status.backup.backup_count + dashboardData.admin_status.backup.auto_backup_count}</div>
                 <div><strong>Archives:</strong> {dashboardData.admin_status.backup.archive_count}</div>
                 <div><strong>Periodic Backups:</strong> {dashboardData.admin_status.backup.periodic_enabled ? 'Enabled' : 'Disabled'}</div>
-                <div><strong>Drive Configured:</strong> {dashboardData.admin_status.backup.drive_configured ? 'Yes' : 'No'}</div>
-                <div><strong>Latest Backup:</strong> {dashboardData.admin_status.backup.latest_backup_name ? `${dashboardData.admin_status.backup.latest_backup_name} (${dashboardData.admin_status.backup.latest_backup_modified})` : '--'}</div>
+                <div><strong>Latest:</strong> {dashboardData.admin_status.backup.latest_backup_modified || '--'}</div>
               </div>
             </div>
-          </div>
 
-          <div className="dashboard-dual-grid mb-3">
             <div className="card dashboard-status-card">
               <div className="card-title"><i className="fab fa-google"></i> OAuth Status</div>
               <div className="dashboard-summary-row">
                 <span className={`badge ${dashboardData.admin_status.oauth.enabled && dashboardData.admin_status.oauth.healthy ? 'badge-success' : dashboardData.admin_status.oauth.enabled ? 'badge-warning' : 'badge-muted'}`}>{dashboardData.admin_status.oauth.label}</span>
                 <span className="badge badge-warning">Today Failed {dashboardData.admin_status.oauth.today_unregistered_attempts}</span>
               </div>
-              <p className="inline-muted" style={{ marginBottom: 10 }}>{dashboardData.admin_status.oauth.detail}</p>
               <div style={{ display: 'grid', gap: 8, fontSize: '.84rem' }}>
-                <div><strong>Allowed Domain:</strong> {dashboardData.admin_status.oauth.allowed_domain || 'Any verified email'}</div>
-                <div><strong>Redirect Base URL:</strong> {dashboardData.admin_status.oauth.redirect_base_url || '--'}</div>
-                <div><strong>Unregistered Attempts Today:</strong> {dashboardData.admin_status.oauth.today_unregistered_attempts}</div>
+                <div><strong>Status:</strong> {dashboardData.admin_status.oauth.enabled ? 'Enabled' : 'Disabled'}</div>
+                <div><strong>Failed Today:</strong> {dashboardData.admin_status.oauth.today_unregistered_attempts}</div>
                 <div><strong>Total Unregistered Attempts:</strong> {dashboardData.admin_status.oauth.total_unregistered_attempts}</div>
-                <div><strong>Latest Failed Email:</strong> {dashboardData.admin_status.oauth.latest_unregistered_attempt_email || '--'}</div>
-                <div><strong>Latest Failed Time:</strong> {dashboardData.admin_status.oauth.latest_unregistered_attempt_time ? formatDateTime(dashboardData.admin_status.oauth.latest_unregistered_attempt_time) : '--'}</div>
+                <div><strong>Latest Unauthorized:</strong> {dashboardData.admin_status.oauth.latest_unregistered_attempt_email || '--'}</div>
+                <div><strong>Linked Name:</strong> {dashboardData.admin_status.oauth.latest_unregistered_attempt_name || '--'}</div>
               </div>
             </div>
 
@@ -134,7 +113,44 @@ export default function DashboardTab({
       ) : null}
 
       <div className="dashboard-dual-grid mb-3">
-        <div className="card dashboard-status-card">
+        <div className="card dashboard-status-card" data-tour-id="dashboard-cdp-completion">
+          <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
+            <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-clipboard-list"></i> CDP Completion Status</div>
+            <span className="badge badge-info">{dashboardData?.cdp_completion_overview.subject_count ?? 0} subjects</span>
+          </div>
+          <div className="dashboard-summary-row">
+            <span className="badge badge-warning">Pending {dashboardData?.cdp_completion_overview.pending_subjects ?? 0}</span>
+            <span className="badge badge-success">Overall {dashboardData?.cdp_completion_overview.overall ?? 0}%</span>
+          </div>
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Department</th>
+                  <th>Completion %</th>
+                  <th>Year Breakdown</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(dashboardData?.cdp_completion_overview.department_labels || []).length ? dashboardData!.cdp_completion_overview.department_labels.map((department, index) => (
+                  <tr key={`cdp-${department}`}>
+                    <td><strong>{department}</strong></td>
+                    <td>{dashboardData!.cdp_completion_overview.department_values[index] ?? 0}%</td>
+                    <td style={{ fontSize: '.8rem', color: 'var(--text-dim)' }}>
+                      {Object.entries(dashboardData!.cdp_completion_overview.department_year_breakdown[department] || {})
+                        .map(([year, value]) => `${formatYearLevel(Number(year))}: ${value}%`)
+                        .join(' | ') || '--'}
+                    </td>
+                  </tr>
+                )) : (
+                  <tr><td colSpan={3} className="text-center text-muted" style={{ padding: 20 }}>No CDP completion data available yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="card dashboard-status-card" data-tour-id="dashboard-marks-completion">
           <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
             <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-file-lines"></i> Counsellor Completion Status For Marks</div>
             {currentUser.role === 'hod' ? (
@@ -174,8 +190,10 @@ export default function DashboardTab({
             </table>
           </div>
         </div>
+      </div>
 
-        <div className="card dashboard-status-card">
+      <div className="dashboard-dual-grid mb-3">
+        <div className="card dashboard-status-card" data-tour-id="dashboard-notice-completion">
           <div className="d-flex justify-between align-center flex-wrap mb-2" style={{ gap: 12 }}>
             <div className="card-title" style={{ marginBottom: 0 }}><i className="fas fa-bullhorn"></i> Notice Completion Status</div>
             {currentUser.role === 'hod' ? (
@@ -246,6 +264,6 @@ export default function DashboardTab({
           </table>
         </div>
       </div>
-    </>
+    </div>
   );
 }

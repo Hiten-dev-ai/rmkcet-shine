@@ -4,6 +4,8 @@
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET Shine Desktop"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET Shine.exe"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "dev.rmkcet.shine"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET.Shine.Desktop"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET.Shine.App"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "rmkcet-shine-desktop"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "rmkcet_shine_app"
 
@@ -12,6 +14,8 @@
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET Shine Desktop"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET Shine.exe"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "dev.rmkcet.shine"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET.Shine.Desktop"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "RMKCET.Shine.App"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "rmkcet-shine-desktop"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "rmkcet_shine_app"
 
@@ -20,6 +24,8 @@
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "RMKCET Shine Desktop"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "RMKCET Shine.exe"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "dev.rmkcet.shine"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "RMKCET.Shine.Desktop"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "RMKCET.Shine.App"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "rmkcet-shine-desktop"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "rmkcet_shine_app"
 

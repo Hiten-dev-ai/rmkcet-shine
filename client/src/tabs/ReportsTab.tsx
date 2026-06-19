@@ -100,7 +100,7 @@ function CounselorTestsTable({
   sendResultOpeningId?: number | null;
 }) {
   return (
-    <div className="card mb-3">
+    <div className="card mb-3" data-tour-id={currentUser.role === 'counselor' ? 'counselor-reports' : undefined}>
       <div className="card-title"><i className="fas fa-database"></i> {title}</div>
       <div className="table-wrapper">
         <table>
@@ -139,7 +139,7 @@ function CounselorTestsTable({
                     <button type="button" className="btn btn-outline btn-sm" onClick={() => onLoadTestDetail(test.id)} disabled={Boolean(test.is_blocked)}>
                       <i className="fas fa-eye"></i> View/Edit
                     </button>
-                    <button type="button" className="btn btn-primary btn-sm" onClick={() => onStartCounselorSendFlow(test.id, test.test_name)} disabled={Boolean(test.is_blocked) || sendResultOpeningId === test.id}>
+                    <button type="button" className="btn btn-primary btn-sm" data-tour-id="counselor-send-entry" onClick={() => onStartCounselorSendFlow(test.id, test.test_name)} disabled={Boolean(test.is_blocked) || sendResultOpeningId === test.id}>
                       <i className={`fas ${sendResultOpeningId === test.id ? 'fa-spinner fa-spin' : 'fa-paper-plane'}`}></i> {sendResultOpeningId === test.id ? 'Opening...' : 'Send Results'}
                     </button>
                   </div>
@@ -531,7 +531,7 @@ export default function ReportsTab({
 
   if (currentUser.role === 'counselor') {
     return (
-      <>
+      <div data-tour-id="counselor-reports">
         <h3 className="section-title"><i className="fas fa-file-lines"></i> Reports</h3>
         <CounselorTestsTable
           title="Semester 1"
@@ -553,13 +553,13 @@ export default function ReportsTab({
           onStartCounselorSendFlow={onStartCounselorSendFlow}
           sendResultOpeningId={sendResultOpeningId}
         />
-      </>
+      </div>
     );
   }
 
   if (reportsData?.showDepartmentPicker) {
     return (
-      <div className="mb-3">
+      <div className="mb-3" data-tour-id="reports-workspace">
         <h3 className="section-title"><i className="fas fa-building"></i> Select Department</h3>
         <div className="metrics-grid selection-grid department-selection-grid">
           {(reportsData?.departments || []).map((department) => (
@@ -586,6 +586,7 @@ export default function ReportsTab({
       <div
         key={`reports-year-picker-${reportsData.selectedDepartment || 'scope'}`}
         className="selection-shell selection-shell-stage-enter mb-3"
+        data-tour-id="reports-workspace"
         style={{ maxWidth: 620 }}
       >
         <div className="d-flex justify-between align-center flex-wrap" style={{ gap: 12, marginBottom: 14 }}>
@@ -618,7 +619,7 @@ export default function ReportsTab({
 
   if (reportsData?.selectedDepartment && reportsData?.selectedYear) {
     return (
-      <>
+      <div data-tour-id="reports-workspace">
         <div className="d-flex align-center justify-between flex-wrap mb-2" style={{ gap: 12 }}>
           <ScopeBreadcrumb
             icon="fa-file-lines"
@@ -739,7 +740,7 @@ export default function ReportsTab({
           onToggleTestBlock={onToggleTestBlock}
           onDeleteTest={onDeleteTest}
         />
-      </>
+      </div>
     );
   }
 

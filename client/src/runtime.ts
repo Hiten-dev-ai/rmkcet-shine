@@ -27,6 +27,7 @@ export type DesktopAppSettings = {
   updateChecksEnabled: boolean;
   autoInstallUpdatesWhenIdle: boolean;
   notificationPollMinutes: number;
+  desktopScale: number;
   currentServerOriginOverride: string;
   locatorCsvUrl: string;
   releaseChannelBaseUrl: string;
@@ -62,6 +63,7 @@ type DesktopBridge = {
   featureFlags?: {
     googleLoginSupported?: boolean;
     desktopSendWorkspaceSupported?: boolean;
+    localOauth?: boolean;
   };
   openExternal?: (url: string) => Promise<boolean> | boolean;
   getDesktopAppSettings?: () => Promise<DesktopAppSettings> | DesktopAppSettings;
@@ -162,8 +164,7 @@ function getWindowOrigin() {
 function isDesktopShellOrigin(hostname: string, port: string) {
   const normalizedHost = String(hostname || '').trim().replace(/^\[|\]$/g, '');
   const safePort = String(port || '').trim();
-  return (normalizedHost === 'localhost' || normalizedHost === '127.0.0.1' || normalizedHost === '::1')
-    && safePort === '5123';
+  return normalizedHost === 'localhost' && safePort === '5123';
 }
 
 function inferShellDesktopMode(): ShineRuntimeMode {
@@ -177,8 +178,7 @@ function inferDirectServerOrigin() {
   const isLocalHost = rawHost === 'localhost' || rawHost === '127.0.0.1' || rawHost === '::1';
   if (!isLocalHost) return '';
   if (window.location.port !== '5000' && window.location.port !== '5123') return '';
-  const host = rawHost.includes(':') ? `[${rawHost}]` : rawHost;
-  return `${window.location.protocol}//${host}:5001`;
+  return `${window.location.protocol}//localhost:5001`;
 }
 
 export const runtimeConfig = (() => {
@@ -198,6 +198,7 @@ export const runtimeConfig = (() => {
     featureFlags: {
       googleLoginSupported: Boolean(bridge?.featureFlags?.googleLoginSupported),
       desktopSendWorkspaceSupported: Boolean(bridge?.featureFlags?.desktopSendWorkspaceSupported),
+      localOauth: Boolean(bridge?.featureFlags?.localOauth),
       canOpenExternal: typeof bridge?.openExternal === 'function',
     },
   } as const;
@@ -448,8 +449,14 @@ export function onFloatingSendClosed(callback: (payload: { reason?: string }) =>
 }
 
 export function startGoogleOauth() {
-  if (runtimeConfig.isDesktop) return false;
   try {
+    if (runtimeConfig.isDesktop && /^https?:\/\//i.test(runtimeConfig.appOrigin)) {
+      const desktopOrigin = runtimeConfig.isDesktop ? 'http://localhost:5123' : runtimeConfig.appOrigin;
+      const target = new URL('/auth/google/start', desktopOrigin);
+      target.searchParams.set('desktop_origin', desktopOrigin);
+      target.searchParams.set('desktop_redirect', runtimeConfig.featureFlags.localOauth ? 'local' : 'hosted');
+      return openExternalLink(target.toString());
+    }
     window.location.assign('/auth/google/start');
     return true;
   } catch {

@@ -57,7 +57,7 @@ export default function MessagesTab({
   const selectedAdminMessageIdSet = useMemo(() => new Set(selectedAdminMessageIds), [selectedAdminMessageIds]);
 
   return (
-    <div className="messages-tab-surface">
+    <div className="messages-tab-surface" data-tour-id="messages-workspace">
       <div className="metrics-grid mb-3">
         <div className="metric-card">
           <div className="metric-label">Total Messages</div>

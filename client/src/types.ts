@@ -26,11 +26,15 @@ export interface AppConfig {
   notice_defaulter_copy_template?: string;
   activity_defaulter_copy_template?: string;
   cdp_defaulter_copy_template?: string;
+  cdp_daily_attendance_copy_template?: string;
+  cdp_lecture_plan_copy_template?: string;
+  cdp_mark_entry_copy_template?: string;
   backup_storage_mode?: string;
   google_oauth_enabled: string;
   google_oauth_client_id: string;
   google_oauth_client_secret: string;
   google_oauth_allowed_domain?: string;
+  public_app_base_url?: string;
   google_oauth_redirect_base_url?: string;
   google_oauth_bulk_password_mode?: string;
   google_oauth_bulk_override_password?: string;
@@ -228,6 +232,72 @@ export interface CdpMarkEntryPayload {
   rows: CdpMarkEntryRowPayload[];
 }
 
+export interface CdpLecturePlanRowIssue {
+  row_number: number;
+  serial: string;
+  topic: string;
+  planned_date: string;
+  delivered_date: string;
+  missing_fields: string[];
+}
+
+export interface CdpLecturePlanFinalIssue {
+  unit: number;
+  due_after: string;
+  missing_fields: string[];
+  missing_row_fields: Array<{
+    row_number: number;
+    serial: string;
+    topic: string;
+    missing_fields: string[];
+  }>;
+}
+
+export interface CdpLecturePlanUnitStatus {
+  unit: number;
+  title: string;
+  status: 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+  due: boolean;
+  final_due: boolean;
+  from_date: string;
+  to_date: string;
+  topic_count: number;
+  completed_rows: number;
+  due_row_count: number;
+  pending_row_count: number;
+  completion_completed?: number;
+  completion_total?: number;
+  completion_pct: number;
+  row_issues: CdpLecturePlanRowIssue[];
+  final_issues: CdpLecturePlanFinalIssue[];
+  notes: string[];
+}
+
+export interface CdpLecturePlanClassStatus {
+  class_label: string;
+  faculty_name: string;
+  subject_name: string;
+  course_code: string;
+  status: 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+  units: CdpLecturePlanUnitStatus[];
+  pending_unit_count: number;
+  pending_row_count: number;
+  final_issue_count: number;
+  completion_pct: number;
+  notes: string[];
+}
+
+export interface CdpLecturePlanPayload {
+  status: 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+  classes_detected: number;
+  units_checked: number;
+  due_rows_pending: number;
+  final_checkpoints_pending: number;
+  completion_pct: number;
+  classes: CdpLecturePlanClassStatus[];
+  parser_error: string;
+}
+
 export interface CdpSubjectStatusPayload {
   subject_id: number;
   subject_code: string;
@@ -251,6 +321,7 @@ export interface CdpSubjectStatusPayload {
   parsed_at: string | null;
   parser_error: string;
   mark_entry: CdpMarkEntryPayload;
+  lecture_plan: CdpLecturePlanPayload;
 }
 
 export interface CdpSubjectOverviewRecord extends SubjectRecord {
@@ -263,6 +334,8 @@ export interface CdpSubjectOverviewRecord extends SubjectRecord {
   parsed_at: string | null;
   parser_error: string;
   faculty_statuses?: CdpFacultyStatusPayload[];
+  mark_entry?: CdpMarkEntryPayload;
+  lecture_plan?: CdpLecturePlanPayload;
 }
 
 export interface CdpOverviewPayload {
@@ -459,6 +532,15 @@ export interface DashboardOverviewPayload {
   completion_overview: {
     overall: number;
     pending_counselors: number;
+    department_labels: string[];
+    department_values: number[];
+    department_year_breakdown: Record<string, Record<number, number>>;
+  };
+  cdp_completion_overview: {
+    overall: number;
+    pending_counselors: number;
+    pending_subjects: number;
+    subject_count: number;
     department_labels: string[];
     department_values: number[];
     department_year_breakdown: Record<string, Record<number, number>>;
@@ -882,4 +964,8 @@ export interface BootstrapPayload {
   counselorOverview?: CounselorOverviewPayload | null;
   counselorTests?: CounselorVisibleTestRecord[];
   linkedCounselorNotifications?: LinkedCounselorNotificationPayload | null;
+  userPreferences?: {
+    theme?: 'light' | 'dark' | '';
+    desktopSettings?: Record<string, unknown>;
+  } | null;
 }

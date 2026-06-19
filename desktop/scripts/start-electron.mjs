@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { access, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { constants as fsConstants, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,11 @@ const electronPackageJson = resolve(desktopRoot, 'node_modules', 'electron', 'pa
 const electronDistDir = resolve(desktopRoot, 'node_modules', 'electron', 'dist');
 const electronPathFile = resolve(desktopRoot, 'node_modules', 'electron', 'path.txt');
 const electronBinaryDirect = resolve(electronDistDir, process.platform === 'win32' ? 'electron.exe' : 'electron');
+const shineAppUserModelId = 'RMKCET.Shine.App';
+const shineDevExecutableName = 'RMKCET Shine Dev.exe';
+const shineDevElectronBinary = resolve(electronDistDir, shineDevExecutableName);
+const shineIconPath = resolve(desktopRoot, 'assets', 'icon.ico');
+const rceditPath = resolve(desktopRoot, 'node_modules', 'electron-winstaller', 'vendor', 'rcedit.exe');
 
 async function ensureElectronCli() {
   try {
@@ -130,9 +135,59 @@ async function repairElectronInstallIfNeeded() {
   }
 }
 
+async function ensureBrandedElectronBinary() {
+  if (process.platform !== 'win32') return electronBinaryDirect;
+  try {
+    const [sourceStat, iconStat, targetStat] = await Promise.all([
+      stat(electronBinaryDirect),
+      stat(shineIconPath),
+      stat(shineDevElectronBinary).catch(() => null),
+    ]);
+    const targetFresh = targetStat
+      && targetStat.mtimeMs >= sourceStat.mtimeMs
+      && targetStat.mtimeMs >= iconStat.mtimeMs;
+    if (!targetFresh) {
+      await copyFile(electronBinaryDirect, shineDevElectronBinary);
+    }
+    if (existsSync(rceditPath)) {
+      const edit = spawnSync(rceditPath, [
+        shineDevElectronBinary,
+        '--set-icon',
+        shineIconPath,
+        '--set-version-string',
+        'ProductName',
+        'RMKCET Shine',
+        '--set-version-string',
+        'FileDescription',
+        'RMKCET Shine Desktop',
+        '--set-version-string',
+        'CompanyName',
+        'RMKCET Shine',
+        '--set-version-string',
+        'InternalName',
+        'RMKCET Shine',
+        '--set-version-string',
+        'OriginalFilename',
+        shineDevExecutableName,
+      ], {
+        cwd: desktopRoot,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      if (edit.error || edit.status !== 0) {
+        console.warn('[desktop] Could not stamp Shine icon onto dev Electron executable; falling back to BrowserWindow icon.');
+      }
+    }
+    return shineDevElectronBinary;
+  } catch {
+    return electronBinaryDirect;
+  }
+}
+
 async function main() {
   await ensureElectronCli();
   await repairElectronInstallIfNeeded();
+  const electronBinary = await ensureBrandedElectronBinary();
   const electronArgs = ['.'];
   if (process.platform === 'linux') {
     electronArgs.unshift('--disable-gpu');
@@ -140,7 +195,9 @@ async function main() {
   }
   const childEnv = {
     ...process.env,
+    SHINE_DESKTOP_DEV_RUNNER: '1',
     SHINE_DESKTOP_MODE: modeArg,
+    SHINE_DESKTOP_APP_ID: shineAppUserModelId,
   };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   const hasDisplay = Boolean(String(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || '').trim());
@@ -152,7 +209,7 @@ async function main() {
         stdio: 'inherit',
         env: childEnv,
       })
-      : spawn(electronBinaryDirect, electronArgs, {
+      : spawn(electronBinary, electronArgs, {
         cwd: desktopRoot,
         stdio: 'inherit',
         env: childEnv,

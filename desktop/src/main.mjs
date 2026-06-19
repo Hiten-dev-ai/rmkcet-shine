@@ -7,29 +7,46 @@ import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, extname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 const require = createRequire(import.meta.url);
 const electron = require('electron');
-const { autoUpdater } = require('electron-updater');
+let autoUpdater = null;
+let autoUpdaterLoadError = null;
+try {
+  ({ autoUpdater } = require('electron-updater'));
+} catch (error) {
+  autoUpdaterLoadError = error;
+}
 
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, screen, shell, ipcMain } = electron;
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, screen, shell, ipcMain, session } = electron;
 const EmbeddedBrowserView = electron.BrowserView || electron.WebContentsView;
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(currentDir, '..');
 const repoRoot = resolve(desktopRoot, '..');
 const WHATSAPP_DESKTOP_APP_ID = '5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App';
-const APP_USER_MODEL_ID = String(process.env.SHINE_DESKTOP_APP_ID || 'dev.rmkcet.shine').trim();
+const APP_DISPLAY_NAME = 'RMKCET Shine';
+const APP_USER_MODEL_ID = String(process.env.SHINE_DESKTOP_APP_ID || 'RMKCET.Shine.App').trim();
 const DEFAULT_LOCATOR_CSV_URL = 'https://drive.google.com/uc?export=download&id=1K1YZVkPF42X2F5oA6_ZQYfrB57JHhxma';
+const launchedFromDevRunner = process.env.SHINE_DESKTOP_DEV_RUNNER === '1';
+app.setName(APP_DISPLAY_NAME);
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+if (!app.isPackaged || launchedFromDevRunner) {
+  app.setPath('userData', resolve(app.getPath('appData'), 'RMKCET Shine'));
+}
 const packagedReleaseConfigPath = resolve(process.resourcesPath, 'release-config.json');
-const isPackagedDesktopApp = app.isPackaged;
+const isPackagedDesktopApp = app.isPackaged && !launchedFromDevRunner;
 const desktopSettingsPath = resolve(app.getPath('userData'), 'desktop-settings.json');
 const desktopUpdateRoot = resolve(app.getPath('userData'), 'updates');
 const desktopUpdateStatusHtmlPath = resolve(app.getPath('userData'), 'update-status.html');
 const desktopDiagnosticsLogPath = resolve(app.getPath('userData'), 'desktop-diagnostics.log');
+const oauthBrowserProfileDir = resolve(app.getPath('userData'), 'oauth-browser-profile');
 const desktopAppLock = app.requestSingleInstanceLock();
 
 const DEFAULT_DESKTOP_SETTINGS = {
+  desktopSettingsVersion: 3,
   launchAtWindowsStartup: true,
   startMinimizedToTrayOnLogin: true,
   minimizeToTrayOnClose: true,
@@ -37,6 +54,7 @@ const DEFAULT_DESKTOP_SETTINGS = {
   updateChecksEnabled: true,
   autoInstallUpdatesWhenIdle: true,
   notificationPollMinutes: 30,
+  desktopScale: 1,
   currentServerOriginOverride: '',
   locatorCsvUrl: DEFAULT_LOCATOR_CSV_URL,
   releaseChannelBaseUrl: '',
@@ -60,11 +78,9 @@ const packagedReleaseConfig = readPackagedReleaseConfig();
 const clientDistRoot = isPackagedDesktopApp
   ? resolve(process.resourcesPath, 'dist-desktop')
   : resolve(repoRoot, process.env.SHINE_DESKTOP_DIST_DIR || 'client/dist-desktop');
-const desktopMode = isPackagedDesktopApp
-  ? 'desktop-app'
-  : process.env.SHINE_DESKTOP_MODE === 'desktop-app' ? 'desktop-app' : 'desktop-dev';
-const devRendererUrl = String(process.env.SHINE_DESKTOP_DEV_URL || 'http://[::1]:5000').trim();
-const packagedApiOrigin = String(packagedReleaseConfig?.apiOrigin || process.env.SHINE_DESKTOP_API_ORIGIN || 'http://[::1]:5001').trim();
+const desktopMode = process.env.SHINE_DESKTOP_MODE === 'desktop-app' || isPackagedDesktopApp ? 'desktop-app' : 'desktop-dev';
+const devRendererUrl = String(process.env.SHINE_DESKTOP_DEV_URL || 'http://localhost:5000').trim();
+const packagedApiOrigin = String(packagedReleaseConfig?.apiOrigin || process.env.SHINE_DESKTOP_API_ORIGIN || 'http://localhost:5001').trim();
 let apiOrigin = packagedApiOrigin;
 
 function normalizeHost(host) {
@@ -72,12 +88,7 @@ function normalizeHost(host) {
 }
 
 const defaultShellHost = (() => {
-  if (desktopMode === 'desktop-app') return '127.0.0.1';
-  try {
-    return normalizeHost(new URL(apiOrigin).hostname || '127.0.0.1');
-  } catch {
-    return '127.0.0.1';
-  }
+  return 'localhost';
 })();
 
 const shellHost = normalizeHost(process.env.SHINE_DESKTOP_SHELL_HOST || defaultShellHost) || defaultShellHost;
@@ -88,6 +99,7 @@ const shellOrigin = `http://${shellOriginHost}:${shellPort}`;
 process.env.SHINE_DESKTOP_MODE = desktopMode;
 process.env.SHINE_DESKTOP_API_ORIGIN = apiOrigin;
 process.env.SHINE_DESKTOP_SHELL_ORIGIN = shellOrigin;
+process.env.SHINE_DESKTOP_LOCAL_OAUTH = isPackagedDesktopApp ? '0' : '1';
 
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -141,6 +153,7 @@ const WORKSPACE_BROWSER_DEBUG_PORTS = {
   chrome: 9333,
   edge: 9334,
 };
+const OAUTH_BROWSER_DEBUG_PORT = 9335;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -165,13 +178,15 @@ function sanitizeDesktopSettings(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   return {
     ...DEFAULT_DESKTOP_SETTINGS,
-    launchAtWindowsStartup: Boolean(source.launchAtWindowsStartup ?? DEFAULT_DESKTOP_SETTINGS.launchAtWindowsStartup),
+    desktopSettingsVersion: DEFAULT_DESKTOP_SETTINGS.desktopSettingsVersion,
+    launchAtWindowsStartup: true,
     startMinimizedToTrayOnLogin: Boolean(source.startMinimizedToTrayOnLogin ?? DEFAULT_DESKTOP_SETTINGS.startMinimizedToTrayOnLogin),
     minimizeToTrayOnClose: Boolean(source.minimizeToTrayOnClose ?? DEFAULT_DESKTOP_SETTINGS.minimizeToTrayOnClose),
     desktopNotificationsEnabled: Boolean(source.desktopNotificationsEnabled ?? DEFAULT_DESKTOP_SETTINGS.desktopNotificationsEnabled),
     updateChecksEnabled: Boolean(source.updateChecksEnabled ?? DEFAULT_DESKTOP_SETTINGS.updateChecksEnabled),
     autoInstallUpdatesWhenIdle: Boolean(source.autoInstallUpdatesWhenIdle ?? DEFAULT_DESKTOP_SETTINGS.autoInstallUpdatesWhenIdle),
     notificationPollMinutes: Math.max(1, Math.min(120, Number(source.notificationPollMinutes || DEFAULT_DESKTOP_SETTINGS.notificationPollMinutes) || DEFAULT_DESKTOP_SETTINGS.notificationPollMinutes)),
+    desktopScale: Math.max(0.8, Math.min(1.35, Math.round((Number(source.desktopScale || DEFAULT_DESKTOP_SETTINGS.desktopScale) || DEFAULT_DESKTOP_SETTINGS.desktopScale) * 20) / 20)),
     currentServerOriginOverride: normalizeOrigin(source.currentServerOriginOverride),
     locatorCsvUrl: String(source.locatorCsvUrl || packagedReleaseConfig?.locatorCsvUrl || process.env.SHINE_DESKTOP_LOCATOR_CSV_URL || DEFAULT_LOCATOR_CSV_URL).trim(),
     releaseChannelBaseUrl: String(source.releaseChannelBaseUrl || packagedReleaseConfig?.releaseChannelBaseUrl || '').trim(),
@@ -215,18 +230,49 @@ let desktopSettings = readDesktopSettingsSync();
 function applyLoginItemSettings(settings = desktopSettings) {
   if (process.platform !== 'win32') return;
   try {
-    const enabled = Boolean(settings.launchAtWindowsStartup);
+    if (!isPackagedDesktopApp) {
+      app.setLoginItemSettings({
+        openAtLogin: false,
+        path: process.execPath,
+        args: [],
+      });
+      const cleanup = spawnSync('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `
+$runPath = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+$target = ${JSON.stringify(process.execPath)}
+if (Test-Path $runPath) {
+  $item = Get-ItemProperty -Path $runPath
+  foreach ($property in $item.PSObject.Properties) {
+    $value = [string]$property.Value
+    if ($property.Name -eq 'electron.app.Electron' -or $value -like "*$target*") {
+      Remove-ItemProperty -Path $runPath -Name $property.Name -ErrorAction SilentlyContinue
+    }
+  }
+}
+`,
+      ], {
+        windowsHide: true,
+        stdio: 'ignore',
+        timeout: 3500,
+      });
+      void writeDesktopDiagnosticsLine(`loginItem devModeCleared path=${process.execPath}`);
+      void writeDesktopDiagnosticsLine(`loginItem devRegistryCleanup status=${cleanup.status ?? 'unknown'} signal=${cleanup.signal || ''}`);
+      return;
+    }
     app.setLoginItemSettings({
-      openAtLogin: enabled,
+      openAtLogin: true,
       path: process.execPath,
-      args: enabled ? ['--hidden'] : [],
+      args: ['--hidden'],
     });
+    void writeDesktopDiagnosticsLine(`loginItem openAtLogin=true path=${process.execPath}`);
   } catch {
     // Ignore unsupported startup registration failures.
   }
 }
-
-applyLoginItemSettings(desktopSettings);
 
 function parseCsvLine(line) {
   const cells = [];
@@ -291,6 +337,84 @@ async function fetchText(url, timeoutMs = 6500) {
   }
 }
 
+function isAllowedExternalUrl(url) {
+  const safeUrl = String(url || '').trim();
+  if (!safeUrl) return false;
+  try {
+    const parsed = new URL(safeUrl);
+    if (['mailto:', 'ms-windows-store:', 'whatsapp:'].includes(parsed.protocol)) return true;
+    if (parsed.protocol === 'https:') return true;
+    if (parsed.protocol === 'http:') {
+      const host = normalizeHost(parsed.hostname).toLowerCase();
+      return host === 'localhost';
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isDesktopOauthStartUrl(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    return parsed.origin === shellOrigin && parsed.pathname === '/auth/google/start';
+  } catch {
+    return false;
+  }
+}
+
+function openOauthChromeMiniWindow(url) {
+  const safeUrl = String(url || '').trim();
+  const availability = getAvailableSendTargets();
+  const chromePath = availability.paths?.chrome || '';
+  if (!chromePath) return false;
+  const display = screen.getPrimaryDisplay()?.workArea || { x: 80, y: 80, width: 1280, height: 800 };
+  const width = 540;
+  const height = 720;
+  const x = Math.max(display.x, Math.round(display.x + (display.width - width) / 2));
+  const y = Math.max(display.y, Math.round(display.y + (display.height - height) / 2));
+  launchGuiProcess(chromePath, [
+    '--new-window',
+    `--remote-debugging-port=${OAUTH_BROWSER_DEBUG_PORT}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    `--user-data-dir=${oauthBrowserProfileDir}`,
+    `--window-position=${x},${y}`,
+    `--window-size=${width},${height}`,
+    `--app=${safeUrl}`,
+  ]);
+  return true;
+}
+
+function closeOauthBrowserWindow(delayMs = 1200) {
+  setTimeout(() => {
+    void closeBrowserByDebugPort(OAUTH_BROWSER_DEBUG_PORT)
+      .finally(() => {
+        setTimeout(() => {
+          closeWorkspaceBrowserProcesses(['chrome'], oauthBrowserProfileDir, `remote-debugging-port=${OAUTH_BROWSER_DEBUG_PORT}`);
+        }, 700);
+      });
+  }, Math.max(0, Number(delayMs || 0) || 0));
+}
+
+async function openAllowedExternalUrl(url) {
+  let safeUrl = String(url || '').trim();
+  if (!isAllowedExternalUrl(safeUrl)) return false;
+  if (isDesktopOauthStartUrl(safeUrl)) {
+    try {
+      const oauthUrl = new URL(safeUrl);
+      oauthUrl.searchParams.set('desktop_origin', shellOrigin);
+      oauthUrl.searchParams.set('desktop_redirect', isPackagedDesktopApp ? 'hosted' : 'local');
+      safeUrl = oauthUrl.toString();
+    } catch {
+      // Keep original URL if parsing somehow fails.
+    }
+    if (openOauthChromeMiniWindow(safeUrl)) return true;
+  }
+  await shell.openExternal(safeUrl);
+  return true;
+}
+
 async function probeApiOrigin(origin, timeoutMs = 2500) {
   const safeOrigin = normalizeOrigin(origin);
   if (!safeOrigin) return false;
@@ -319,6 +443,18 @@ function getReleaseChannelBaseUrl() {
 
 async function resolveServerOriginWithLocator() {
   const primary = normalizeOrigin(packagedApiOrigin);
+  if (!isPackagedDesktopApp) {
+    const localPrimary = normalizeOrigin(process.env.SHINE_DESKTOP_API_ORIGIN || primary || 'http://localhost:5001') || 'http://localhost:5001';
+    const localOnline = await waitForApiOrigin(localPrimary, Number(process.env.SHINE_DESKTOP_PRIMARY_WAIT_ATTEMPTS || 80), 500);
+    apiOrigin = localPrimary;
+    return {
+      online: Boolean(localOnline),
+      apiOrigin,
+      source: localOnline ? 'local-primary' : 'offline',
+      locator: null,
+      error: localOnline ? '' : 'Local Shine server is unavailable.',
+    };
+  }
   const shouldWaitForPrimary = !isPackagedDesktopApp || process.env.SHINE_DESKTOP_WAIT_FOR_PRIMARY === '1';
   const primaryOnline = primary && (
     shouldWaitForPrimary
@@ -379,7 +515,9 @@ const cachedDesktopIconImages = new Map();
 if (!desktopAppLock) {
   app.quit();
 }
-app.setAppUserModelId(APP_USER_MODEL_ID);
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
 
 function getDesktopIconPath(kind = 'window') {
   const cacheKey = String(kind || 'window');
@@ -453,11 +591,18 @@ async function writeDesktopDiagnosticsLine(message) {
 }
 
 function logDesktopIconDiagnostics() {
+  let loginItemState = {};
+  try {
+    loginItemState = app.getLoginItemSettings();
+  } catch {
+    loginItemState = {};
+  }
   void writeDesktopDiagnosticsLine([
     `mode=${desktopMode}`,
     `appVersion=${app.getVersion()}`,
     `appUserModelId=${APP_USER_MODEL_ID}`,
     `execPath=${process.execPath}`,
+    `loginItem=${JSON.stringify(loginItemState)}`,
     `resourcesPath=${process.resourcesPath || ''}`,
     `windowIcon=${getDesktopIconPath('window')}`,
     `trayIcon=${getDesktopIconPath('tray')}`,
@@ -465,8 +610,25 @@ function logDesktopIconDiagnostics() {
   ].join(' | '));
 }
 
+function recordWindowAction(reason, extra = {}) {
+  const state = mainWindowRef && !mainWindowRef.isDestroyed()
+    ? {
+      visible: mainWindowRef.isVisible(),
+      minimized: mainWindowRef.isMinimized(),
+      focused: mainWindowRef.isFocused(),
+      workspaceActive: desktopWorkspaceActive,
+    }
+    : {
+      visible: false,
+      minimized: false,
+      focused: false,
+      workspaceActive: desktopWorkspaceActive,
+    };
+  void writeDesktopDiagnosticsLine(`windowAction ${JSON.stringify({ reason, ...state, ...extra })}`);
+}
+
 function refreshWindowsShellIconCache() {
-  if (process.platform !== 'win32' || !isPackagedDesktopApp) return;
+  if (process.platform !== 'win32') return;
   try {
     const result = spawnSync('ie4uinit.exe', ['-show'], {
       windowsHide: true,
@@ -479,10 +641,88 @@ function refreshWindowsShellIconCache() {
   }
 }
 
-function refreshWindowsShortcutIcons() {
-  if (process.platform !== 'win32' || !isPackagedDesktopApp) return;
+function getWindowsShortcutDetails() {
   const iconPath = getDesktopIconPath('window');
-  if (!iconPath || !existsSync(iconPath)) return;
+  if (!iconPath || !existsSync(iconPath)) return null;
+  return {
+    target: process.execPath,
+    cwd: launchedFromDevRunner ? desktopRoot : dirname(process.execPath),
+    args: launchedFromDevRunner ? '.' : '',
+    description: APP_DISPLAY_NAME,
+    icon: iconPath,
+    iconIndex: 0,
+    appUserModelId: APP_USER_MODEL_ID,
+  };
+}
+
+function ensureWindowsToastShortcutIdentity() {
+  if (process.platform !== 'win32') return false;
+  const details = getWindowsShortcutDetails();
+  if (!details) return false;
+  const shortcutDir = resolve(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', APP_DISPLAY_NAME);
+  const shortcutPath = resolve(shortcutDir, `${APP_DISPLAY_NAME}.lnk`);
+  try {
+    mkdirSync(shortcutDir, { recursive: true });
+    shell.writeShortcutLink(shortcutPath, existsSync(shortcutPath) ? 'update' : 'create', details);
+    void writeDesktopDiagnosticsLine(`toastShortcutIdentity=${shortcutPath} | appUserModelId=${APP_USER_MODEL_ID} | target=${process.execPath} | icon=${details.icon}`);
+    return true;
+  } catch (error) {
+    void writeDesktopDiagnosticsLine(`toastShortcutIdentityFailed=${error instanceof Error ? error.message : 'unknown error'}`);
+    return false;
+  }
+}
+
+function cleanupWorkspaceElectronShortcutIdentities() {
+  if (process.platform !== 'win32') return;
+  const electronRuntimeRoot = resolve(desktopRoot, 'node_modules', 'electron', 'dist').toLowerCase();
+  const candidateRoots = [
+    app.getPath('desktop'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar'),
+    resolve(app.getPath('appData'), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'StartMenu'),
+  ];
+  const encodedRoots = JSON.stringify(candidateRoots);
+  const encodedElectronRuntimeRoot = JSON.stringify(electronRuntimeRoot);
+  const cleanup = spawnSync('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    `
+$roots = ${encodedRoots} | ConvertFrom-Json
+$electronRuntimeRoot = ${encodedElectronRuntimeRoot}
+$shell = New-Object -ComObject WScript.Shell
+$removed = @()
+foreach ($root in $roots) {
+  if (!(Test-Path $root)) { continue }
+  Get-ChildItem -LiteralPath $root -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $shortcut = $shell.CreateShortcut($_.FullName)
+      $target = [string]$shortcut.TargetPath
+      if ($_.BaseName -eq 'Electron' -and $target.ToLower().StartsWith($electronRuntimeRoot)) {
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+        $removed += $_.FullName
+      }
+    } catch {}
+  }
+}
+$removed -join [Environment]::NewLine
+`,
+  ], {
+    windowsHide: true,
+    encoding: 'utf8',
+    timeout: 8000,
+  });
+  const removed = String(cleanup.stdout || '').trim().replace(/\r?\n/g, ' | ');
+  void writeDesktopDiagnosticsLine(`workspaceElectronShortcutCleanup status=${cleanup.status ?? 'unknown'} removed=${removed || 'none'}`);
+}
+
+function refreshWindowsShortcutIcons() {
+  if (process.platform !== 'win32') return;
+  const details = getWindowsShortcutDetails();
+  if (!details) return;
+  cleanupWorkspaceElectronShortcutIdentities();
+  ensureWindowsToastShortcutIdentity();
   const shortcutNames = [
     'RMKCET Shine.lnk',
     'RMKCET Shine Desktop.lnk',
@@ -502,16 +742,9 @@ function refreshWindowsShortcutIcons() {
       const shortcutPath = resolve(root, name);
       if (!existsSync(shortcutPath)) continue;
       try {
-        shell.writeShortcutLink(shortcutPath, 'update', {
-          target: process.execPath,
-          cwd: dirname(process.execPath),
-          description: 'RMKCET Shine',
-          icon: iconPath,
-          iconIndex: 0,
-          appUserModelId: APP_USER_MODEL_ID,
-        });
+        shell.writeShortcutLink(shortcutPath, 'update', details);
         refreshedCount += 1;
-        void writeDesktopDiagnosticsLine(`shortcutIconRefreshed=${shortcutPath} | icon=${iconPath}`);
+        void writeDesktopDiagnosticsLine(`shortcutIconRefreshed=${shortcutPath} | icon=${details.icon} | appUserModelId=${APP_USER_MODEL_ID}`);
       } catch (error) {
         void writeDesktopDiagnosticsLine(`shortcutIconRefreshFailed=${shortcutPath} | ${error instanceof Error ? error.message : 'unknown error'}`);
       }
@@ -520,16 +753,75 @@ function refreshWindowsShortcutIcons() {
   if (refreshedCount > 0) refreshWindowsShellIconCache();
 }
 
-function restoreMainWindow() {
+function restoreMainWindow(reason = 'manual') {
   if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
+  recordWindowAction(reason);
   if (mainWindowRef.isMinimized()) mainWindowRef.restore();
   mainWindowRef.show();
   maximizeMainWindow();
   mainWindowRef.focus();
 }
 
+function showWindowsNativeToast(payload = {}) {
+  if (process.platform !== 'win32') return false;
+  ensureWindowsToastShortcutIdentity();
+  const title = String(payload.title || APP_DISPLAY_NAME).trim() || APP_DISPLAY_NAME;
+  const body = String(payload.body || payload.message || '').trim();
+  const iconPath = getDesktopIconPath('notification') || getDesktopIconPath('window');
+  const toastPayload = {
+    appId: APP_USER_MODEL_ID,
+    title,
+    body,
+    iconUri: iconPath ? pathToFileURL(iconPath).toString() : '',
+    silent: Boolean(payload.silent),
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(toastPayload), 'utf16le').toString('base64');
+  const powerShellScript = `
+$payloadJson = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${encodedPayload}'))
+$payload = $payloadJson | ConvertFrom-Json
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$escape = { param([string]$value) [System.Security.SecurityElement]::Escape($value) }
+$title = & $escape ([string]$payload.title)
+$body = & $escape ([string]$payload.body)
+$icon = & $escape ([string]$payload.iconUri)
+$audio = if ($payload.silent) { '<audio silent="true" />' } else { '' }
+$image = if ($icon) { '<image placement="appLogoOverride" hint-crop="circle" src="' + $icon + '" />' } else { '' }
+$toastXml = '<toast duration="short"><visual><binding template="ToastGeneric">' + $image + '<text>' + $title + '</text><text>' + $body + '</text></binding></visual>' + $audio + '</toast>'
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml($toastXml)
+$toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+$toast.ExpirationTime = [System.DateTimeOffset]::Now.AddSeconds(6)
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier([string]$payload.appId)
+$notifier.Show($toast)
+`;
+  const encodedCommand = Buffer.from(powerShellScript, 'utf16le').toString('base64');
+  try {
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      encodedCommand,
+    ], {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 5000,
+    });
+    const success = !result.error && result.status === 0;
+    void writeDesktopDiagnosticsLine(`windowsNativeToast status=${result.status ?? 'unknown'} signal=${result.signal || ''} success=${success} appId=${APP_USER_MODEL_ID}`);
+    return success;
+  } catch (error) {
+    void writeDesktopDiagnosticsLine(`windowsNativeToastFailed=${error instanceof Error ? error.message : 'unknown error'}`);
+    return false;
+  }
+}
+
 function showDesktopNotification(payload = {}) {
-  if (!desktopSettings.desktopNotificationsEnabled || !Notification.isSupported()) return false;
+  if (!desktopSettings.desktopNotificationsEnabled) return false;
+  if (process.platform === 'win32') return showWindowsNativeToast(payload);
+  if (!Notification.isSupported()) return false;
+  ensureWindowsToastShortcutIdentity();
   const title = String(payload.title || 'RMKCET Shine').trim();
   const body = String(payload.body || payload.message || '').trim();
   const notification = new Notification({
@@ -538,16 +830,33 @@ function showDesktopNotification(payload = {}) {
     icon: getDesktopIconPath('notification') || getDesktopIconImage('notification', 256),
     silent: Boolean(payload.silent),
   });
-  notification.on('click', restoreMainWindow);
+  notification.on('click', () => restoreMainWindow('notification-click'));
   notification.show();
+  setTimeout(() => {
+    try {
+      notification.close();
+    } catch {
+      // Ignore notification close races.
+    }
+  }, 5000);
   return true;
+}
+
+function applyDesktopScale(settings = desktopSettings) {
+  const scale = Math.max(0.8, Math.min(1.35, Number(settings.desktopScale || 1) || 1));
+  if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
+  try {
+    mainWindowRef.webContents.setZoomFactor(scale);
+  } catch {
+    // Ignore zoom failures during startup/shutdown.
+  }
 }
 
 function updateTrayMenu() {
   if (!appTray) return;
   appTray.setToolTip('RMKCET Shine');
   appTray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Open Shine', click: restoreMainWindow },
+    { label: 'Open Shine', click: () => restoreMainWindow('tray-menu-open') },
     { label: 'Desktop Settings', click: () => openDesktopSettings() },
     { label: 'Check Updates', click: () => void checkDesktopUpdate({ interactive: true }) },
     { type: 'separator' },
@@ -565,7 +874,7 @@ function createTray() {
   if (appTray) return appTray;
   const trayIconPath = getDesktopIconPath('tray');
   appTray = new Tray(process.platform === 'win32' && trayIconPath ? trayIconPath : getDesktopIconImage('tray', 16));
-  appTray.on('click', restoreMainWindow);
+  appTray.on('click', () => restoreMainWindow('tray-click'));
   updateTrayMenu();
   return appTray;
 }
@@ -580,7 +889,7 @@ function scheduleDesktopUpdateChecks() {
 }
 
 function openDesktopSettings() {
-  restoreMainWindow();
+  restoreMainWindow('desktop-settings');
   if (mainWindowRef && !mainWindowRef.isDestroyed()) {
     mainWindowRef.webContents.send('shine:desktopSettings:open');
   }
@@ -731,6 +1040,7 @@ let desktopUpdaterConfiguredFor = '';
 let desktopUpdaterEventsAttached = false;
 
 function attachDesktopUpdaterEvents() {
+  if (!autoUpdater) return;
   if (desktopUpdaterEventsAttached) return;
   desktopUpdaterEventsAttached = true;
   autoUpdater.on('download-progress', (progress = {}) => {
@@ -762,6 +1072,7 @@ function attachDesktopUpdaterEvents() {
 }
 
 function configureDesktopUpdater() {
+  if (!autoUpdater) return '';
   if (!isPackagedDesktopApp || desktopMode !== 'desktop-app') return '';
   const feedUrl = getDesktopUpdaterFeedUrl();
   if (!/^https?:\/\//i.test(feedUrl)) return '';
@@ -905,6 +1216,16 @@ async function checkDesktopUpdate(options = {}) {
   const feedUrl = configureDesktopUpdater();
   const manifestUrl = feedUrl ? `${feedUrl}/latest.yml` : buildManifestUrl(getReleaseChannelBaseUrl());
   const currentVersion = String(app.getVersion() || process.env.SHINE_DESKTOP_APP_VERSION || '0.1.0').trim();
+  if (!autoUpdater) {
+    return {
+      available: false,
+      currentVersion,
+      error: autoUpdaterLoadError instanceof Error
+        ? `Desktop updater is unavailable: ${autoUpdaterLoadError.message}`
+        : 'Desktop updater is unavailable.',
+      manifestUrl,
+    };
+  }
   if (!feedUrl) {
     return {
       available: false,
@@ -929,14 +1250,14 @@ async function checkDesktopUpdate(options = {}) {
     };
     pendingUpdateInfo = available ? info : null;
     if (available) {
-      if (!options.quiet) {
+      if (options.interactive && !options.quiet) {
         showDesktopNotification({ title: 'Shine update available', body: `Version ${latestVersion} is ready to install.` });
       }
       if (options.install) {
         const installResult = await installDesktopUpdate(info);
         return { ...info, installing: installResult.success, installResult };
       }
-      if (desktopSettings.autoInstallUpdatesWhenIdle && !desktopWorkspaceActive && !floatingSendWindow) {
+      if (options.interactive && desktopSettings.autoInstallUpdatesWhenIdle && !desktopWorkspaceActive && !floatingSendWindow) {
         void promptAndInstallDesktopUpdate(info);
       }
     } else if (options.interactive) {
@@ -975,6 +1296,7 @@ async function installDesktopUpdate(updateInfo = pendingUpdateInfo) {
     return { success: false, deferred: true, error: 'A send workflow is active. The update will wait until it closes.' };
   }
   if (updateInstallInProgress) return { success: false, error: 'Update install is already running.' };
+  if (!autoUpdater) return { success: false, error: 'Desktop updater is unavailable.' };
   if (!configureDesktopUpdater()) return { success: false, error: 'Desktop updater feed is not configured.' };
   updateInstallInProgress = true;
   pendingUpdateInfo = targetUpdateInfo;
@@ -1333,9 +1655,6 @@ function restoreMainWindowFromFloating(reason = 'close') {
   mainWindowRef.webContents.send('shine:floatingSend:closed', { reason });
   mainWindowRef.show();
   mainWindowRef.focus();
-  if (pendingUpdateInfo?.available && desktopSettings.autoInstallUpdatesWhenIdle) {
-    setTimeout(() => void promptAndInstallDesktopUpdate(pendingUpdateInfo), 700);
-  }
 }
 
 async function showFloatingSendWindow(payload) {
@@ -1352,13 +1671,14 @@ async function showFloatingSendWindow(payload) {
       maxWidth: 520,
       alwaysOnTop: true,
       frame: false,
-      skipTaskbar: true,
-      resizable: true,
-      movable: true,
-      autoHideMenuBar: true,
-      backgroundColor: '#0b1220',
-      title: 'Shine Student Send List',
-      webPreferences: {
+    skipTaskbar: true,
+    resizable: true,
+    movable: true,
+    autoHideMenuBar: true,
+    backgroundColor: '#0b1220',
+    title: 'Shine Student Send List',
+    icon: getDesktopIconPath('window') || undefined,
+    webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         backgroundThrottling: false,
@@ -1451,6 +1771,66 @@ function sendSimpleHtml(res, statusCode, title, body) {
   res.end(`<!doctype html><html><head><meta charset="utf-8" /><title>${title}</title><style>body{font-family:Segoe UI,system-ui,sans-serif;background:#0b1220;color:#e6edf8;display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:720px;padding:32px;border:1px solid rgba(148,163,184,.28);border-radius:24px;background:rgba(15,23,42,.88);box-shadow:0 30px 80px rgba(2,6,23,.45)}h1{margin:0 0 12px;font-size:1.6rem}p{margin:0 0 12px;color:#bdd0f4;line-height:1.5}code{background:rgba(15,23,42,.75);padding:2px 8px;border-radius:999px}</style></head><body><main><h1>${title}</h1><p>${body}</p></main></body></html>`);
 }
 
+function sendAutoCloseHtml(res, title, body) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(`<!doctype html><html><head><meta charset="utf-8" /><title>${title}</title><style>body{font-family:Segoe UI,system-ui,sans-serif;background:#0b1220;color:#e6edf8;display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:720px;padding:32px;border:1px solid rgba(148,163,184,.28);border-radius:24px;background:rgba(15,23,42,.88);box-shadow:0 30px 80px rgba(2,6,23,.45)}h1{margin:0 0 12px;font-size:1.6rem}p{margin:0 0 12px;color:#bdd0f4;line-height:1.5}.muted{color:#94a3b8;font-size:.9rem}</style></head><body><main><h1>${title}</h1><p>${body}</p><p class="muted" id="fallback">Closing this sign-in window...</p></main><script>setTimeout(function(){try{window.open('','_self');window.close();}catch(e){}},500);setTimeout(function(){var el=document.getElementById('fallback');if(el)el.textContent='You can close this sign-in window now.';},2500);</script></body></html>`);
+}
+
+async function completeDesktopOauthTicket(ticket) {
+  if (!ticket) {
+    throw new Error('The browser did not receive a desktop sign-in ticket. Please try signing in again.');
+  }
+
+  const response = await fetch(new URL('/api/auth/desktop-oauth/exchange', apiOrigin), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Origin: shellOrigin,
+    },
+    body: JSON.stringify({ ticket }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.sessionId) {
+    throw new Error(String(payload.error || 'The desktop sign-in ticket could not be claimed.'));
+  }
+  const maxAge = Number(payload.maxAge || 86400);
+  const expirationDate = Math.floor(Date.now() / 1000) + (Number.isFinite(maxAge) && maxAge > 300 ? maxAge : 86400);
+
+  await session.defaultSession.cookies.set({
+    url: shellOrigin,
+    name: 'shine_sid',
+    value: String(payload.sessionId),
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    expirationDate,
+  });
+
+  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+    await mainWindowRef.loadURL(`${shellOrigin}/?auth=google&success=1`);
+    mainWindowRef.show();
+    mainWindowRef.focus();
+  }
+}
+
+async function handleDesktopOauthComplete(_req, res, requestUrl) {
+  const ticket = String(requestUrl.searchParams.get('ticket') || '').trim();
+
+  try {
+    await completeDesktopOauthTicket(ticket);
+    sendAutoCloseHtml(res, 'Signed in to Shine Desktop', 'You are signed in. Returning to the Shine desktop app.');
+    closeOauthBrowserWindow();
+  } catch (error) {
+    sendSimpleHtml(
+      res,
+      500,
+      'Desktop sign-in failed',
+      error instanceof Error ? escapeHtml(error.message) : 'Shine Desktop could not complete Google sign-in.',
+    );
+  }
+}
+
 async function serveRendererAsset(req, res, requestUrl) {
   const assetPath = resolveStaticAssetPath(requestUrl.pathname);
   if (!assetPath) {
@@ -1499,8 +1879,13 @@ function proxyApiRequest(req, res, requestUrl) {
       host: targetUrl.host,
       origin: shellOrigin,
       referer: `${shellOrigin}/`,
+      'x-forwarded-origin': shellOrigin,
     },
   }, (proxyResponse) => {
+    if (requestUrl.pathname === '/auth/google/callback') {
+      void handleDesktopBrowserOauthCallbackResponse(res, proxyResponse);
+      return;
+    }
     res.writeHead(proxyResponse.statusCode || 502, proxyResponse.headers);
     proxyResponse.pipe(res);
   });
@@ -1510,6 +1895,142 @@ function proxyApiRequest(req, res, requestUrl) {
   });
 
   req.pipe(proxyRequest);
+}
+
+function extractSessionCookieValue(setCookieHeader) {
+  const headers = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader].filter(Boolean);
+  for (const header of headers) {
+    const match = String(header || '').match(/(?:^|,\s*)shine_sid=([^;,]+)/i);
+    if (match?.[1]) return match[1];
+  }
+  return '';
+}
+
+function parseSetCookieHeader(header) {
+  const parts = String(header || '').split(';').map((part) => part.trim()).filter(Boolean);
+  const [nameValue, ...attributes] = parts;
+  const separatorIndex = String(nameValue || '').indexOf('=');
+  if (separatorIndex <= 0) return null;
+
+  const cookie = {
+    url: shellOrigin,
+    name: nameValue.slice(0, separatorIndex).trim(),
+    value: nameValue.slice(separatorIndex + 1),
+    path: '/',
+    httpOnly: false,
+    secure: false,
+    sameSite: 'lax',
+  };
+
+  for (const attribute of attributes) {
+    const [rawKey, ...rawValueParts] = attribute.split('=');
+    const key = String(rawKey || '').trim().toLowerCase();
+    const value = rawValueParts.join('=').trim();
+    if (key === 'path' && value) cookie.path = value;
+    if (key === 'httponly') cookie.httpOnly = true;
+    if (key === 'secure') cookie.secure = true;
+    if (key === 'samesite') {
+      const sameSite = value.toLowerCase();
+      cookie.sameSite = sameSite === 'strict' ? 'strict' : sameSite === 'none' ? 'no_restriction' : 'lax';
+    }
+    if (key === 'max-age') {
+      const maxAge = Number(value);
+      if (Number.isFinite(maxAge)) cookie.expirationDate = Math.floor(Date.now() / 1000) + maxAge;
+    }
+    if (key === 'expires' && !cookie.expirationDate) {
+      const expires = Date.parse(value);
+      if (Number.isFinite(expires)) cookie.expirationDate = Math.floor(expires / 1000);
+    }
+  }
+
+  return cookie.name ? cookie : null;
+}
+
+async function copyResponseCookiesToDesktopSession(setCookieHeader) {
+  const headers = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader].filter(Boolean);
+  await Promise.all(headers.map(async (header) => {
+    const cookie = parseSetCookieHeader(header);
+    if (!cookie) return;
+    await session.defaultSession.cookies.set(cookie);
+  }));
+}
+
+async function handleDesktopBrowserOauthCallbackResponse(res, proxyResponse) {
+  const sessionId = extractSessionCookieValue(proxyResponse.headers['set-cookie']);
+  const location = String(proxyResponse.headers.location || '').trim();
+  proxyResponse.resume();
+  await copyResponseCookiesToDesktopSession(proxyResponse.headers['set-cookie']);
+
+  if (!sessionId && location) {
+    try {
+      const redirectTarget = new URL(location, shellOrigin);
+      if (redirectTarget.origin === shellOrigin && redirectTarget.pathname === '/desktop-oauth/complete') {
+        await completeDesktopOauthTicket(String(redirectTarget.searchParams.get('ticket') || '').trim());
+        sendAutoCloseHtml(res, 'Signed in to Shine Desktop', 'You are signed in. Returning to the Shine desktop app.');
+        closeOauthBrowserWindow();
+        return;
+      }
+      if (redirectTarget.origin === shellOrigin && redirectTarget.pathname === '/') {
+        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+          await mainWindowRef.loadURL(redirectTarget.toString());
+          mainWindowRef.show();
+          mainWindowRef.focus();
+        }
+        const isConflict = redirectTarget.searchParams.get('conflict') === '1';
+        if (isConflict) {
+          sendAutoCloseHtml(
+            res,
+            'Continue in Shine Desktop',
+            'Shine Desktop needs confirmation because this account is already active somewhere else. You can return to the desktop app now.',
+          );
+          closeOauthBrowserWindow();
+        } else {
+          sendAutoCloseHtml(res, 'Google sign-in returned to Shine Desktop', 'You are signed in. Returning to the Shine desktop app.');
+          closeOauthBrowserWindow();
+        }
+        return;
+      }
+    } catch {
+      // Fall through to the generic incomplete message below.
+    }
+  }
+
+  if (!sessionId) {
+    const statusCode = proxyResponse.statusCode || 400;
+    const detail = location.includes('error=')
+      ? `Google sign-in returned an error. Open Shine Desktop and try again.<br><br>Status: <code>${statusCode}</code><br>Redirect: <code>${escapeHtml(location)}</code>`
+      : `Google sign-in did not return a desktop session. Please try again.<br><br>Status: <code>${statusCode}</code>${location ? `<br>Redirect: <code>${escapeHtml(location)}</code>` : ''}`;
+    sendSimpleHtml(res, statusCode, 'Desktop sign-in incomplete', detail);
+    return;
+  }
+
+  try {
+    await session.defaultSession.cookies.set({
+      url: shellOrigin,
+      name: 'shine_sid',
+      value: sessionId,
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      expirationDate: Math.floor(Date.now() / 1000) + 86400,
+    });
+
+    if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+      await mainWindowRef.loadURL(`${shellOrigin}/?auth=google&success=1`);
+      mainWindowRef.show();
+      mainWindowRef.focus();
+    }
+
+    sendAutoCloseHtml(res, 'Signed in to Shine Desktop', 'You are signed in. Returning to the Shine desktop app.');
+    closeOauthBrowserWindow();
+  } catch (error) {
+    sendSimpleHtml(
+      res,
+      500,
+      'Desktop sign-in failed',
+      error instanceof Error ? escapeHtml(error.message) : 'Shine Desktop could not store the signed-in session.',
+    );
+  }
 }
 
 async function startDesktopShellServer() {
@@ -1523,6 +2044,10 @@ async function startDesktopShellServer() {
 
   shellServer = http.createServer((req, res) => {
     const requestUrl = new URL(req.url || '/', shellOrigin);
+    if (requestUrl.pathname === '/desktop-oauth/complete') {
+      void handleDesktopOauthComplete(req, res, requestUrl);
+      return;
+    }
     if (requestUrl.pathname.startsWith('/api/') || requestUrl.pathname.startsWith('/auth/')) {
       proxyApiRequest(req, res, requestUrl);
       return;
@@ -1557,16 +2082,82 @@ async function waitForRenderer(url, attempts = 80, intervalMs = 500) {
 function attachExternalNavigationGuards(targetWebContents, internalOrigin) {
   if (!targetWebContents) return;
 
+  const canNavigateInApp = (url) => {
+    const safeUrl = String(url || '').trim();
+    if (!safeUrl) return false;
+    if (safeUrl.startsWith(internalOrigin)) return true;
+    try {
+      const parsed = new URL(safeUrl);
+      const host = parsed.hostname.toLowerCase();
+      if (host === 'accounts.google.com' || host.endsWith('.accounts.google.com')) return true;
+      if (host === 'oauth2.googleapis.com' || host === 'openidconnect.googleapis.com') return true;
+      if (safeUrl.startsWith(apiOrigin) && parsed.pathname.startsWith('/auth/google/')) return true;
+    } catch {
+      return false;
+    }
+    return false;
+  };
+
+  const injectDesktopOauthBackButton = async () => {
+    if (targetWebContents.isDestroyed()) return;
+    const currentUrl = targetWebContents.getURL();
+    let isGoogleOauthPage = false;
+    try {
+      const parsed = new URL(currentUrl);
+      const host = parsed.hostname.toLowerCase();
+      isGoogleOauthPage = host === 'accounts.google.com' || host.endsWith('.accounts.google.com');
+    } catch {
+      isGoogleOauthPage = false;
+    }
+    if (!isGoogleOauthPage) return;
+    await targetWebContents.executeJavaScript(`
+      (() => {
+        if (document.getElementById('shine-oauth-back-button')) return;
+        const button = document.createElement('button');
+        button.id = 'shine-oauth-back-button';
+        button.type = 'button';
+        button.textContent = 'Back to Shine';
+        button.setAttribute('aria-label', 'Back to Shine login');
+        button.style.cssText = [
+          'position:fixed',
+          'top:14px',
+          'left:14px',
+          'z-index:2147483647',
+          'height:38px',
+          'padding:0 14px',
+          'border:1px solid rgba(15,23,42,.18)',
+          'border-radius:8px',
+          'background:#ffffff',
+          'color:#0f172a',
+          'font:600 13px/38px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+          'box-shadow:0 10px 30px rgba(15,23,42,.18)',
+          'cursor:pointer'
+        ].join(';');
+        button.addEventListener('click', () => {
+          window.location.href = ${JSON.stringify(internalOrigin)};
+        });
+        document.documentElement.appendChild(button);
+      })();
+    `).catch(() => undefined);
+  };
+
   targetWebContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(internalOrigin)) return { action: 'allow' };
-    void shell.openExternal(url);
+    if (canNavigateInApp(url)) return { action: 'allow' };
+    void openAllowedExternalUrl(url);
     return { action: 'deny' };
   });
 
   targetWebContents.on('will-navigate', (event, url) => {
-    if (url.startsWith(internalOrigin)) return;
+    if (canNavigateInApp(url)) return;
     event.preventDefault();
-    void shell.openExternal(url);
+    void openAllowedExternalUrl(url);
+  });
+
+  targetWebContents.on('did-finish-load', () => {
+    void injectDesktopOauthBackButton();
+  });
+  targetWebContents.on('did-navigate', () => {
+    void injectDesktopOauthBackButton();
   });
 }
 
@@ -1867,7 +2458,7 @@ function configureDesktopWhatsappView(view) {
     if (String(url || '').startsWith('https://web.whatsapp.com/')) {
       return { action: 'allow' };
     }
-    void shell.openExternal(url);
+    void openAllowedExternalUrl(url);
     return { action: 'deny' };
   });
 }
@@ -2286,11 +2877,12 @@ for ($i = 0; $i -lt 40; $i++) {
   }).unref();
 }
 
-function closeWorkspaceBrowserProcesses(processNames, profileDir = '') {
+function closeWorkspaceBrowserProcesses(processNames, profileDir = '', commandLineNeedle = '') {
   const safeNames = processNames.filter(Boolean);
   if (!safeNames.length) return;
   const encodedNames = JSON.stringify(safeNames);
   const encodedProfileDir = JSON.stringify(String(profileDir || ''));
+  const encodedNeedle = JSON.stringify(String(commandLineNeedle || ''));
   spawnSync('powershell.exe', [
     '-NoProfile',
     '-ExecutionPolicy',
@@ -2299,10 +2891,12 @@ function closeWorkspaceBrowserProcesses(processNames, profileDir = '') {
     `
 $names = ${encodedNames} | ConvertFrom-Json;
 $profileDir = ${encodedProfileDir};
+$needle = ${encodedNeedle};
 $matchIds = @();
-if ($profileDir) {
+if ($profileDir -or $needle) {
   $matchIds = Get-CimInstance Win32_Process | Where-Object {
-    ($names -contains $_.Name.Replace('.exe','')) -and $_.CommandLine -and $_.CommandLine.Contains($profileDir)
+    ($names -contains $_.Name.Replace('.exe','')) -and $_.CommandLine -and
+      (($profileDir -and $_.CommandLine.Contains($profileDir)) -or ($needle -and $_.CommandLine.Contains($needle)))
   } | Select-Object -ExpandProperty ProcessId;
 }
 if ($matchIds.Count -gt 0) {
@@ -2320,7 +2914,7 @@ async function closeBrowserByDebugPort(debugPort) {
   const port = Number(debugPort || 0);
   if (!port || typeof WebSocket !== 'function') return false;
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+    const response = await fetch(`http://localhost:${port}/json/list`);
     if (!response.ok) return false;
     const targets = await response.json();
     const target = Array.isArray(targets)
@@ -2448,7 +3042,7 @@ async function navigateWorkspaceBrowserSession(url) {
   const targetUrl = String(url || '').trim();
   if (!targetUrl) return false;
   try {
-    const response = await fetch(`http://127.0.0.1:${debugPort}/json/list`);
+    const response = await fetch(`http://localhost:${debugPort}/json/list`);
     if (!response.ok) return false;
     const targets = await response.json();
     const target = Array.isArray(targets)
@@ -2578,7 +3172,7 @@ async function setWorkspaceBrowserBounds(bounds) {
   const debugPort = Number(desktopWorkspaceBrowserSession.debugPort || 0);
   if (!debugPort || typeof WebSocket !== 'function' || !bounds) return false;
   try {
-    const response = await fetch(`http://127.0.0.1:${debugPort}/json/list`);
+    const response = await fetch(`http://localhost:${debugPort}/json/list`);
     if (!response.ok) return false;
     const targets = await response.json();
     const target = Array.isArray(targets)
@@ -2662,7 +3256,7 @@ async function maximizeWorkspaceBrowserWindow() {
   const debugPort = Number(desktopWorkspaceBrowserSession.debugPort || 0);
   if (!debugPort || typeof WebSocket !== 'function') return false;
   try {
-    const response = await fetch(`http://127.0.0.1:${debugPort}/json/list`);
+    const response = await fetch(`http://localhost:${debugPort}/json/list`);
     if (!response.ok) return false;
     const targets = await response.json();
     const target = Array.isArray(targets)
@@ -2963,7 +3557,7 @@ async function openExternalSendTarget(payload) {
       }
       if (target === 'default_browser') {
         if (!webUrl) continue;
-        await shell.openExternal(webUrl);
+        await openAllowedExternalUrl(webUrl);
         return { success: true, target, label: TARGET_LABELS[target], availability };
       }
     } catch {
@@ -2998,6 +3592,7 @@ function getDesktopWorkspaceState(preference = 'default_browser') {
 }
 
 function enterDesktopSendWorkspace(preference = 'default_browser') {
+  void writeDesktopDiagnosticsLine(`desktopWorkspace enter preference=${preference}`);
   if (!mainWindowRef) {
     return {
       ...getDesktopWorkspaceState(preference),
@@ -3028,6 +3623,7 @@ function enterDesktopSendWorkspace(preference = 'default_browser') {
 }
 
 function showDesktopSendWorkspace(preference = 'default_browser') {
+  void writeDesktopDiagnosticsLine(`desktopWorkspace show preference=${preference}`);
   if (!mainWindowRef) {
     return {
       ...getDesktopWorkspaceState(preference),
@@ -3052,6 +3648,10 @@ function showDesktopSendWorkspace(preference = 'default_browser') {
 }
 
 async function hideDesktopSendWorkspace(preference = 'default_browser') {
+  void writeDesktopDiagnosticsLine(`desktopWorkspace hide preference=${preference} active=${desktopWorkspaceActive} hasView=${Boolean(desktopWhatsappView)}`);
+  if (!desktopWorkspaceActive && !desktopWhatsappView) {
+    return getDesktopWorkspaceState(preference);
+  }
   maximizeMainWindow();
   await fadeOutDesktopWhatsappView(190);
   desktopWorkspaceActive = false;
@@ -3104,6 +3704,10 @@ async function hideDesktopSendWorkspaceAnimated(preference = 'default_browser') 
 }
 
 function exitDesktopSendWorkspace(preference = 'default_browser') {
+  void writeDesktopDiagnosticsLine(`desktopWorkspace exit preference=${preference} active=${desktopWorkspaceActive} hasView=${Boolean(desktopWhatsappView)} hasFloating=${Boolean(floatingSendWindow && !floatingSendWindow.isDestroyed())}`);
+  if (!desktopWorkspaceActive && !desktopWhatsappView && !floatingSendWindow) {
+    return getDesktopWorkspaceState(preference);
+  }
   detachDesktopWhatsappView();
   closeFloatingSendWindow('exit');
   desktopWhatsappViewLoading = false;
@@ -3166,6 +3770,7 @@ async function createMainWindow() {
   } else {
     await showNoInternetPage();
   }
+  applyDesktopScale();
   const startHidden = process.argv.includes('--hidden') && desktopSettings.startMinimizedToTrayOnLogin;
   if (!startHidden) {
     windowRef.show();
@@ -3205,6 +3810,7 @@ async function createMainWindow() {
 ipcMain.handle('shine:openExternal', async (_event, url) => {
   const safeUrl = String(url || '').trim();
   if (!safeUrl) return false;
+  if (!isAllowedExternalUrl(safeUrl)) return false;
   if (/^whatsapp:\/\//i.test(safeUrl)) {
     const whatsappPath = resolveWhatsappDesktopExecutable();
     if (whatsappPath && launchWindowsExecutable(whatsappPath, [safeUrl])) {
@@ -3218,8 +3824,7 @@ ipcMain.handle('shine:openExternal', async (_event, url) => {
     }
     return false;
   }
-  await shell.openExternal(safeUrl);
-  return true;
+  return openAllowedExternalUrl(safeUrl);
 });
 
 ipcMain.handle('shine:desktopSendWorkspace:getTargets', async () => getAvailableSendTargets());
@@ -3249,6 +3854,7 @@ ipcMain.handle('shine:desktopSettings:save', async (_event, patch) => {
     ...desktopSettings,
     ...safePatch,
   }, safePatch.role));
+  applyDesktopScale(desktopSettings);
   return desktopSettings;
 });
 ipcMain.handle('shine:desktopConnectivity:get', async () => lastConnectivityState);
@@ -3262,7 +3868,7 @@ ipcMain.handle('shine:desktopConnectivity:retry', async () => {
     } else {
       await showNoInternetPage();
     }
-    restoreMainWindow();
+    restoreMainWindow('connectivity-retry');
   }
   return lastConnectivityState;
 });
@@ -3289,14 +3895,18 @@ app.on('before-quit', async () => {
   shellServer = null;
 });
 
-app.on('second-instance', () => {
-  restoreMainWindow();
+app.on('second-instance', (_event, commandLine = []) => {
+  const isHiddenLaunch = Array.isArray(commandLine) && commandLine.includes('--hidden');
+  void writeDesktopDiagnosticsLine(`secondInstance hidden=${isHiddenLaunch} argv=${JSON.stringify(commandLine)}`);
+  if (isHiddenLaunch) return;
+  restoreMainWindow('second-instance');
 });
 
 app.whenReady().then(async () => {
-  app.setName('RMKCET Shine');
+  app.setName(APP_DISPLAY_NAME);
   process.env.SHINE_DESKTOP_APP_VERSION = String(app.getVersion() || '').trim() || '0.1.0';
   applyLoginItemSettings();
+  void writeDesktopDiagnosticsLine(`appReady argv=${JSON.stringify(process.argv)} hidden=${process.argv.includes('--hidden')}`);
   logDesktopIconDiagnostics();
   refreshWindowsShortcutIcons();
   createTray();
@@ -3304,7 +3914,7 @@ app.whenReady().then(async () => {
     await createMainWindow();
     scheduleDesktopUpdateChecks();
     if (desktopSettings.updateChecksEnabled) {
-      setTimeout(() => void checkDesktopUpdate(), 4500);
+      setTimeout(() => void checkDesktopUpdate({ quiet: true }), 4500);
     }
   } catch (error) {
     const failureWindow = new BrowserWindow({
@@ -3313,6 +3923,7 @@ app.whenReady().then(async () => {
       autoHideMenuBar: true,
       backgroundColor: '#0b1220',
       title: 'RMKCET Shine - Desktop Launch Error',
+      icon: getDesktopIconPath('window') || undefined,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
@@ -3324,8 +3935,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('activate', async () => {
+  void writeDesktopDiagnosticsLine(`appActivate platform=${process.platform} hasWindow=${Boolean(mainWindowRef && !mainWindowRef.isDestroyed())}`);
+  if (process.platform !== 'darwin') return;
   if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-    restoreMainWindow();
+    restoreMainWindow('activate');
     return;
   }
   await createMainWindow();

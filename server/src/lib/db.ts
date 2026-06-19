@@ -9,6 +9,14 @@ import { normalizeRole } from './roles.js';
 
 mkdirSync(dirname(SHINE_DB_PATH), { recursive: true });
 
+const SLOW_DB_QUERY_MS = Number(process.env.SHINE_SLOW_DB_QUERY_MS || 250) || 250;
+
+function logSlowDbQuery(kind: 'all' | 'get', query: string, durationMs: number) {
+  if (durationMs < SLOW_DB_QUERY_MS) return;
+  const normalizedQuery = query.replace(/\s+/g, ' ').trim().slice(0, 220);
+  console.warn(`[db:slow] ${kind} ${durationMs}ms ${normalizedQuery}`);
+}
+
 function ensureColumn(database: Database.Database, tableName: string, columnName: string, definition: string) {
   try {
     const columns = database.pragma(`table_info(${tableName})`) as Array<{ name?: string }>;
@@ -31,6 +39,7 @@ function configureDatabaseConnection(database: Database.Database) {
   ensureColumn(database, 'users', 'designation', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, 'student_marks', 'section', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, 'cdp_subject_snapshots', 'mark_entry_statuses', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(database, 'cdp_subject_snapshots', 'lecture_plan_statuses', "TEXT NOT NULL DEFAULT '{}'");
   try {
     database.exec(`
       UPDATE users
@@ -81,6 +90,7 @@ function configureDatabaseConnection(database: Database.Database) {
         class_statuses TEXT NOT NULL DEFAULT '[]',
         faculty_statuses TEXT NOT NULL DEFAULT '[]',
         mark_entry_statuses TEXT NOT NULL DEFAULT '{}',
+        lecture_plan_statuses TEXT NOT NULL DEFAULT '{}',
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE
       );
@@ -104,16 +114,23 @@ function configureDatabaseConnection(database: Database.Database) {
       CREATE INDEX IF NOT EXISTS idx_oauth_login_attempts_time
       ON oauth_login_attempts(attempt_time DESC);
 
-      CREATE TABLE IF NOT EXISTS notification_states (
-        user_email TEXT NOT NULL,
-        notification_key TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'read',
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY(user_email, notification_key)
-      );
+    CREATE TABLE IF NOT EXISTS notification_states (
+      user_email TEXT NOT NULL,
+      notification_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'read',
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_email, notification_key)
+    );
 
-      CREATE INDEX IF NOT EXISTS idx_notification_states_user_status
-      ON notification_states(user_email, status);
+    CREATE TABLE IF NOT EXISTS user_preferences (
+      user_email TEXT PRIMARY KEY,
+      theme TEXT NOT NULL DEFAULT '',
+      desktop_settings_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notification_states_user_status
+    ON notification_states(user_email, status);
 
       CREATE INDEX IF NOT EXISTS idx_sent_messages_sent_at
       ON sent_messages(sent_at DESC);
@@ -124,11 +141,41 @@ function configureDatabaseConnection(database: Database.Database) {
       CREATE INDEX IF NOT EXISTS idx_counselor_students_counselor_active
       ON counselor_students(counselor_email, is_active);
 
+      CREATE INDEX IF NOT EXISTS idx_counselor_students_email_lower_active
+      ON counselor_students(LOWER(TRIM(counselor_email)), is_active);
+
       CREATE INDEX IF NOT EXISTS idx_student_marks_test_reg
       ON student_marks(test_id, reg_no);
 
       CREATE INDEX IF NOT EXISTS idx_sent_messages_counselor_test_reg
       ON sent_messages(counselor_email, test_id, reg_no);
+
+      CREATE INDEX IF NOT EXISTS idx_sent_messages_test_counselor_reg
+      ON sent_messages(test_id, counselor_email, reg_no);
+
+      CREATE INDEX IF NOT EXISTS idx_sent_messages_test_reg_status
+      ON sent_messages(test_id, reg_no, status);
+
+      CREATE INDEX IF NOT EXISTS idx_active_sessions_user_active
+      ON active_sessions(user_email, is_active, last_activity DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_active_sessions_login_time
+      ON active_sessions(login_time DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_oauth_login_attempts_failure_time
+      ON oauth_login_attempts(failure_code, attempt_time DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_test_metadata_scope
+      ON test_metadata(department, year_level, uploaded_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_notice_deliveries_notice_counselor
+      ON notice_deliveries(notice_id, counselor_email);
+
+      CREATE INDEX IF NOT EXISTS idx_notice_scopes_scope
+      ON notice_scopes(department, year_level, notice_id);
+
+      CREATE INDEX IF NOT EXISTS idx_notices_created_at
+      ON notices(created_at DESC);
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_role_unique
       ON users(login_email, role);
@@ -406,7 +453,11 @@ function ensureBaseSchema(database: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_active_sessions_active_last_activity ON active_sessions(is_active, last_activity);
     CREATE INDEX IF NOT EXISTS idx_active_sessions_user_active ON active_sessions(user_email, is_active, last_activity);
+    CREATE INDEX IF NOT EXISTS idx_active_sessions_session_login ON active_sessions(session_id, login_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_active_sessions_login_time ON active_sessions(login_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_oauth_login_attempts_failure_time ON oauth_login_attempts(failure_code, attempt_time DESC);
     CREATE INDEX IF NOT EXISTS idx_counselor_students_email_active ON counselor_students(counselor_email, is_active);
+    CREATE INDEX IF NOT EXISTS idx_counselor_students_email_lower_active ON counselor_students(LOWER(TRIM(counselor_email)), is_active);
     CREATE INDEX IF NOT EXISTS idx_counselor_students_reg_no ON counselor_students(reg_no);
     CREATE INDEX IF NOT EXISTS idx_notice_attachments_notice_id ON notice_attachments(notice_id);
     CREATE INDEX IF NOT EXISTS idx_notice_deliveries_counselor_notice ON notice_deliveries(counselor_email, notice_id);
@@ -414,13 +465,20 @@ function ensureBaseSchema(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_notice_scopes_notice_scope ON notice_scopes(notice_id, department, year_level);
     CREATE INDEX IF NOT EXISTS idx_notices_created_at ON notices(created_at);
     CREATE INDEX IF NOT EXISTS idx_sent_messages_counselor_test_status ON sent_messages(counselor_email, test_id, status);
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_status_sent_at ON sent_messages(status, sent_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_status_lower ON sent_messages(LOWER(COALESCE(status, '')));
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_sent_date ON sent_messages(DATE(sent_at));
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_counselor_sent_date ON sent_messages(counselor_email, DATE(sent_at));
     CREATE INDEX IF NOT EXISTS idx_sent_messages_test_reg ON sent_messages(test_id, reg_no);
+    CREATE INDEX IF NOT EXISTS idx_sent_messages_test_counselor_reg ON sent_messages(test_id, counselor_email, reg_no);
     CREATE INDEX IF NOT EXISTS idx_student_marks_reg_test ON student_marks(reg_no, test_id);
     CREATE INDEX IF NOT EXISTS idx_student_marks_test_id ON student_marks(test_id);
     CREATE INDEX IF NOT EXISTS idx_test_metadata_scope ON test_metadata(department, year_level, semester, test_name);
     CREATE INDEX IF NOT EXISTS idx_test_metadata_uploaded_at ON test_metadata(uploaded_at);
     CREATE INDEX IF NOT EXISTS idx_test_metadata_uploaded_by ON test_metadata(uploaded_by, uploaded_at);
     CREATE INDEX IF NOT EXISTS idx_users_role_department_year ON users(role, department, year_level);
+    CREATE INDEX IF NOT EXISTS idx_users_role_lower ON users(LOWER(role));
+    CREATE INDEX IF NOT EXISTS idx_users_name_lower ON users(LOWER(name));
   `);
 }
 
@@ -503,13 +561,17 @@ const APP_CONFIG_DEFAULTS: Record<string, string> = {
   activity_copy_as_image: 'false',
   notice_defaulter_copy_template: 'The Following Counsellors are yet to send the specified Notices\n\n{entries}',
   activity_defaulter_copy_template: 'The Following are all the counsellors who are yet to send results to their respective students\n\n{entries}',
-  cdp_defaulter_copy_template: "The following subjects's CDP is not yet filled ,\n\n{entries}",
+  cdp_defaulter_copy_template: "The following subjects's CDP Daily Attendence is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}",
+  cdp_daily_attendance_copy_template: "The following subjects's CDP Daily Attendence is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}",
+  cdp_lecture_plan_copy_template: "The following subjects's CDP Proposed Lecture Plan is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}",
+  cdp_mark_entry_copy_template: "The following subjects's CDP Mark Entry is not yet filled ,\n\n{subject}\n{scope}\n\n*{faculty}*:\n{class}: {pending}\n\n{next}",
   backup_storage_mode: 'local',
   disable_default_admin_on_new_system_admin: 'false',
   google_oauth_enabled: 'false',
   google_oauth_client_id: '',
   google_oauth_client_secret: '',
   google_oauth_allowed_domain: '',
+  public_app_base_url: '',
   google_oauth_redirect_base_url: '',
   google_oauth_bulk_password_mode: 'sheet',
   google_oauth_bulk_override_password: '',
@@ -585,6 +647,10 @@ export function normalizeAllowedTestName(value: string) {
   return ALLOWED_TEST_NAMES.has(normalized) ? normalized : '';
 }
 
+function normalizeActivityRegNo(value: unknown) {
+  return String(value || '').trim().toUpperCase().replace(/\.0$/, '');
+}
+
 function normalizeLoginEmail(value: string) {
   return String(value || '').trim().toLowerCase();
 }
@@ -606,11 +672,21 @@ function buildSyntheticAccountEmail(loginEmail: string, role: Role) {
 }
 
 function rows<T extends SqlRow>(query: string, params: unknown[] = []) {
-  return db.prepare(query).all(...params) as T[];
+  const startedAt = Date.now();
+  try {
+    return db.prepare(query).all(...params) as T[];
+  } finally {
+    logSlowDbQuery('all', query, Date.now() - startedAt);
+  }
 }
 
 function row<T extends SqlRow>(query: string, params: unknown[] = []) {
-  return (db.prepare(query).get(...params) as T | undefined) || null;
+  const startedAt = Date.now();
+  try {
+    return (db.prepare(query).get(...params) as T | undefined) || null;
+  } finally {
+    logSlowDbQuery('get', query, Date.now() - startedAt);
+  }
 }
 
 export function getAppConfig() {
@@ -1184,7 +1260,50 @@ export function clearInactiveSessions() {
   db.prepare('DELETE FROM active_sessions WHERE is_active = 0').run();
 }
 
-export function logoutAllUsers() {
+export function expireStaleActiveSessions(timeoutSeconds?: number) {
+  const config = getAppConfig();
+  const configuredTimeout = Number(timeoutSeconds ?? config.session_timeout ?? 86400);
+  const safeTimeoutSeconds = Number.isFinite(configuredTimeout) && configuredTimeout > 300 ? configuredTimeout : 86400;
+  const cutoff = new Date(Date.now() - safeTimeoutSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const staleSessionIds = rows<{ session_id: string }>(
+    `
+      SELECT session_id
+      FROM active_sessions
+      WHERE is_active = 1
+        AND last_activity IS NOT NULL
+        AND last_activity < ?
+    `,
+    [cutoff],
+  ).map((item) => String(item.session_id || '').trim()).filter(Boolean);
+  if (!staleSessionIds.length) return 0;
+
+  const updateSession = db.prepare(`
+    UPDATE active_sessions
+    SET is_active = 0,
+        logout_reason = CASE
+          WHEN COALESCE(logout_reason, '') = '' THEN 'session_timeout'
+          ELSE logout_reason
+        END
+    WHERE session_id = ?
+  `);
+  const clearUserSession = db.prepare('UPDATE users SET session_id = NULL WHERE session_id = ?');
+  const transaction = db.transaction((sessionIds: string[]) => {
+    for (const sessionId of sessionIds) {
+      updateSession.run(sessionId);
+      clearUserSession.run(sessionId);
+    }
+  });
+  transaction(staleSessionIds);
+  return staleSessionIds.length;
+}
+
+export function logoutAllUsers(exceptSessionId?: string | null) {
+  const safeExceptSessionId = String(exceptSessionId || '').trim();
+  if (safeExceptSessionId) {
+    db.prepare("UPDATE active_sessions SET is_active = 0, logout_reason = 'admin_logout_all' WHERE session_id <> ?").run(safeExceptSessionId);
+    db.prepare('UPDATE users SET session_id = NULL WHERE session_id IS NULL OR session_id <> ?').run(safeExceptSessionId);
+    return;
+  }
   db.prepare("UPDATE active_sessions SET is_active = 0, logout_reason = 'admin_logout_all'").run();
   db.prepare('UPDATE users SET session_id = NULL').run();
 }
@@ -1751,6 +1870,72 @@ export interface CdpMarkEntrySnapshotRecord {
   rows: CdpMarkEntryRowSnapshotRecord[];
 }
 
+export interface CdpLecturePlanRowIssueSnapshotRecord {
+  row_number: number;
+  serial: string;
+  topic: string;
+  planned_date: string;
+  delivered_date: string;
+  missing_fields: string[];
+}
+
+export interface CdpLecturePlanFinalIssueSnapshotRecord {
+  unit: number;
+  due_after: string;
+  missing_fields: string[];
+  missing_row_fields: Array<{
+    row_number: number;
+    serial: string;
+    topic: string;
+    missing_fields: string[];
+  }>;
+}
+
+export interface CdpLecturePlanUnitSnapshotRecord {
+  unit: number;
+  title: string;
+  status: 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+  due: boolean;
+  final_due: boolean;
+  from_date: string;
+  to_date: string;
+  topic_count: number;
+  completed_rows: number;
+  due_row_count: number;
+  pending_row_count: number;
+  completion_completed: number;
+  completion_total: number;
+  completion_pct: number;
+  row_issues: CdpLecturePlanRowIssueSnapshotRecord[];
+  final_issues: CdpLecturePlanFinalIssueSnapshotRecord[];
+  notes: string[];
+}
+
+export interface CdpLecturePlanClassSnapshotRecord {
+  class_label: string;
+  faculty_name: string;
+  subject_name: string;
+  course_code: string;
+  status: 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+  units: CdpLecturePlanUnitSnapshotRecord[];
+  pending_unit_count: number;
+  pending_row_count: number;
+  final_issue_count: number;
+  completion_pct: number;
+  notes: string[];
+}
+
+export interface CdpLecturePlanSnapshotRecord {
+  status: 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+  classes_detected: number;
+  units_checked: number;
+  due_rows_pending: number;
+  final_checkpoints_pending: number;
+  completion_pct: number;
+  classes: CdpLecturePlanClassSnapshotRecord[];
+  parser_error: string;
+}
+
 export interface CdpSubjectSnapshotRecord {
   subject_id: number;
   department: string;
@@ -1767,6 +1952,7 @@ export interface CdpSubjectSnapshotRecord {
   class_statuses: CdpClassSnapshotRecord[];
   faculty_statuses: CdpFacultySnapshotRecord[];
   mark_entry_statuses: CdpMarkEntrySnapshotRecord;
+  lecture_plan_statuses: CdpLecturePlanSnapshotRecord;
   updated_at: string | null;
 }
 
@@ -1967,6 +2153,127 @@ function parseJsonArray<T>(value: unknown): T[] {
   }
 }
 
+function createEmptyLecturePlanSnapshotRecord(parserError = ''): CdpLecturePlanSnapshotRecord {
+  return {
+    status: parserError ? 'sheet_issue' : 'not_due',
+    classes_detected: 0,
+    units_checked: 0,
+    due_rows_pending: 0,
+    final_checkpoints_pending: 0,
+    completion_pct: 100,
+    classes: [],
+    parser_error: parserError,
+  };
+}
+
+function normalizeLecturePlanSnapshotRecord(value: unknown): CdpLecturePlanSnapshotRecord {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value || '{}') : value;
+    const source = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    const normalizeStatus = (status: unknown): CdpLecturePlanSnapshotRecord['status'] => {
+      const value = String(status || '').trim();
+      return value === 'complete' || value === 'pending' || value === 'sheet_issue' || value === 'not_due' ? value : 'not_due';
+    };
+    const normalizeUnitStatus = (status: unknown): CdpLecturePlanUnitSnapshotRecord['status'] => {
+      const value = String(status || '').trim();
+      return value === 'complete' || value === 'pending' || value === 'sheet_issue' || value === 'not_due' ? value : 'not_due';
+    };
+    const classes = Array.isArray(source.classes)
+      ? source.classes.map((classEntry) => {
+        const classSource = classEntry && typeof classEntry === 'object' ? classEntry as Record<string, unknown> : {};
+        const units = Array.isArray(classSource.units)
+          ? classSource.units.map((unitEntry) => {
+            const unitSource = unitEntry && typeof unitEntry === 'object' ? unitEntry as Record<string, unknown> : {};
+            const rowIssues = Array.isArray(unitSource.row_issues)
+              ? unitSource.row_issues.map((issue) => {
+                const issueSource = issue && typeof issue === 'object' ? issue as Record<string, unknown> : {};
+                return {
+                  row_number: Number(issueSource.row_number || 0),
+                  serial: String(issueSource.serial || '').trim(),
+                  topic: String(issueSource.topic || '').trim(),
+                  planned_date: String(issueSource.planned_date || '').trim(),
+                  delivered_date: String(issueSource.delivered_date || '').trim(),
+                  missing_fields: Array.isArray(issueSource.missing_fields) ? issueSource.missing_fields.map((item) => String(item || '').trim()).filter(Boolean) : [],
+                } satisfies CdpLecturePlanRowIssueSnapshotRecord;
+              }).filter((issue) => issue.row_number || issue.topic)
+              : [];
+            const finalIssues = Array.isArray(unitSource.final_issues)
+              ? unitSource.final_issues.map((issue) => {
+                const issueSource = issue && typeof issue === 'object' ? issue as Record<string, unknown> : {};
+                const missingRowFields = Array.isArray(issueSource.missing_row_fields)
+                  ? issueSource.missing_row_fields.map((rowIssue) => {
+                    const rowSource = rowIssue && typeof rowIssue === 'object' ? rowIssue as Record<string, unknown> : {};
+                    return {
+                      row_number: Number(rowSource.row_number || 0),
+                      serial: String(rowSource.serial || '').trim(),
+                      topic: String(rowSource.topic || '').trim(),
+                      missing_fields: Array.isArray(rowSource.missing_fields) ? rowSource.missing_fields.map((item) => String(item || '').trim()).filter(Boolean) : [],
+                    };
+                  }).filter((rowIssue) => rowIssue.row_number || rowIssue.topic)
+                  : [];
+                return {
+                  unit: Number(issueSource.unit || unitSource.unit || 0),
+                  due_after: String(issueSource.due_after || '').trim(),
+                  missing_fields: Array.isArray(issueSource.missing_fields) ? issueSource.missing_fields.map((item) => String(item || '').trim()).filter(Boolean) : [],
+                  missing_row_fields: missingRowFields,
+                } satisfies CdpLecturePlanFinalIssueSnapshotRecord;
+              }).filter((issue) => issue.unit || issue.missing_fields.length || issue.missing_row_fields.length)
+              : [];
+            return {
+              unit: Number(unitSource.unit || 0),
+              title: String(unitSource.title || '').trim(),
+              status: normalizeUnitStatus(unitSource.status),
+              due: Boolean(unitSource.due),
+              final_due: Boolean(unitSource.final_due),
+              from_date: String(unitSource.from_date || '').trim(),
+              to_date: String(unitSource.to_date || '').trim(),
+              topic_count: Number(unitSource.topic_count || 0),
+              completed_rows: Number(unitSource.completed_rows || 0),
+              due_row_count: Number(unitSource.due_row_count || 0),
+              pending_row_count: Number(unitSource.pending_row_count || 0),
+              completion_completed: unitSource.completion_completed == null
+                ? Number(unitSource.completed_rows || 0)
+                : Number(unitSource.completion_completed || 0),
+              completion_total: unitSource.completion_total == null
+                ? Number(unitSource.topic_count || 0)
+                : Number(unitSource.completion_total || 0),
+              completion_pct: Number(unitSource.completion_pct || 0),
+              row_issues: rowIssues,
+              final_issues: finalIssues,
+              notes: Array.isArray(unitSource.notes) ? unitSource.notes.map((item) => String(item || '').trim()).filter(Boolean) : [],
+            } satisfies CdpLecturePlanUnitSnapshotRecord;
+          }).filter((unit) => unit.unit)
+          : [];
+        return {
+          class_label: String(classSource.class_label || '').trim().toUpperCase(),
+          faculty_name: String(classSource.faculty_name || '').trim(),
+          subject_name: String(classSource.subject_name || '').trim(),
+          course_code: String(classSource.course_code || '').trim(),
+          status: normalizeStatus(classSource.status),
+          units,
+          pending_unit_count: Number(classSource.pending_unit_count || 0),
+          pending_row_count: Number(classSource.pending_row_count || 0),
+          final_issue_count: Number(classSource.final_issue_count || 0),
+          completion_pct: Number(classSource.completion_pct || 0),
+          notes: Array.isArray(classSource.notes) ? classSource.notes.map((item) => String(item || '').trim()).filter(Boolean) : [],
+        } satisfies CdpLecturePlanClassSnapshotRecord;
+      }).filter((classEntry) => classEntry.class_label || classEntry.units.length)
+      : [];
+    return {
+      status: normalizeStatus(source.status),
+      classes_detected: Number(source.classes_detected || classes.length || 0),
+      units_checked: Number(source.units_checked || classes.reduce((sum, item) => sum + item.units.length, 0)),
+      due_rows_pending: Number(source.due_rows_pending || 0),
+      final_checkpoints_pending: Number(source.final_checkpoints_pending || 0),
+      completion_pct: source.completion_pct == null ? 100 : Number(source.completion_pct || 0),
+      classes,
+      parser_error: String(source.parser_error || '').trim(),
+    };
+  } catch {
+    return createEmptyLecturePlanSnapshotRecord();
+  }
+}
+
 function mapCdpSubjectSnapshotRecord(item: SqlRow): CdpSubjectSnapshotRecord {
   const classStatuses = parseJsonArray<CdpClassSnapshotRecord>(item.class_statuses).map((entry) => ({
     label: String(entry?.label || '').trim(),
@@ -2097,6 +2404,7 @@ function mapCdpSubjectSnapshotRecord(item: SqlRow): CdpSubjectSnapshotRecord {
     class_statuses: classStatuses,
     faculty_statuses: facultyStatuses,
     mark_entry_statuses: markEntryStatuses,
+    lecture_plan_statuses: normalizeLecturePlanSnapshotRecord(item.lecture_plan_statuses),
     updated_at: item.updated_at ? String(item.updated_at) : null,
   };
 }
@@ -2161,14 +2469,15 @@ export function upsertCdpSubjectSnapshot(payload: {
   class_statuses?: CdpClassSnapshotRecord[];
   faculty_statuses?: CdpFacultySnapshotRecord[];
   mark_entry_statuses?: CdpMarkEntrySnapshotRecord;
+  lecture_plan_statuses?: CdpLecturePlanSnapshotRecord;
 }) {
   const subjectId = Number(payload.subject_id || 0);
   if (!subjectId) throw new Error('Subject snapshot subject id is required.');
   db.prepare(`
     INSERT INTO cdp_subject_snapshots (
       subject_id, department, year_level, semester, summary_status, faculty_count, allocated_class_count, pending_faculty_count,
-      pending_class_count, pending_date_count, parsed_at, parser_error, class_statuses, faculty_statuses, mark_entry_statuses, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      pending_class_count, pending_date_count, parsed_at, parser_error, class_statuses, faculty_statuses, mark_entry_statuses, lecture_plan_statuses, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(subject_id) DO UPDATE SET
       department = excluded.department,
       year_level = excluded.year_level,
@@ -2184,6 +2493,7 @@ export function upsertCdpSubjectSnapshot(payload: {
       class_statuses = excluded.class_statuses,
       faculty_statuses = excluded.faculty_statuses,
       mark_entry_statuses = excluded.mark_entry_statuses,
+      lecture_plan_statuses = excluded.lecture_plan_statuses,
       updated_at = CURRENT_TIMESTAMP
   `).run(
     subjectId,
@@ -2201,6 +2511,7 @@ export function upsertCdpSubjectSnapshot(payload: {
     JSON.stringify(payload.class_statuses || []),
     JSON.stringify(payload.faculty_statuses || []),
     JSON.stringify(payload.mark_entry_statuses || { summaries: [], rows: [] }),
+    JSON.stringify(payload.lecture_plan_statuses || createEmptyLecturePlanSnapshotRecord()),
   );
 
   return getCdpSubjectSnapshot(subjectId);
@@ -2479,9 +2790,43 @@ function getActorNoticeScopeSet(actor: AuthUser | null) {
     return new Set(actor.scopes.map((scope) => `${scope.department.toUpperCase()}::${scope.year_level}`));
   }
   if (actor.role === 'counselor') {
-    return new Set([`${String(actor.department || '').trim().toUpperCase()}::${Number(actor.year_level || 1)}`]);
+    return getCounselorNoticeScopeKeys(actor.email, actor.department, actor.year_level, actor.scopes);
   }
   return new Set<string>();
+}
+
+function getCounselorNoticeScopeKeys(
+  counselorEmail: string,
+  fallbackDepartment?: string | null,
+  fallbackYearLevel?: number | null,
+  extraScopes?: Array<{ department: string; year_level: number }> | null,
+) {
+  const keys = new Set<string>();
+  const yearLevel = Number(fallbackYearLevel || 1) || 1;
+  const addScope = (department: unknown, year: unknown = yearLevel) => {
+    const normalizedDepartment = String(department || '').trim().toUpperCase();
+    const normalizedYear = Number(year || 0) || 0;
+    if (!normalizedDepartment || ![1, 2, 3, 4].includes(normalizedYear)) return;
+    keys.add(`${normalizedDepartment}::${normalizedYear}`);
+  };
+
+  addScope(fallbackDepartment, yearLevel);
+  for (const scope of extraScopes || []) {
+    addScope(scope.department, scope.year_level);
+  }
+
+  rows<{ department: string }>(
+    `
+      SELECT DISTINCT department
+      FROM counselor_students
+      WHERE LOWER(TRIM(counselor_email)) = LOWER(TRIM(?))
+        AND COALESCE(is_active, 1) = 1
+        AND TRIM(COALESCE(department, '')) <> ''
+    `,
+    [String(counselorEmail || '').trim().toLowerCase()],
+  ).forEach((studentScope) => addScope(studentScope.department, yearLevel));
+
+  return keys;
 }
 
 function formatNoticeDay(value: string) {
@@ -2907,7 +3252,7 @@ export function getVisibleNoticesForCounselor(
     filterDateTo?: string | null;
   },
 ) {
-  const counselor = row<SqlRow>('SELECT email, name, department, year_level FROM users WHERE email = ? LIMIT 1', [
+  const counselor = row<SqlRow>('SELECT email, name, role, department, year_level FROM users WHERE email = ? LIMIT 1', [
     String(counselorEmail || '').trim().toLowerCase(),
   ]);
   if (!counselor) return [];
@@ -2944,8 +3289,9 @@ export function getVisibleNoticesForCounselor(
 }
 
 export function canCounselorAccessNotice(noticeId: number, counselorEmail: string) {
-  const counselor = row<SqlRow>('SELECT department, year_level FROM users WHERE email = ? LIMIT 1', [
-    String(counselorEmail || '').trim().toLowerCase(),
+  const normalizedEmail = String(counselorEmail || '').trim().toLowerCase();
+  const counselor = row<SqlRow>('SELECT email, department, year_level FROM users WHERE email = ? LIMIT 1', [
+    normalizedEmail,
   ]);
   if (!counselor) return false;
 
@@ -2953,9 +3299,13 @@ export function canCounselorAccessNotice(noticeId: number, counselorEmail: strin
   if (!notice) return false;
   if (Boolean(Number(notice.send_to_all || 0))) return true;
 
-  const department = String(counselor.department || '').trim().toUpperCase();
-  const yearLevel = Number(counselor.year_level || 1);
-  return getNoticeScopePairs(noticeId).some((scope) => scope.department === department && scope.year_level === yearLevel);
+  const allowedScopes = getCounselorNoticeScopeKeys(
+    normalizedEmail,
+    String(counselor.department || ''),
+    Number(counselor.year_level || 1),
+    getScopesForUser(normalizedEmail),
+  );
+  return getNoticeScopePairs(noticeId).some((scope) => allowedScopes.has(`${scope.department}::${scope.year_level}`));
 }
 
 export function getNoticeSentRegNos(counselorEmail: string, noticeId: number) {
@@ -3769,6 +4119,7 @@ export function getCounselorActivityScopeSnapshot(
   department: string,
   yearLevel: number,
   tests?: Array<Pick<ReportTestRecord, 'test_id' | 'department' | 'year_level' | 'semester' | 'test_name'>>,
+  options?: { includeResults?: boolean; resultSemester?: string; resultTestName?: string },
 ) {
   const toPercentInt = (completed: number, total: number) => {
     const safeCompleted = Math.max(0, Number(completed || 0));
@@ -3803,6 +4154,23 @@ export function getCounselorActivityScopeSnapshot(
     }
   }
 
+  if (options?.includeResults === false) {
+    return {
+      department: dep,
+      year_level: yr,
+      test_status: testStatus,
+      results: [],
+    } satisfies CounselorActivityScopeSnapshot;
+  }
+
+  const resultSemester = String(options?.resultSemester || '').trim();
+  const resultTestName = String(options?.resultTestName || '').trim().toUpperCase();
+  const resultTests = Array.from(testsByKey.values()).filter((test) => {
+    if (resultSemester && test.semester !== resultSemester) return false;
+    if (resultTestName && test.test_name !== resultTestName) return false;
+    return true;
+  });
+
   const counselors = rows<SqlRow>(
     `
       SELECT email, name, department, year_level, last_login
@@ -3815,73 +4183,99 @@ export function getCounselorActivityScopeSnapshot(
     [dep, yr],
   );
 
-  const eligibleCounts = new Map<string, number>();
-  const eligiblePhoneCounts = new Map<string, number>();
-  const sentCounts = new Map<string, number>();
-  const testIds = Array.from(new Set(Array.from(testsByKey.values()).map((item) => Number(item.test_id || 0)).filter((value) => value > 0)));
-  if (testIds.length) {
-    const placeholders = testIds.map(() => '?').join(', ');
-    for (const item of rows<{ counselor_email: string; test_id: number; count: number }>(
+  const counselorEmails = Array.from(new Set(
+    counselors
+      .map((item) => String(item.email || '').trim().toLowerCase())
+      .filter(Boolean),
+  ));
+  const counselorStudentsByEmail = new Map<string, Array<{ reg_no: string; has_phone: boolean }>>();
+  if (counselorEmails.length) {
+    const counselorPlaceholders = counselorEmails.map(() => '?').join(', ');
+    for (const item of rows<{ counselor_email: string; reg_no: string; parent_phone: string }>(
       `
-        SELECT LOWER(TRIM(cs.counselor_email)) AS counselor_email,
-               sm.test_id AS test_id,
-               COUNT(DISTINCT REPLACE(UPPER(TRIM(cs.reg_no)), '.0', '')) AS count
-        FROM counselor_students cs
-        INNER JOIN student_marks sm
-          ON REPLACE(UPPER(TRIM(cs.reg_no)), '.0', '') = REPLACE(UPPER(TRIM(sm.reg_no)), '.0', '')
-        WHERE COALESCE(cs.is_active, 1) = 1
-          AND sm.test_id IN (${placeholders})
-        GROUP BY LOWER(TRIM(cs.counselor_email)), sm.test_id
+        SELECT LOWER(TRIM(counselor_email)) AS counselor_email,
+               reg_no,
+               parent_phone
+        FROM counselor_students
+        WHERE COALESCE(is_active, 1) = 1
+          AND LOWER(TRIM(counselor_email)) IN (${counselorPlaceholders})
       `,
-      testIds,
+      counselorEmails,
     )) {
-      eligibleCounts.set(`${String(item.counselor_email || '').trim().toLowerCase()}::${Number(item.test_id || 0)}`, Number(item.count || 0));
-    }
-
-    for (const item of rows<{ counselor_email: string; test_id: number; count: number }>(
-      `
-        SELECT LOWER(TRIM(cs.counselor_email)) AS counselor_email,
-               sm.test_id AS test_id,
-               COUNT(DISTINCT REPLACE(UPPER(TRIM(cs.reg_no)), '.0', '')) AS count
-        FROM counselor_students cs
-        INNER JOIN student_marks sm
-          ON REPLACE(UPPER(TRIM(cs.reg_no)), '.0', '') = REPLACE(UPPER(TRIM(sm.reg_no)), '.0', '')
-        WHERE COALESCE(cs.is_active, 1) = 1
-          AND COALESCE(TRIM(cs.parent_phone), '') <> ''
-          AND sm.test_id IN (${placeholders})
-        GROUP BY LOWER(TRIM(cs.counselor_email)), sm.test_id
-      `,
-      testIds,
-    )) {
-      eligiblePhoneCounts.set(`${String(item.counselor_email || '').trim().toLowerCase()}::${Number(item.test_id || 0)}`, Number(item.count || 0));
-    }
-
-    for (const item of rows<{ counselor_email: string; test_id: number; count: number }>(
-      `
-        SELECT LOWER(TRIM(m.counselor_email)) AS counselor_email,
-               m.test_id AS test_id,
-               COUNT(DISTINCT REPLACE(UPPER(TRIM(m.reg_no)), '.0', '')) AS count
-        FROM sent_messages m
-        INNER JOIN counselor_students cs
-          ON LOWER(TRIM(cs.counselor_email)) = LOWER(TRIM(m.counselor_email))
-         AND COALESCE(cs.is_active, 1) = 1
-         AND REPLACE(UPPER(TRIM(cs.reg_no)), '.0', '') = REPLACE(UPPER(TRIM(m.reg_no)), '.0', '')
-        WHERE m.test_id IN (${placeholders})
-        GROUP BY LOWER(TRIM(m.counselor_email)), m.test_id
-      `,
-      testIds,
-    )) {
-      sentCounts.set(`${String(item.counselor_email || '').trim().toLowerCase()}::${Number(item.test_id || 0)}`, Number(item.count || 0));
+      const email = String(item.counselor_email || '').trim().toLowerCase();
+      const regNo = normalizeActivityRegNo(item.reg_no);
+      if (!email || !regNo) continue;
+      const bucket = counselorStudentsByEmail.get(email) || [];
+      bucket.push({
+        reg_no: regNo,
+        has_phone: String(item.parent_phone || '').trim() !== '',
+      });
+      counselorStudentsByEmail.set(email, bucket);
     }
   }
 
-  const results = Array.from(testsByKey.values()).map((test) => {
+  const markedRegsByTestId = new Map<number, Set<string>>();
+  const sentRegsByCounselorTest = new Map<string, Set<string>>();
+  const testIds = Array.from(new Set(resultTests.map((item) => Number(item.test_id || 0)).filter((value) => value > 0)));
+  if (testIds.length) {
+    const placeholders = testIds.map(() => '?').join(', ');
+    for (const item of rows<{ test_id: number; reg_no: string }>(
+      `
+        SELECT test_id, reg_no
+        FROM student_marks
+        WHERE test_id IN (${placeholders})
+        GROUP BY test_id, reg_no
+      `,
+      testIds,
+    )) {
+      const testId = Number(item.test_id || 0) || 0;
+      const regNo = normalizeActivityRegNo(item.reg_no);
+      if (!testId || !regNo) continue;
+      const bucket = markedRegsByTestId.get(testId) || new Set<string>();
+      bucket.add(regNo);
+      markedRegsByTestId.set(testId, bucket);
+    }
+
+    const counselorPlaceholders = counselorEmails.length ? counselorEmails.map(() => '?').join(', ') : '';
+    const sentParams = counselorEmails.length ? [...testIds, ...counselorEmails] : testIds;
+    for (const item of rows<{ counselor_email: string; test_id: number; reg_no: string }>(
+      `
+        SELECT LOWER(TRIM(counselor_email)) AS counselor_email,
+               test_id,
+               reg_no
+        FROM sent_messages
+        WHERE test_id IN (${placeholders})
+          ${counselorPlaceholders ? `AND LOWER(TRIM(counselor_email)) IN (${counselorPlaceholders})` : ''}
+        GROUP BY LOWER(TRIM(counselor_email)), test_id, reg_no
+      `,
+      sentParams,
+    )) {
+      const email = String(item.counselor_email || '').trim().toLowerCase();
+      const testId = Number(item.test_id || 0) || 0;
+      const regNo = normalizeActivityRegNo(item.reg_no);
+      if (!email || !testId || !regNo) continue;
+      const key = `${email}::${testId}`;
+      const bucket = sentRegsByCounselorTest.get(key) || new Set<string>();
+      bucket.add(regNo);
+      sentRegsByCounselorTest.set(key, bucket);
+    }
+  }
+
+  const results = resultTests.map((test) => {
     const rowsForTest = counselors.map((item) => {
       const email = String(item.email || '').trim().toLowerCase();
       const compositeKey = `${email}::${Number(test.test_id || 0)}`;
-      const studentCount = eligibleCounts.get(compositeKey) || 0;
-      const withPhone = eligiblePhoneCounts.get(compositeKey) || 0;
-      const sentCount = sentCounts.get(compositeKey) || 0;
+      const markedRegs = markedRegsByTestId.get(Number(test.test_id || 0) || 0) || new Set<string>();
+      const sentRegs = sentRegsByCounselorTest.get(compositeKey) || new Set<string>();
+      let studentCount = 0;
+      let withPhone = 0;
+      let sentCount = 0;
+      for (const student of counselorStudentsByEmail.get(email) || []) {
+        if (!markedRegs.has(student.reg_no)) continue;
+        studentCount += 1;
+        if (student.has_phone) withPhone += 1;
+        if (sentRegs.has(student.reg_no)) sentCount += 1;
+      }
       const boundedSentCount = Math.min(sentCount, studentCount);
       const completionPct = toPercentInt(boundedSentCount, studentCount);
       const pendingCount = Math.max(0, studentCount - boundedSentCount);
@@ -3945,7 +4339,10 @@ export function getCounselorActivityForTest(
   const yr = Math.max(1, Number(yearLevel || 1) || 1);
   const normalizedSemester = String(semester || '').trim();
   const normalizedTestName = String(testName || '').trim().toUpperCase();
-  const snapshot = getCounselorActivityScopeSnapshot(dep, yr);
+  const matchingTests = getAllUniqueTests({ filterDept: dep, filterYearLevel: yr })
+    .filter((item) => String(item.semester || '').trim() === normalizedSemester
+      && String(item.test_name || '').trim().toUpperCase() === normalizedTestName);
+  const snapshot = getCounselorActivityScopeSnapshot(dep, yr, matchingTests, { includeResults: true });
   const matched = snapshot.results.find((item) => item.semester === normalizedSemester && item.test_name === normalizedTestName);
   if (!matched) {
     return {
@@ -4707,6 +5104,83 @@ function normalizeNotificationUserEmail(value: string) {
 
 function normalizeNotificationKey(value: unknown) {
   return String(value || '').trim();
+}
+
+function normalizeUserPreferenceTheme(value: unknown) {
+  const theme = String(value || '').trim().toLowerCase();
+  return theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : '';
+}
+
+function normalizeSyncedDesktopSettings(value: unknown) {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const output: Record<string, unknown> = {};
+  for (const key of [
+    'startMinimizedToTrayOnLogin',
+    'minimizeToTrayOnClose',
+    'desktopNotificationsEnabled',
+    'updateChecksEnabled',
+    'autoInstallUpdatesWhenIdle',
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) output[key] = Boolean(source[key]);
+  }
+  const digestDay = String(source.higherOfficialDigestDay || '').trim().toLowerCase();
+  if (['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].includes(digestDay)) {
+    output.higherOfficialDigestDay = digestDay;
+  }
+  const digestScope = String(source.higherOfficialDigestScope || '').trim().toLowerCase();
+  if (digestScope === 'all' || digestScope === 'allocated') {
+    output.higherOfficialDigestScope = digestScope;
+  }
+  return output;
+}
+
+export function getUserPreferences(userEmail: string) {
+  const safeEmail = normalizeNotificationUserEmail(userEmail);
+  if (!safeEmail) return { theme: '', desktopSettings: {} as Record<string, unknown> };
+  const state = row<{ theme: string; desktop_settings_json: string }>(
+    'SELECT theme, desktop_settings_json FROM user_preferences WHERE user_email = ?',
+    [safeEmail],
+  );
+  let desktopSettings: Record<string, unknown> = {};
+  try {
+    desktopSettings = normalizeSyncedDesktopSettings(JSON.parse(String(state?.desktop_settings_json || '{}')));
+  } catch {
+    desktopSettings = {};
+  }
+  return {
+    theme: normalizeUserPreferenceTheme(state?.theme),
+    desktopSettings,
+  };
+}
+
+export function updateUserPreferences(
+  userEmail: string,
+  patch: { theme?: unknown; desktopSettings?: unknown },
+) {
+  const safeEmail = normalizeNotificationUserEmail(userEmail);
+  if (!safeEmail) return { theme: '', desktopSettings: {} as Record<string, unknown> };
+  const current = getUserPreferences(safeEmail);
+  const nextTheme = Object.prototype.hasOwnProperty.call(patch || {}, 'theme')
+    ? normalizeUserPreferenceTheme(patch.theme)
+    : current.theme;
+  const nextDesktopSettings = Object.prototype.hasOwnProperty.call(patch || {}, 'desktopSettings')
+    ? {
+      ...current.desktopSettings,
+      ...normalizeSyncedDesktopSettings(patch.desktopSettings),
+    }
+    : current.desktopSettings;
+  db.prepare(`
+    INSERT INTO user_preferences (user_email, theme, desktop_settings_json, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_email) DO UPDATE SET
+      theme = excluded.theme,
+      desktop_settings_json = excluded.desktop_settings_json,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(safeEmail, nextTheme, JSON.stringify(nextDesktopSettings));
+  return {
+    theme: nextTheme,
+    desktopSettings: nextDesktopSettings,
+  };
 }
 
 export function getNotificationStatesForUser(userEmail: string) {

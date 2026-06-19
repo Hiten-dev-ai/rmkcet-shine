@@ -9,7 +9,7 @@ import { cors } from 'hono/cors';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import JSZip from 'jszip';
 import nodemailer from 'nodemailer';
-import * as XLSX from 'xlsx';
+import { encodeCell, readSheetCell, readWorkbook, sheetToJson, type CellObject, type WorkBook } from './lib/workbook.js';
 import {
   APP_ENV_FILE,
   APP_NAME,
@@ -56,6 +56,7 @@ import {
   deleteNotice,
   deleteNoticeAttachment,
   deleteUser,
+  expireStaleActiveSessions,
   findExistingDepartmentYearTest,
   forceLogoutUser,
   getBatchNameForYearLevel,
@@ -82,6 +83,7 @@ import {
   getNoticeRecordsForActor,
   getNoticeSentRegNos,
   getNotificationStatesForUser,
+  getUserPreferences,
   getNoticeScopePairs,
   getMessageCounselorSuggestions,
   getMessageDays,
@@ -135,6 +137,7 @@ import {
   toggleDepartment,
   unlockCounselorsForDepartment,
   updateNotificationStatesForUser,
+  updateUserPreferences,
   updateAppConfig,
   updateAppConfigBulk,
   updateTestBlockStatus,
@@ -176,6 +179,7 @@ const app = new Hono();
 const SERVER_CONSOLE_MAX_LINES = 600;
 const SERVER_CONSOLE_DEFAULT_VIEW_LINES = 30;
 const serverConsoleLines: string[] = [];
+const SERVER_SLOW_ROUTE_MS = Number(process.env.SHINE_SLOW_ROUTE_MS || 750) || 750;
 const COUNSELOR_DASHBOARD_PENDING_NOTICE_LIMIT = 5;
 const OTP_EXPIRY_MS = 5 * 60 * 1000;
 const OTP_RESEND_THROTTLE_MS = 30 * 1000;
@@ -512,10 +516,18 @@ type PendingSelfResetOtpChallenge = {
 
 type PendingGoogleOauthState = {
   expiresAt: number;
+  redirectUri?: string;
+  clientRedirectOrigin?: string;
+  desktopHandoffOrigin?: string;
 };
 
 type PendingGoogleLoginConflictChallenge = {
   email: string;
+  expiresAt: number;
+};
+
+type PendingDesktopOauthTicket = {
+  sessionId: string;
   expiresAt: number;
 };
 
@@ -538,9 +550,11 @@ const pendingPasswordResetChallenges = new Map<string, PendingPasswordResetChall
 const pendingSelfResetOtpChallenges = new Map<string, PendingSelfResetOtpChallenge>();
 const pendingGoogleOauthStates = new Map<string, PendingGoogleOauthState>();
 const pendingGoogleLoginConflictChallenges = new Map<string, PendingGoogleLoginConflictChallenge>();
+const pendingDesktopOauthTickets = new Map<string, PendingDesktopOauthTicket>();
 const activeTestModeBlocksByTarget = new Map<string, ActiveTestModeBlock>();
 const activeTestModeTargetByAdminSession = new Map<string, string>();
 const GOOGLE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const DESKTOP_OAUTH_TICKET_TTL_MS = 2 * 60 * 1000;
 
 function nowMs() {
   return Date.now();
@@ -685,11 +699,27 @@ function clearChallengeCookie(c: Context, cookieName: string) {
   deleteCookie(c, cookieName, { path: '/' });
 }
 
-function createGoogleOauthState() {
+function isSafeDesktopOauthOrigin(value: string) {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  try {
+    const parsed = new URL(raw);
+    const hostname = String(parsed.hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+    return parsed.protocol === 'http:'
+      && parsed.port === '5123'
+      && hostname === 'localhost';
+  } catch {
+    return false;
+  }
+}
+
+function createGoogleOauthState(options: { redirectUri?: string; clientRedirectOrigin?: string; desktopHandoffOrigin?: string } = {}) {
   cleanupExpiredChallengeMap(pendingGoogleOauthStates);
   const state = randomUUID().replace(/-/g, '');
   pendingGoogleOauthStates.set(state, {
     expiresAt: nowMs() + GOOGLE_OAUTH_STATE_TTL_MS,
+    redirectUri: String(options.redirectUri || '').trim(),
+    clientRedirectOrigin: String(options.clientRedirectOrigin || '').trim().replace(/\/+$/, ''),
+    desktopHandoffOrigin: String(options.desktopHandoffOrigin || '').trim().replace(/\/+$/, ''),
   });
   return state;
 }
@@ -697,10 +727,29 @@ function createGoogleOauthState() {
 function consumeGoogleOauthState(state: string) {
   cleanupExpiredChallengeMap(pendingGoogleOauthStates);
   const normalizedState = String(state || '').trim();
-  if (!normalizedState) return false;
+  if (!normalizedState) return null;
   const pendingState = pendingGoogleOauthStates.get(normalizedState);
   pendingGoogleOauthStates.delete(normalizedState);
-  return isOtpCookieFresh(pendingState);
+  return isOtpCookieFresh(pendingState) ? pendingState : null;
+}
+
+function createDesktopOauthTicket(sessionId: string) {
+  cleanupExpiredChallengeMap(pendingDesktopOauthTickets);
+  const ticket = randomUUID().replace(/-/g, '');
+  pendingDesktopOauthTickets.set(ticket, {
+    sessionId: String(sessionId || '').trim(),
+    expiresAt: nowMs() + DESKTOP_OAUTH_TICKET_TTL_MS,
+  });
+  return ticket;
+}
+
+function consumeDesktopOauthTicket(ticket: string) {
+  cleanupExpiredChallengeMap(pendingDesktopOauthTickets);
+  const normalizedTicket = String(ticket || '').trim();
+  if (!normalizedTicket) return null;
+  const pendingTicket = pendingDesktopOauthTickets.get(normalizedTicket);
+  pendingDesktopOauthTickets.delete(normalizedTicket);
+  return isOtpCookieFresh(pendingTicket) ? pendingTicket : null;
 }
 
 function createGoogleLoginConflictChallenge(c: Context, email: string) {
@@ -1289,7 +1338,7 @@ function getPublicRequestOrigin(c: Context) {
   const requestHost = forwardedHost || String(c.req.header('host') || requestUrl.host || '').trim();
   const requestProto = forwardedProto || requestUrl.protocol.replace(/:$/, '') || 'http';
   const fallbackOrigin = `${requestProto}://${requestHost}`;
-  const configuredBase = String(getAppConfig().google_oauth_redirect_base_url || '')
+  const configuredBase = String(getAppConfig().public_app_base_url || getAppConfig().google_oauth_redirect_base_url || '')
     .trim()
     .replace(/\/+$/, '')
     .replace(/\/auth\/google\/callback$/i, '');
@@ -1307,6 +1356,12 @@ function getPublicRequestOrigin(c: Context) {
   }
 
   return fallbackOrigin;
+}
+
+function buildGoogleOauthClientRedirectForOrigin(origin: string) {
+  const safeOrigin = String(origin || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(safeOrigin)) return `${safeOrigin}/?auth=google`;
+  return buildGoogleOauthClientRedirect();
 }
 
 function escapeHtml(value: unknown) {
@@ -1349,8 +1404,8 @@ function mapUserForClient(actor: ReturnType<typeof toAuthUser>, item: ReturnType
   };
 }
 
-function parseBulkCounselorWorkbook(buffer: Buffer, departmentCodes: string[]) {
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
+async function parseBulkCounselorWorkbook(buffer: Buffer, departmentCodes: string[]) {
+  const workbook = await readWorkbook(buffer, 'bulk-counselors.xlsx');
   const validDepartments = new Set((departmentCodes || []).map((code) => String(code || '').trim().toUpperCase()));
   const parsedRows: Array<{
     name: string;
@@ -1365,7 +1420,7 @@ function parseBulkCounselorWorkbook(buffer: Buffer, departmentCodes: string[]) {
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+    const rows = sheetToJson<Record<string, unknown>>(sheet, { defval: '' });
     for (const row of rows) {
       const entries = Object.entries(row || {});
       const normalized = new Map(entries.map(([key, value]) => [String(key || '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''), String(value || '').trim()]));
@@ -1473,14 +1528,14 @@ function parseStudentRows(rawRows: unknown[][]) {
   return students;
 }
 
-function parseStudentWorkbook(buffer: Buffer) {
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
+async function parseStudentWorkbook(buffer: Buffer) {
+  const workbook = await readWorkbook(buffer, 'students.xlsx');
   const students: Array<{ reg_no: string; student_name: string; department?: string; parent_phone?: string; parent_email?: string }> = [];
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
-    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '', raw: false });
+    const rows = sheetToJson<unknown[]>(sheet, { header: 1, defval: '', raw: false });
     students.push(...parseStudentRows(rows));
   }
   return students;
@@ -1843,10 +1898,79 @@ type CdpSubjectStatus = {
   pending_date_count: number;
   parsed_at: string;
   mark_entry: CdpMarkEntrySnapshot;
+  lecture_plan: CdpLecturePlanSnapshot;
 };
 
 type CdpMarkEntryTestKey = 'iat1' | 'iat2' | 'model' | 'unit_test';
 type CdpMarkEntryStatusValue = 'complete' | 'pending' | 'not_available' | 'error';
+
+type CdpLecturePlanStatusValue = 'complete' | 'pending' | 'not_due' | 'sheet_issue';
+
+type CdpLecturePlanRowIssue = {
+  row_number: number;
+  serial: string;
+  topic: string;
+  planned_date: string;
+  delivered_date: string;
+  missing_fields: string[];
+};
+
+type CdpLecturePlanFinalIssue = {
+  unit: number;
+  due_after: string;
+  missing_fields: string[];
+  missing_row_fields: Array<{
+    row_number: number;
+    serial: string;
+    topic: string;
+    missing_fields: string[];
+  }>;
+};
+
+type CdpLecturePlanUnitStatus = {
+  unit: number;
+  title: string;
+  status: CdpLecturePlanStatusValue;
+  due: boolean;
+  final_due: boolean;
+  from_date: string;
+  to_date: string;
+  topic_count: number;
+  completed_rows: number;
+  due_row_count: number;
+  pending_row_count: number;
+  completion_completed: number;
+  completion_total: number;
+  completion_pct: number;
+  row_issues: CdpLecturePlanRowIssue[];
+  final_issues: CdpLecturePlanFinalIssue[];
+  notes: string[];
+};
+
+type CdpLecturePlanClassStatus = {
+  class_label: string;
+  faculty_name: string;
+  subject_name: string;
+  course_code: string;
+  status: CdpLecturePlanStatusValue;
+  units: CdpLecturePlanUnitStatus[];
+  pending_unit_count: number;
+  pending_row_count: number;
+  final_issue_count: number;
+  completion_pct: number;
+  notes: string[];
+};
+
+type CdpLecturePlanSnapshot = {
+  status: CdpLecturePlanStatusValue;
+  classes_detected: number;
+  units_checked: number;
+  due_rows_pending: number;
+  final_checkpoints_pending: number;
+  completion_pct: number;
+  classes: CdpLecturePlanClassStatus[];
+  parser_error: string;
+};
 
 type CdpMarkEntryCell = {
   status: CdpMarkEntryStatusValue;
@@ -2243,6 +2367,8 @@ async function buildCdpOverviewPayload(
       parsed_at: snapshot?.parsed_at || null,
       parser_error: snapshot?.parser_error || '',
       faculty_statuses: snapshot?.faculty_statuses || [],
+      mark_entry: snapshot?.mark_entry_statuses || { summaries: [], rows: [] },
+      lecture_plan: snapshot?.lecture_plan_statuses || buildEmptyCdpLecturePlanSnapshot(),
     };
   });
   const selectedSnapshot = selectedSubject ? (snapshotMap.get(selectedSubject.id) || null) : null;
@@ -2276,6 +2402,7 @@ async function buildCdpOverviewPayload(
     parsed_at: selectedSnapshot?.parsed_at || null,
     parser_error: selectedSnapshot?.parser_error || '',
     mark_entry: selectedSnapshot?.mark_entry_statuses || { summaries: [], rows: [] },
+    lecture_plan: selectedSnapshot?.lecture_plan_statuses || buildEmptyCdpLecturePlanSnapshot(),
   } : null;
 
   const scopeKeys = new Set(visibleSubjects.map((subject) => `${subject.department}::${subject.year_level}`));
@@ -2323,6 +2450,7 @@ function buildActivityOverviewPayload(
     selectedTestName?: string;
     searchQuery?: string;
     sortMode?: string;
+    includePrefetchedResults?: boolean;
   },
 ) {
   const selectedDepartment = String(options.selectedDepartment || '').trim().toUpperCase();
@@ -2331,6 +2459,7 @@ function buildActivityOverviewPayload(
   const selectedTestName = String(options.selectedTestName || '').trim().toUpperCase();
   const searchQuery = String(options.searchQuery || '').trim();
   const sortMode = String(options.sortMode || 'pending_first').trim() || 'pending_first';
+  const includePrefetchedResults = options.includePrefetchedResults === true;
 
   const departments = getVisibleDepartmentsForActor(authUser);
   const yearsByDepartment = getScopedYearsByDepartment(authUser);
@@ -2347,6 +2476,8 @@ function buildActivityOverviewPayload(
   const tests = departmentCode && yearLevel
     ? getAllUniqueTests({ filterDept: departmentCode, filterYearLevel: yearLevel, allowedScopes })
     : [];
+  const selectionReady = !!(departmentCode && yearLevel && ['1', '2'].includes(selectedSemester) && selectedTestName);
+  const canUseSelectedResultSnapshot = selectionReady && !searchQuery && sortMode === 'pending_first';
   const scopeSnapshot = departmentCode && yearLevel
     ? getCounselorActivityScopeSnapshot(
       departmentCode,
@@ -2358,6 +2489,11 @@ function buildActivityOverviewPayload(
         semester: test.semester,
         test_name: test.test_name,
       })),
+      {
+        includeResults: includePrefetchedResults || canUseSelectedResultSnapshot,
+        resultSemester: canUseSelectedResultSnapshot && !includePrefetchedResults ? selectedSemester : undefined,
+        resultTestName: canUseSelectedResultSnapshot && !includePrefetchedResults ? selectedTestName : undefined,
+      },
     )
     : null;
   const activityTestStatus = scopeSnapshot?.test_status || {
@@ -2365,10 +2501,9 @@ function buildActivityOverviewPayload(
     '2': { 'IAT 1': false, 'IAT 2': false, 'MODEL EXAM': false },
   };
 
-  const selectionReady = !!(departmentCode && yearLevel && ['1', '2'].includes(selectedSemester) && selectedTestName);
-  const prefetchedResults = scopeSnapshot?.results || [];
+  const prefetchedResults = includePrefetchedResults ? scopeSnapshot?.results || [] : [];
   const prefetchedMatch = selectionReady
-    ? prefetchedResults.find((item) => item.semester === selectedSemester && item.test_name === selectedTestName) || null
+    ? (scopeSnapshot?.results || []).find((item) => item.semester === selectedSemester && item.test_name === selectedTestName) || null
     : null;
   const result = selectionReady
     ? (prefetchedMatch && !searchQuery && sortMode === 'pending_first'
@@ -2502,6 +2637,40 @@ function doClassSectionsMatchDepartment(classSections: string[], department: str
   return sections.every((section) => section === normalizedDepartment || section.startsWith(`${normalizedDepartment} `));
 }
 
+function parseTimestampMs(value: unknown) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function isSameLocalDate(left: Date, right: Date) {
+  return (
+    left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate()
+  );
+}
+
+function resolveCdpLecturePlanClassLabelForSubject(
+  raw: string,
+  subject: NonNullable<ReturnType<typeof getSubjectById>>,
+) {
+  const normalizedDepartment = canonicalizeDepartmentCode(subject.department);
+  const normalized = normalizeParsedClassLabel(raw, normalizedDepartment);
+  const allocatedClasses = Array.from(new Set(
+    (subject.class_sections || [])
+      .map((value) => normalizeParsedClassLabel(String(value || '').trim(), normalizedDepartment))
+      .filter(Boolean),
+  ));
+  if (
+    normalized
+    && allocatedClasses.length === 1
+    && normalizeDepartmentComparisonToken(normalized) === normalizeDepartmentComparisonToken(normalizedDepartment)
+  ) {
+    return allocatedClasses[0];
+  }
+  return normalized;
+}
+
 function normalizeDepartmentComparisonToken(value: string) {
   return canonicalizeDepartmentCode(value).replace(/[^A-Z0-9]/g, '');
 }
@@ -2516,7 +2685,7 @@ function doesParsedDepartmentMatch(expectedDepartment: string, candidateDepartme
 function parseSheetDateToken(
   value: unknown,
   subject?: { academic_start_year?: number | null; academic_end_year?: number | null },
-  cell?: XLSX.CellObject,
+  cell?: CellObject,
 ) {
   const now = new Date();
   const startYear = Number(subject?.academic_start_year || 0) || now.getFullYear();
@@ -2529,7 +2698,7 @@ function parseSheetDateToken(
   const raw = String(cell?.w ?? value ?? '').trim();
   if (!raw) return null;
 
-  const shortMatch = raw.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  const shortMatch = raw.match(/^(\d{1,2})[\/\-.](\d{1,2})$/);
   if (shortMatch) {
     const day = Number(shortMatch[1]);
     const month = Number(shortMatch[2]);
@@ -2538,7 +2707,7 @@ function parseSheetDateToken(
     }
   }
 
-  const longMatch = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  const longMatch = raw.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
   if (longMatch) {
     const day = Number(longMatch[1]);
     const month = Number(longMatch[2]);
@@ -2569,7 +2738,7 @@ function parseSheetDateToken(
   return null;
 }
 
-function parseFacultyAllocationsFromWorkbook(workbook: XLSX.WorkBook, fallbackDepartment = '', allowedClasses: string[] = []) {
+function parseFacultyAllocationsFromWorkbook(workbook: WorkBook, fallbackDepartment = '', allowedClasses: string[] = []) {
   const allowed = new Set((allowedClasses || []).map((entry) => String(entry || '').trim().toUpperCase()).filter(Boolean));
   const facultyClassMap = new Map<string, Set<string>>();
 
@@ -2603,7 +2772,7 @@ function parseFacultyAllocationsFromWorkbook(workbook: XLSX.WorkBook, fallbackDe
   for (const sheetName of candidateSheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
-    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' });
+    const rows = sheetToJson<unknown[]>(sheet, { header: 1, defval: '' });
     const isSecondPage = String(sheetName || '').trim().toLowerCase() === 'second page';
     let recentFaculty: { names: string[]; rowIndex: number } | null = null;
     let recentClasses: { classes: string[]; rowIndex: number } | null = null;
@@ -2661,7 +2830,7 @@ async function parseGoogleSheetMetadata(url: string, fallbackDepartment = '') {
     throw new Error('Google Sheet download failed. Ensure the sheet is shared as "Anyone with link can view".');
   }
 
-  const workbook = XLSX.read(await response.arrayBuffer(), { type: 'array' });
+  const workbook = await readWorkbook(await response.arrayBuffer(), 'google-sheet.xlsx');
   let sheet = workbook.Sheets['First Page'] || workbook.Sheets['Second Page'];
   if (!sheet && workbook.SheetNames.length) {
     sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -2670,7 +2839,7 @@ async function parseGoogleSheetMetadata(url: string, fallbackDepartment = '') {
     throw new Error('The workbook contains no readable sheets.');
   }
 
-  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
+  const rows = sheetToJson<unknown[]>(sheet, { header: 1 });
   let faculty_name = '';
   let subject_code = '';
   let subject_name = '';
@@ -2717,7 +2886,7 @@ async function parseGoogleSheetMetadata(url: string, fallbackDepartment = '') {
 
   if (attendanceSheetName) {
     const attendanceSheet = workbook.Sheets[attendanceSheetName];
-    const attendanceRows = XLSX.utils.sheet_to_json<unknown[]>(attendanceSheet, { header: 1, defval: null, raw: true });
+    const attendanceRows = sheetToJson<unknown[]>(attendanceSheet, { header: 1, defval: null, raw: true });
     const boundaryRows: number[] = [];
 
     for (let rowIndex = 0; rowIndex < attendanceRows.length; rowIndex += 1) {
@@ -2752,8 +2921,8 @@ async function parseGoogleSheetMetadata(url: string, fallbackDepartment = '') {
         if (!Array.isArray(row)) continue;
         let dateCount = 0;
       for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
-        const cellKey = XLSX.utils.encode_cell({ r: section.startRow + localRowIndex, c: colIndex });
-        const cell = attendanceSheet[cellKey];
+        const cellKey = encodeCell({ r: section.startRow + localRowIndex, c: colIndex });
+        const cell = readSheetCell(attendanceSheet, cellKey);
         if (parseSheetDateToken(row[colIndex], undefined, cell)) {
           dateCount += 1;
         }
@@ -2762,8 +2931,8 @@ async function parseGoogleSheetMetadata(url: string, fallbackDepartment = '') {
         let contiguousDateCount = 0;
         let previousDateCol = -1;
         for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
-          const cellKey = XLSX.utils.encode_cell({ r: section.startRow + localRowIndex, c: colIndex });
-          const cell = attendanceSheet[cellKey];
+          const cellKey = encodeCell({ r: section.startRow + localRowIndex, c: colIndex });
+          const cell = readSheetCell(attendanceSheet, cellKey);
           if (!parseSheetDateToken(row[colIndex], undefined, cell)) continue;
           if (previousDateCol !== -1 && colIndex !== previousDateCol + 1) break;
           contiguousDateCount += 1;
@@ -2870,7 +3039,7 @@ function normalizeWorkbookSheetLookupKey(value: string) {
   return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-function findCdpMarkEntrySheetName(workbook: XLSX.WorkBook, aliases: string[]) {
+function findCdpMarkEntrySheetName(workbook: WorkBook, aliases: string[]) {
   const aliasSet = new Set((aliases || []).map(normalizeWorkbookSheetLookupKey));
   return workbook.SheetNames.find((sheetName) => aliasSet.has(normalizeWorkbookSheetLookupKey(sheetName))) || '';
 }
@@ -2968,12 +3137,12 @@ function detectCdpMarkEntrySheetColumns(rows: unknown[][]) {
   return null;
 }
 
-function parseCdpMarkEntrySheetData(workbook: XLSX.WorkBook, sheetName: string) {
+function parseCdpMarkEntrySheetData(workbook: WorkBook, sheetName: string) {
   const sheet = workbook.Sheets[sheetName];
   if (!sheet) {
     throw new Error('Exam tab is not readable.');
   }
-  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, raw: true });
+  const rows = sheetToJson<unknown[]>(sheet, { header: 1, defval: null, raw: true });
   const detected = detectCdpMarkEntrySheetColumns(rows);
   if (!detected) {
     throw new Error('Unable to locate Register Number, Student Name, and final TOTAL columns.');
@@ -3003,7 +3172,7 @@ function parseCdpMarkEntrySheetData(workbook: XLSX.WorkBook, sheetName: string) 
 
 function buildCdpMarkEntrySnapshot(
   subject: NonNullable<ReturnType<typeof getSubjectById>>,
-  workbook: XLSX.WorkBook,
+  workbook: WorkBook,
   classRosters: CdpAttendanceRoster[],
   facultyAllocations: Array<{ faculty_name: string; class_sections: string[] }>,
 ): CdpMarkEntrySnapshot {
@@ -3148,6 +3317,411 @@ function buildCdpMarkEntrySnapshot(
   return { summaries, rows };
 }
 
+function buildEmptyCdpLecturePlanSnapshot(parserError = ''): CdpLecturePlanSnapshot {
+  return {
+    status: parserError ? 'sheet_issue' : 'not_due',
+    classes_detected: 0,
+    units_checked: 0,
+    due_rows_pending: 0,
+    final_checkpoints_pending: 0,
+    completion_pct: 100,
+    classes: [],
+    parser_error: parserError,
+  };
+}
+
+function getDateOnlyTime(value: Date | null) {
+  if (!value) return null;
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+}
+
+function addDays(value: Date | null, days: number) {
+  if (!value) return null;
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate() + days);
+}
+
+function formatCdpLecturePlanDate(value: Date | null) {
+  if (!value) return '';
+  return `${String(value.getDate()).padStart(2, '0')}/${String(value.getMonth() + 1).padStart(2, '0')}/${value.getFullYear()}`;
+}
+
+function getCellText(row: unknown[], index: number) {
+  return String(row[index] ?? '').trim().replace(/\s+/g, ' ');
+}
+
+function getMergedTopicText(row: unknown[], firstIndex: number, secondIndex: number) {
+  return [row[firstIndex], row[secondIndex]]
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isFilledCellValue(value: unknown) {
+  return value != null && String(value).trim() !== '';
+}
+
+function findNextNonEmptyCell(row: unknown[], startIndex: number) {
+  for (let index = startIndex + 1; index < row.length; index += 1) {
+    const value = String(row[index] ?? '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function isCdpLecturePlanMetadataNoise(value: string) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!normalized) return true;
+  if (/^(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day)?$/i.test(normalized)) return true;
+  if (/^d\s*\/\s*h$/i.test(normalized)) return true;
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) return true;
+  return false;
+}
+
+function findCdpLecturePlanMetadataValue(
+  row: unknown[],
+  startIndex: number,
+  options?: { allowNoise?: boolean; maxLookahead?: number },
+) {
+  const maxLookahead = Math.max(1, Number(options?.maxLookahead || 4) || 4);
+  for (let index = startIndex + 1; index < Math.min(row.length, startIndex + 1 + maxLookahead); index += 1) {
+    const value = String(row[index] ?? '').trim().replace(/\s+/g, ' ');
+    if (!value) continue;
+    if (!options?.allowNoise && isCdpLecturePlanMetadataNoise(value)) continue;
+    return value;
+  }
+  return '';
+}
+
+function parseCdpLecturePlanDate(
+  sheet: WorkBook['Sheets'][string],
+  rows: unknown[][],
+  rowIndex: number,
+  colIndex: number,
+  subject: NonNullable<ReturnType<typeof getSubjectById>>,
+) {
+  const row = rows[rowIndex] || [];
+  const cellKey = encodeCell({ r: rowIndex, c: colIndex });
+  const cell = readSheetCell(sheet, cellKey);
+  return parseSheetDateToken(row[colIndex], subject, cell);
+}
+
+function detectCdpLecturePlanClassBlocks(
+  rows: unknown[][],
+  subject: NonNullable<ReturnType<typeof getSubjectById>>,
+) {
+  const blocks: Array<{
+    startRow: number;
+    endRow: number;
+    faculty_name: string;
+    class_label: string;
+    subject_name: string;
+    course_code: string;
+  }> = [];
+  const headerRows: number[] = [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    if (!Array.isArray(row)) continue;
+    if (row.some((cell) => String(cell ?? '').trim().toLowerCase().includes('name of the faculty'))) {
+      headerRows.push(rowIndex);
+    }
+  }
+
+  for (let index = 0; index < headerRows.length; index += 1) {
+    const startRow = headerRows[index];
+    const endRow = headerRows[index + 1] !== undefined ? headerRows[index + 1] - 1 : rows.length - 1;
+    let facultyName = '';
+    let classLabel = '';
+    let subjectName = '';
+    let courseCode = '';
+    let yearSectionSemester = '';
+
+    for (let rowIndex = startRow; rowIndex <= Math.min(endRow, startRow + 12); rowIndex += 1) {
+      const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+      for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
+        const label = String(row[colIndex] ?? '').trim().toLowerCase();
+        if (!label) continue;
+        if (!facultyName && label.includes('name of the faculty')) facultyName = findCdpLecturePlanMetadataValue(row, colIndex);
+        else if (!classLabel && label.startsWith('branch')) classLabel = findCdpLecturePlanMetadataValue(row, colIndex);
+        else if (!subjectName && (label.includes('subject name') || label.includes('name of the course'))) subjectName = findCdpLecturePlanMetadataValue(row, colIndex, { maxLookahead: 3 });
+        else if (!courseCode && (label.includes('course code') || label.includes('subject code'))) courseCode = findCdpLecturePlanMetadataValue(row, colIndex, { maxLookahead: 3 });
+        else if (!yearSectionSemester && label.includes('year') && label.includes('semester')) yearSectionSemester = findCdpLecturePlanMetadataValue(row, colIndex);
+      }
+    }
+
+    const normalizedClass = resolveCdpLecturePlanClassLabelForSubject(classLabel || yearSectionSemester, subject);
+    if (!normalizedClass || isCdpLecturePlanMetadataNoise(normalizedClass)) {
+      continue;
+    }
+    blocks.push({
+      startRow,
+      endRow,
+      faculty_name: facultyName || subject.faculty_name || 'Faculty',
+      class_label: normalizedClass || `CLASS ${index + 1}`,
+      subject_name: subjectName || subject.subject_name,
+      course_code: courseCode || subject.subject_code,
+    });
+  }
+  return blocks;
+}
+
+function detectCdpLecturePlanUnits(rows: unknown[][], classBlock: { startRow: number; endRow: number }) {
+  const units: Array<{ unit: number; title: string; startRow: number; endRow: number }> = [];
+  for (let rowIndex = classBlock.startRow; rowIndex <= classBlock.endRow; rowIndex += 1) {
+    const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+    const label = String(row[0] ?? '').trim();
+    const match = label.match(/^UNIT\s*-\s*([1-5])\b(.*)$/i);
+    if (!match) continue;
+    units.push({
+      unit: Number(match[1]),
+      title: label,
+      startRow: rowIndex,
+      endRow: classBlock.endRow,
+    });
+  }
+  for (let index = 0; index < units.length; index += 1) {
+    units[index].endRow = units[index + 1]?.startRow !== undefined ? units[index + 1].startRow - 1 : classBlock.endRow;
+  }
+  return units.filter((unit) => unit.unit >= 1 && unit.unit <= 5);
+}
+
+function findCdpLecturePlanCourseRows(rows: unknown[][], unit: { startRow: number; endRow: number }) {
+  const result: number[] = [];
+  for (let rowIndex = unit.startRow + 1; rowIndex <= unit.endRow; rowIndex += 1) {
+    const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+    const rowText = row.map((cell) => String(cell ?? '').trim()).filter(Boolean).join(' ').toLowerCase();
+    if (rowText.includes('term work') || rowText.includes('self learning')) break;
+    const serial = getCellText(row, 0);
+    const topic = getMergedTopicText(row, 3, 4);
+    if (!serial || !topic) continue;
+    if (!/^\d+(?:\.\d+)?$/.test(serial)) continue;
+    result.push(rowIndex);
+  }
+  return result;
+}
+
+function buildCdpLecturePlanSnapshot(
+  subject: NonNullable<ReturnType<typeof getSubjectById>>,
+  workbook: WorkBook,
+): CdpLecturePlanSnapshot {
+  const sheetName = workbook.SheetNames.find((name) => String(name || '').trim().toLowerCase() === 'proposed lecture plan')
+    || workbook.SheetNames.find((name) => String(name || '').trim().toLowerCase().includes('proposed lecture'));
+  if (!sheetName) return buildEmptyCdpLecturePlanSnapshot('Proposed Lecture Plan sheet is not available in this workbook.');
+  const sheet = workbook.Sheets[sheetName];
+  if (!sheet) return buildEmptyCdpLecturePlanSnapshot('Proposed Lecture Plan sheet is not readable.');
+
+  const rows = sheetToJson<unknown[]>(sheet, { header: 1, defval: null, raw: true });
+  const today = new Date();
+  const todayTime = getDateOnlyTime(today) || Date.now();
+  const classBlocks = detectCdpLecturePlanClassBlocks(rows, subject);
+  if (!classBlocks.length) return buildEmptyCdpLecturePlanSnapshot('No class blocks were detected in Proposed Lecture Plan.');
+
+  const classes: CdpLecturePlanClassStatus[] = classBlocks.map((classBlock) => {
+    const unitBlocks = detectCdpLecturePlanUnits(rows, classBlock);
+    const units = unitBlocks.map((unitBlock) => {
+      const courseRows = findCdpLecturePlanCourseRows(rows, unitBlock);
+      const notes: string[] = [];
+      const rowIssues: CdpLecturePlanRowIssue[] = [];
+      const finalIssues: CdpLecturePlanFinalIssue[] = [];
+      const firstCourseRow = courseRows[0] ?? -1;
+      const fromDate = firstCourseRow >= 0 ? parseCdpLecturePlanDate(sheet, rows, firstCourseRow, 1, subject) : null;
+      const toDate = firstCourseRow >= 0 ? parseCdpLecturePlanDate(sheet, rows, firstCourseRow, 2, subject) : null;
+      const previousUnit = unitBlock.unit > 1
+        ? unitBlocks.find((item) => item.unit === unitBlock.unit - 1) || null
+        : null;
+      const previousRows = previousUnit ? findCdpLecturePlanCourseRows(rows, previousUnit) : [];
+      const previousFirstRow = previousRows[0] ?? -1;
+      const previousToDate = previousFirstRow >= 0 ? parseCdpLecturePlanDate(sheet, rows, previousFirstRow, 2, subject) : null;
+      const fallbackDueDate = courseRows
+        .map((rowIndex) => parseCdpLecturePlanDate(sheet, rows, rowIndex, 5, subject))
+        .filter((value): value is Date => !!value)
+        .sort((a, b) => (getDateOnlyTime(a) || 0) - (getDateOnlyTime(b) || 0))[0] || null;
+      const unitDueDate = unitBlock.unit === 1
+        ? today
+        : (addDays(previousToDate, 1) || fallbackDueDate);
+      const unitDue = Boolean(unitDueDate && (getDateOnlyTime(unitDueDate) || 0) <= todayTime);
+      const finalDue = Boolean(toDate && (getDateOnlyTime(toDate) || 0) < todayTime);
+      let completedRows = 0;
+      let dueRowCount = 0;
+      let completionCompleted = 0;
+      let completionTotal = 0;
+
+      if (!courseRows.length) {
+        notes.push('No Course Delivery Plan topic rows were detected for this unit.');
+      }
+      const shouldCheckDuration = (unitBlock.unit === 1 || unitDue) && Boolean(fromDate || toDate || fallbackDueDate);
+      if (shouldCheckDuration) {
+        const missingDuration = [];
+        completionTotal += 2;
+        if (fromDate) completionCompleted += 1;
+        if (toDate) completionCompleted += 1;
+        if (!fromDate) missingDuration.push('Duration From');
+        if (!toDate) missingDuration.push('Duration To');
+        if (missingDuration.length) {
+          notes.push(`${missingDuration.join(', ')} missing for ${unitBlock.title || `Unit ${unitBlock.unit}`}.`);
+        }
+      }
+
+      for (const rowIndex of courseRows) {
+        const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+        const serial = getCellText(row, 0);
+        const topic = getMergedTopicText(row, 3, 4);
+        const plannedDate = parseCdpLecturePlanDate(sheet, rows, rowIndex, 5, subject);
+        const deliveredDate = parseCdpLecturePlanDate(sheet, rows, rowIndex, 9, subject);
+        const teachingAids = isFilledCellValue(row[8]);
+        const missingFields: string[] = [];
+        completionTotal += 1;
+        if (plannedDate) completionCompleted += 1;
+        if (!plannedDate) missingFields.push('Planned Date');
+        const rowDue = Boolean(plannedDate && (getDateOnlyTime(plannedDate) || 0) <= todayTime);
+        if (rowDue) {
+          dueRowCount += 1;
+          completionTotal += 2;
+          if (deliveredDate) completionCompleted += 1;
+          if (teachingAids) completionCompleted += 1;
+          if (!deliveredDate) missingFields.push('Delivered Date');
+          if (!teachingAids) missingFields.push('Teaching Aids Used');
+        }
+        if (!missingFields.length) completedRows += 1;
+        else {
+          rowIssues.push({
+            row_number: rowIndex + 1,
+            serial,
+            topic,
+            planned_date: formatCdpLecturePlanDate(plannedDate),
+            delivered_date: formatCdpLecturePlanDate(deliveredDate),
+            missing_fields: missingFields,
+          });
+        }
+      }
+
+      if (finalDue) {
+        const missingUnitFields: string[] = [];
+        const hasIndustryTopic = courseRows.some((rowIndex) => isFilledCellValue(rows[rowIndex]?.[13]) || isFilledCellValue(rows[rowIndex]?.[14]));
+        const finalFieldChecks = [
+          ['Industry Relevant Topics', hasIndustryTopic],
+          ['Reference Websites', courseRows.some((rowIndex) => isFilledCellValue(rows[rowIndex]?.[15]))],
+          ['Video Links', courseRows.some((rowIndex) => isFilledCellValue(rows[rowIndex]?.[16]))],
+          ['Real Time Applications', courseRows.some((rowIndex) => isFilledCellValue(rows[rowIndex]?.[17]))],
+          ['Digital Course Material Link', courseRows.some((rowIndex) => isFilledCellValue(rows[rowIndex]?.[18]))],
+          ['Video Lectures by Faculty', courseRows.some((rowIndex) => isFilledCellValue(rows[rowIndex]?.[19]))],
+        ] as const;
+        finalFieldChecks.forEach(([field, filled]) => {
+          completionTotal += 1;
+          if (filled) completionCompleted += 1;
+          if (!filled) missingUnitFields.push(field);
+        });
+        const missingRowFields = courseRows.map((rowIndex) => {
+          const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+          const missingFields: string[] = [];
+          const hasCos = isFilledCellValue(row[6]);
+          const hasKnowledgeLevel = isFilledCellValue(row[7]);
+          completionTotal += 2;
+          if (hasCos) completionCompleted += 1;
+          if (hasKnowledgeLevel) completionCompleted += 1;
+          if (!hasCos) missingFields.push('Pertaining COs');
+          if (!hasKnowledgeLevel) missingFields.push('Knowledge Level');
+          return {
+            row_number: rowIndex + 1,
+            serial: getCellText(row, 0),
+            topic: getMergedTopicText(row, 3, 4),
+            missing_fields: missingFields,
+          };
+        }).filter((item) => item.missing_fields.length);
+        if (missingUnitFields.length || missingRowFields.length) {
+          finalIssues.push({
+            unit: unitBlock.unit,
+            due_after: formatCdpLecturePlanDate(toDate),
+            missing_fields: missingUnitFields,
+            missing_row_fields: missingRowFields,
+          });
+        }
+      }
+
+      const pendingRowCount = rowIssues.length;
+      const durationBlank = !fromDate && !toDate;
+      const status: CdpLecturePlanStatusValue =
+        !courseRows.length && durationBlank
+          ? 'not_due'
+          : notes.length && !courseRows.length
+          ? 'sheet_issue'
+          : (pendingRowCount || finalIssues.length || notes.length
+            ? 'pending'
+            : (!unitDue && !finalDue ? 'not_due' : 'complete'));
+      return {
+        unit: unitBlock.unit,
+        title: unitBlock.title || `UNIT - ${unitBlock.unit}`,
+        status,
+        due: unitDue,
+        final_due: finalDue,
+        from_date: formatCdpLecturePlanDate(fromDate),
+        to_date: formatCdpLecturePlanDate(toDate),
+        topic_count: courseRows.length,
+        completed_rows: completedRows,
+        due_row_count: dueRowCount,
+        pending_row_count: pendingRowCount,
+        completion_completed: completionCompleted,
+        completion_total: completionTotal,
+        completion_pct: completionTotal ? Math.round((completionCompleted / completionTotal) * 100) : 0,
+        row_issues: rowIssues,
+        final_issues: finalIssues,
+        notes,
+      } satisfies CdpLecturePlanUnitStatus;
+    });
+    const pendingRowCount = units.reduce((sum, unit) => sum + unit.pending_row_count, 0);
+    const finalIssueCount = units.reduce((sum, unit) => sum + unit.final_issues.length, 0);
+    const pendingUnitCount = units.filter((unit) => unit.status === 'pending' || unit.status === 'sheet_issue').length;
+    const completionTotal = units.reduce((sum, unit) => sum + unit.completion_total, 0);
+    const completionCompleted = units.reduce((sum, unit) => sum + unit.completion_completed, 0);
+    const status: CdpLecturePlanStatusValue =
+      units.some((unit) => unit.status === 'sheet_issue')
+        ? 'sheet_issue'
+        : (units.some((unit) => unit.status === 'pending')
+          ? 'pending'
+          : (units.some((unit) => unit.status === 'complete') ? 'complete' : 'not_due'));
+    return {
+      class_label: classBlock.class_label,
+      faculty_name: classBlock.faculty_name,
+      subject_name: classBlock.subject_name,
+      course_code: classBlock.course_code,
+      status,
+      units,
+      pending_unit_count: pendingUnitCount,
+      pending_row_count: pendingRowCount,
+      final_issue_count: finalIssueCount,
+      completion_pct: completionTotal ? Math.round((completionCompleted / completionTotal) * 100) : 0,
+      notes: units.length ? [] : ['No UNIT - 1 to UNIT - 5 blocks were detected for this class.'],
+    } satisfies CdpLecturePlanClassStatus;
+  }).filter((classStatus) => classStatus.units.some((unit) => unit.topic_count > 0));
+
+  if (!classes.length) {
+    return buildEmptyCdpLecturePlanSnapshot('No valid Course Delivery Plan class blocks were detected in Proposed Lecture Plan.');
+  }
+
+  const dueRowsPending = classes.reduce((sum, item) => sum + item.pending_row_count, 0);
+  const finalCheckpointsPending = classes.reduce((sum, item) => sum + item.final_issue_count, 0);
+  const unitsChecked = classes.reduce((sum, item) => sum + item.units.length, 0);
+  const completionTotal = classes.reduce((sum, item) => sum + item.units.reduce((unitSum, unit) => unitSum + unit.completion_total, 0), 0);
+  const completionCompleted = classes.reduce((sum, item) => sum + item.units.reduce((unitSum, unit) => unitSum + unit.completion_completed, 0), 0);
+  const status: CdpLecturePlanStatusValue =
+    classes.some((item) => item.status === 'sheet_issue')
+      ? 'sheet_issue'
+      : (classes.some((item) => item.status === 'pending')
+        ? 'pending'
+        : (classes.some((item) => item.status === 'complete') ? 'complete' : 'not_due'));
+  return {
+    status,
+    classes_detected: classes.length,
+    units_checked: unitsChecked,
+    due_rows_pending: dueRowsPending,
+    final_checkpoints_pending: finalCheckpointsPending,
+    completion_pct: completionTotal ? Math.round((completionCompleted / completionTotal) * 100) : 100,
+    classes,
+    parser_error: '',
+  };
+}
+
 async function parseCdpSheetStatus(subject: ReturnType<typeof getSubjectById>) {
   if (!subject) throw new Error('Subject not found.');
 
@@ -3175,7 +3749,7 @@ async function parseCdpSheetStatus(subject: ReturnType<typeof getSubjectById>) {
   }
 
   const workbookBuffer = Buffer.from(await response.arrayBuffer());
-  const workbook = XLSX.read(workbookBuffer, { type: 'buffer', cellStyles: true });
+  const workbook = await readWorkbook(workbookBuffer, 'cdp-workbook.xlsx');
   let sheetName = workbook.SheetNames.find((name) => name.toLowerCase().replace(/_/g, ' ').includes('daily attendance'));
   if (!sheetName) sheetName = workbook.SheetNames.find((name) => name.toLowerCase().includes('attendance'));
   if (!sheetName) sheetName = workbook.SheetNames[0];
@@ -3185,7 +3759,7 @@ async function parseCdpSheetStatus(subject: ReturnType<typeof getSubjectById>) {
 
   const sheet = workbook.Sheets[sheetName];
   const unavailableStudentRows = await extractUnavailableStudentRowsFromWorkbook(workbookBuffer, sheetName);
-  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, raw: true });
+  const rows = sheetToJson<unknown[]>(sheet, { header: 1, defval: null, raw: true });
   const todayLabel = getTodaySheetLabel();
   const classes: CdpClassStatus[] = [];
   const classRosters: CdpAttendanceRoster[] = [];
@@ -3231,8 +3805,8 @@ async function parseCdpSheetStatus(subject: ReturnType<typeof getSubjectById>) {
       let started = false;
 
       for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
-        const cellKey = XLSX.utils.encode_cell({ r: section.startRow + localRowIndex, c: colIndex });
-        const cell = sheet[cellKey];
+        const cellKey = encodeCell({ r: section.startRow + localRowIndex, c: colIndex });
+        const cell = readSheetCell(sheet, cellKey);
         const rawValue = String(cell?.w ?? row[colIndex] ?? '').trim();
         const dateObj = parseSheetDateToken(row[colIndex], subject, cell);
         if (!dateObj) {
@@ -3419,6 +3993,7 @@ async function parseCdpSheetStatus(subject: ReturnType<typeof getSubjectById>) {
   const pendingClassCount = Array.from(new Set(facultyStatuses.flatMap((entry) => entry.pending_classes))).length;
   const pendingDateCount = Array.from(new Set(classes.flatMap((item) => item.pending_dates))).length;
   const markEntry = buildCdpMarkEntrySnapshot(subject, workbook, classRosters, facultyAllocations);
+  const lecturePlan = buildCdpLecturePlanSnapshot(subject, workbook);
   const payload: CdpSubjectStatus = {
     subject_id: subject.id,
     subject_code: subject.subject_code,
@@ -3441,6 +4016,7 @@ async function parseCdpSheetStatus(subject: ReturnType<typeof getSubjectById>) {
     pending_date_count: pendingDateCount,
     parsed_at: new Date().toISOString(),
     mark_entry: markEntry,
+    lecture_plan: lecturePlan,
   };
 
   cdpStatusCache.set(subject.id, { timestamp: Date.now(), data: payload });
@@ -3464,6 +4040,7 @@ function persistCdpSnapshotFromStatus(subject: NonNullable<ReturnType<typeof get
     class_statuses: status.classes,
     faculty_statuses: status.faculty_statuses,
     mark_entry_statuses: status.mark_entry,
+    lecture_plan_statuses: status.lecture_plan,
   });
 }
 
@@ -3485,7 +4062,40 @@ function persistCdpSnapshotError(subject: NonNullable<ReturnType<typeof getSubje
     class_statuses: [],
     faculty_statuses: [],
     mark_entry_statuses: buildCdpMarkEntryErrorSnapshot(normalizedError),
+    lecture_plan_statuses: buildEmptyCdpLecturePlanSnapshot(normalizedError),
   });
+}
+
+function isCdpSnapshotFresh(
+  subject: NonNullable<ReturnType<typeof getSubjectById>>,
+  snapshot: ReturnType<typeof getCdpSubjectSnapshot> | null | undefined,
+) {
+  if (!snapshot) return false;
+  const parsedAtMs = parseTimestampMs(snapshot.parsed_at || snapshot.updated_at);
+  const snapshotUpdatedAtMs = parseTimestampMs(snapshot.updated_at || snapshot.parsed_at);
+  if (!parsedAtMs || !snapshotUpdatedAtMs) return false;
+  const subjectUpdatedAtMs = parseTimestampMs(subject.updated_at || subject.created_at);
+  if (subjectUpdatedAtMs && snapshotUpdatedAtMs < subjectUpdatedAtMs) return false;
+  const now = new Date();
+  const parsedDate = new Date(parsedAtMs);
+  if (!isSameLocalDate(parsedDate, now)) return false;
+  return true;
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length || 1));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await worker(items[currentIndex], currentIndex);
+    }
+  }));
 }
 
 async function rebuildCdpScopeOverviewPayload(
@@ -3495,6 +4105,7 @@ async function rebuildCdpScopeOverviewPayload(
     requestedYear: number | null;
     requestedSemester: string;
     requestedSubjectId: number | null;
+    force?: boolean;
   },
 ) {
   const departments = getVisibleDepartmentsForActor(authUser);
@@ -3522,7 +4133,18 @@ async function rebuildCdpScopeOverviewPayload(
   const scopedSubjects = visibleSubjects.filter((subject) =>
     subject.department === selectedDepartment && subject.year_level === selectedYear && subject.semester === selectedSemester,
   );
-  await Promise.all(scopedSubjects.map(async (subject) => {
+  const targetSubjects = options.requestedSubjectId
+    ? scopedSubjects.filter((subject) => subject.id === options.requestedSubjectId)
+    : scopedSubjects;
+  const snapshotMap = new Map(
+    listCdpSubjectSnapshots({ subjectIds: targetSubjects.map((subject) => subject.id) })
+      .map((snapshot) => [snapshot.subject_id, snapshot]),
+  );
+  const subjectsToParse = options.force
+    ? targetSubjects
+    : targetSubjects.filter((subject) => !isCdpSnapshotFresh(subject, snapshotMap.get(subject.id)));
+
+  await mapWithConcurrency(subjectsToParse, 3, async (subject) => {
     clearCdpStatusCache(subject.id);
     try {
       const status = await parseCdpSheetStatus(subject);
@@ -3530,8 +4152,8 @@ async function rebuildCdpScopeOverviewPayload(
     } catch (error) {
       persistCdpSnapshotError(subject, error instanceof Error ? error.message : 'Unable to parse the selected Google Sheet.');
     }
-  }));
-  bumpReadModelCacheVersion();
+  });
+  if (subjectsToParse.length) bumpReadModelCacheVersion();
   return buildCdpOverviewPayload(authUser, options);
 }
 
@@ -3672,6 +4294,7 @@ async function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
     return !!allowedScopes?.has(key);
   });
   const noticeRows = getNoticeCompletionRows(authUser);
+  const visibleSubjects = listSubjectsForActor(authUser);
 
   function buildCompletionOverview<T>(
     rows: T[],
@@ -3767,6 +4390,55 @@ async function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
     (row) => Number(row.total_notice_count || 0),
     (row) => Number(row.pending_notice_count || 0) > 0,
   );
+  const cdpSnapshotMap = new Map(
+    listCdpSubjectSnapshots({ subjectIds: visibleSubjects.map((subject) => subject.id) })
+      .map((snapshot) => [snapshot.subject_id, snapshot]),
+  );
+  const cdpRows = visibleSubjects.map((subject) => {
+    const snapshot = cdpSnapshotMap.get(subject.id) || null;
+    const attendanceTotal = (snapshot?.class_statuses || []).reduce((sum, item) => sum + Number(item.total_date_cols || 0), 0);
+    const attendanceFilled = (snapshot?.class_statuses || []).reduce((sum, item) => sum + Number(item.filled_cols || 0), 0);
+    const lectureCompletion = snapshot?.lecture_plan_statuses?.completion_pct;
+    const markSummaries = snapshot?.mark_entry_statuses?.summaries || [];
+    const markTotal = markSummaries.reduce((sum, item) => sum + Number(item.total_students || 0), 0);
+    const markFilled = markSummaries.reduce((sum, item) => sum + Number(item.filled_students || 0), 0);
+
+    let completed = 0;
+    let total = 0;
+    if (attendanceTotal > 0) {
+      completed += attendanceFilled;
+      total += attendanceTotal;
+    } else {
+      total += 1;
+    }
+    if (Number.isFinite(Number(lectureCompletion))) {
+      completed += Math.max(0, Math.min(100, Number(lectureCompletion || 0)));
+      total += 100;
+    } else {
+      total += 100;
+    }
+    if (markTotal > 0) {
+      completed += markFilled;
+      total += markTotal;
+    }
+
+    const completionPct = toPercentInt(completed, total);
+    return {
+      department: subject.department,
+      year_level: subject.year_level,
+      completed,
+      total,
+      pending: !snapshot || snapshot.summary_status !== 'ready' || completionPct < 100,
+    };
+  });
+  const cdpCompletionOverview = buildCompletionOverview(
+    cdpRows,
+    (row) => row.department,
+    (row) => Number(row.year_level || 1),
+    (row) => row.completed,
+    (row) => row.total,
+    (row) => row.pending,
+  );
 
   const leaderboard = activityRows
     .filter((item) => Number(item.student_count || 0) > 0)
@@ -3783,6 +4455,11 @@ async function buildDashboardOverview(authUser: ReturnType<typeof toAuthUser>) {
       totalTests: 0,
       overallCompletion: marksCompletionOverview.overall,
       totalMessages,
+    },
+    cdp_completion_overview: {
+      ...cdpCompletionOverview,
+      pending_subjects: cdpCompletionOverview.pending_counselors,
+      subject_count: visibleSubjects.length,
     },
     completion_overview: marksCompletionOverview,
     notice_completion_overview: noticeCompletionOverview,
@@ -4485,7 +5162,13 @@ async function clearExamDatabaseOnly() {
   `);
 }
 
-function finalizeLogin(c: Context, userRow: Record<string, unknown>, forceLogoutOthers: boolean, authMethod = 'password') {
+function finalizeLogin(
+  c: Context,
+  userRow: Record<string, unknown>,
+  forceLogoutOthers: boolean,
+  authMethod = 'password',
+  options: { includeSessionId?: boolean } = {},
+) {
   const appConfig = getAppConfig();
   const sessionId = registerSession(
     String(userRow.email || '').toLowerCase(),
@@ -4503,10 +5186,12 @@ function finalizeLogin(c: Context, userRow: Record<string, unknown>, forceLogout
     expires: sessionCookieExpires(appConfig),
   });
 
-  return {
+  const payload: Record<string, unknown> = {
     success: true,
     user: toAuthUser(userRow),
   };
+  if (options.includeSessionId) payload.sessionId = sessionId;
+  return payload;
 }
 
 async function beginResolvedLogin(
@@ -4516,6 +5201,7 @@ async function beginResolvedLogin(
     forceLogoutOthers?: boolean;
     authMethod?: 'password' | 'google';
     skipOtp?: boolean;
+    includeSessionId?: boolean;
   },
 ) {
   const forceLogoutOthers = Boolean(options?.forceLogoutOthers);
@@ -4578,7 +5264,9 @@ async function beginResolvedLogin(
 
   return {
     status: 200,
-    payload: finalizeLogin(c, userRow, forceLogoutOthers || !allowConcurrent, authMethod),
+    payload: finalizeLogin(c, userRow, forceLogoutOthers || !allowConcurrent, authMethod, {
+      includeSessionId: Boolean(options?.includeSessionId),
+    }),
   };
 }
 
@@ -4698,7 +5386,12 @@ app.use('/api/*', async (c, next) => {
     if (temporaryArchivePath) {
       await rm(dirname(temporaryArchivePath), { recursive: true, force: true }).catch(() => undefined);
     }
-    appendServerConsoleLine(`${c.req.method} ${requestPath} -> ${c.res.status} (${Date.now() - startedAt} ms)`);
+    const durationMs = Date.now() - startedAt;
+    c.header('Server-Timing', `app;dur=${durationMs}`);
+    appendServerConsoleLine(`${c.req.method} ${requestPath} -> ${c.res.status} (${durationMs} ms)`);
+    if (durationMs >= SERVER_SLOW_ROUTE_MS) {
+      appendServerConsoleLine(`SLOW ${c.req.method} ${requestPath} (${durationMs} ms)`);
+    }
   }
 });
 
@@ -4707,6 +5400,18 @@ app.get('/api/health', (c) => c.json({ ok: true, app: APP_NAME, version: APP_VER
 app.get('/api/auth/me', (c) => {
   const authUser = c.get('authUser') || null;
   return c.json({ user: authUser });
+});
+
+app.post('/api/auth/desktop-oauth/exchange', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const ticket = String(body.ticket || '').trim();
+  const pendingTicket = consumeDesktopOauthTicket(ticket);
+  if (!pendingTicket?.sessionId) return c.json({ error: 'Desktop sign-in ticket expired. Please try again.' }, 400);
+  return c.json({
+    success: true,
+    sessionId: pendingTicket.sessionId,
+    maxAge: sessionCookieMaxAge(getAppConfig()),
+  });
 });
 
 app.get('/api/footer/templates', async (c) => {
@@ -5106,10 +5811,12 @@ app.get('/api/bootstrap', async (c) => {
   const counselorTests = authUser?.role === 'counselor' ? getVisibleTestsForCounselor(authUser.email) : [];
   const counselorOverview = authUser?.role === 'counselor' ? buildCounselorOverviewPayload(authUser.email) : null;
   const linkedCounselorNotifications = buildLinkedCounselorNotificationPayload(authUser);
+  const userPreferences = authUser ? getUserPreferences(authUser.email) : null;
   const defaultTab = String(authUser ? defaultTabForRole(authUser.role) : 'reports');
-  const shouldPrefetchDashboard = Boolean(authUser && ['admin', 'principal', 'hod'].includes(authUser.role));
-  const shouldPrefetchActivity = Boolean(authUser && ['admin', 'principal', 'hod', 'deo'].includes(authUser.role));
-  const prefetched = authUser && ['admin', 'principal', 'hod', 'deo'].includes(authUser.role)
+  const includePrefetch = c.req.query('prefetch') === '1';
+  const shouldPrefetchDashboard = includePrefetch && Boolean(authUser && ['admin', 'principal', 'hod'].includes(authUser.role));
+  const shouldPrefetchActivity = includePrefetch && Boolean(authUser && ['admin', 'principal', 'hod', 'deo'].includes(authUser.role));
+  const prefetched = includePrefetch && authUser && ['admin', 'principal', 'hod', 'deo'].includes(authUser.role)
     ? await (async () => {
         const [dashboard, reports, activity, cdp] = await Promise.all([
           shouldPrefetchDashboard
@@ -5176,6 +5883,7 @@ app.get('/api/bootstrap', async (c) => {
     counselorOverview,
     counselorTests,
     linkedCounselorNotifications,
+    userPreferences,
   });
 });
 
@@ -6073,10 +6781,10 @@ app.post('/api/users/bulk-counselors-upload', async (c) => {
     ? Array.from(new Set(authUser.scopes.map((scope) => scope.department.toUpperCase())))
     : activeDepartments.map((department) => department.code.toUpperCase());
 
-  let rows: ReturnType<typeof parseBulkCounselorWorkbook> = [];
+  let rows: Awaited<ReturnType<typeof parseBulkCounselorWorkbook>> = [];
   try {
     const bytes = await file.arrayBuffer();
-    rows = parseBulkCounselorWorkbook(Buffer.from(bytes), allowedDepartmentCodes);
+    rows = await parseBulkCounselorWorkbook(Buffer.from(bytes), allowedDepartmentCodes);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : 'Could not parse counselor file.' }, 400);
   }
@@ -6132,7 +6840,7 @@ app.post('/api/users/bulk-counselors-upload', async (c) => {
         if (item.student_list_link) {
           try {
             const studentWorkbook = await downloadGoogleSheetWorkbook(item.student_list_link);
-            const students = parseStudentWorkbook(studentWorkbook);
+            const students = await parseStudentWorkbook(studentWorkbook);
             studentRowsImported += addStudentsBulk(String(createdUser?.email || item.email).trim().toLowerCase(), students);
           } catch {
             studentSheetFailures += 1;
@@ -6163,7 +6871,7 @@ app.post('/api/users/bulk-counselors-upload', async (c) => {
     if (item.student_list_link) {
       try {
         const studentWorkbook = await downloadGoogleSheetWorkbook(item.student_list_link);
-        const students = parseStudentWorkbook(studentWorkbook);
+        const students = await parseStudentWorkbook(studentWorkbook);
         studentRowsImported += addStudentsBulk(String(existingCounselor.email || item.email).trim().toLowerCase(), students);
       } catch {
         studentSheetFailures += 1;
@@ -6208,7 +6916,7 @@ app.post('/api/users/:email/students/upload', async (c) => {
   if (!(file instanceof File)) return c.json({ error: 'No file selected.' }, 400);
 
   const bytes = await file.arrayBuffer();
-  const students = parseStudentWorkbook(Buffer.from(bytes));
+  const students = await parseStudentWorkbook(Buffer.from(bytes));
   if (!students.length) return c.json({ error: 'No valid students found.' }, 400);
   const added = addStudentsBulk(email, students);
   return c.json({ success: true, count: added });
@@ -6561,11 +7269,13 @@ app.post('/api/cdp/rebuild-scope', async (c) => {
   const requestedYear = Number(body.year || 0) || null;
   const requestedSemester = String(body.semester || '').trim();
   const requestedSubjectId = Number(body.subject_id || 0) || null;
+  const force = body.force === true;
   const payload = await rebuildCdpScopeOverviewPayload(authUser, {
     requestedDepartment,
     requestedYear,
     requestedSemester,
     requestedSubjectId,
+    force,
   });
   return c.json(payload);
 });
@@ -7644,6 +8354,7 @@ app.post('/api/activity/prefetch', async (c) => {
     selectedDepartment: requestedDepartment,
     selectedYear: requestedYear,
     sortMode: 'pending_first',
+    includePrefetchedResults: true,
   });
   if (!scopePayload.selectedDepartment || !scopePayload.selectedYear) {
     return c.json({ error: 'Selected activity scope is not available.' }, 400);
@@ -7664,7 +8375,7 @@ app.post('/api/activity/prefetch', async (c) => {
       showYearPicker: false,
       showSemesterPicker: false,
       testStatus: scopePayload.testStatus,
-      prefetchedResults: scopePayload.prefetchedResults || [],
+      prefetchedResults: [],
       result,
     });
     entries.push(payload);
@@ -7809,11 +8520,19 @@ app.get('/api/monitoring/overview', (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
   if (!isSystemAdmin(authUser.role)) return c.json({ error: 'Forbidden' }, 403);
+  const rawHistoryLimit = Number(c.req.query('historyLimit') || 75);
+  const historyLimit = Number.isFinite(rawHistoryLimit) ? Math.min(150, Math.max(25, Math.round(rawHistoryLimit))) : 75;
+  const expiredSessions = expireStaleActiveSessions();
   return c.json({
     sessions: getActiveSessions(),
     stats: getSessionStatistics(),
-    history: getSessionHistory(100),
-    sessionLog: { ok: true, message: 'Session monitoring active.' },
+    history: getSessionHistory(historyLimit),
+    sessionLog: {
+      ok: true,
+      message: expiredSessions
+        ? `Session monitoring active. ${expiredSessions} stale session${expiredSessions === 1 ? '' : 's'} expired.`
+        : 'Session monitoring active.',
+    },
   });
 });
 
@@ -7821,7 +8540,7 @@ app.post('/api/monitoring/logout-all', (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
   if (!isSystemAdmin(authUser.role)) return c.json({ error: 'Forbidden' }, 403);
-  logoutAllUsers();
+  logoutAllUsers(getCookie(c, SESSION_COOKIE));
   return c.json({ success: true });
 });
 
@@ -8291,6 +9010,22 @@ app.post('/api/notifications/delete', async (c) => {
   return c.json({ success: true, ...getNotificationStatesForUser(authUser.email) });
 });
 
+app.get('/api/user/preferences', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
+  return c.json({ success: true, ...getUserPreferences(authUser.email) });
+});
+
+app.post('/api/user/preferences', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
+  const body = (await c.req.json<{ theme?: unknown; desktopSettings?: unknown }>().catch(() => ({}))) as {
+    theme?: unknown;
+    desktopSettings?: unknown;
+  };
+  return c.json({ success: true, ...updateUserPreferences(authUser.email, body) });
+});
+
 app.post('/api/config/update', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
@@ -8321,6 +9056,17 @@ app.post('/api/config/update', async (c) => {
     return c.json({ error: 'OTP lockout must be between 1 and 168 hours.' }, 400);
   }
 
+  const publicAppBaseUrl = String(
+    body.public_app_base_url
+      ?? body.google_oauth_redirect_base_url
+      ?? currentConfig.public_app_base_url
+      ?? currentConfig.google_oauth_redirect_base_url
+      ?? '',
+  )
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/auth\/google\/callback$/i, '');
+
   const settings: Record<string, string> = {
     session_timeout: String(Math.round(timeoutHours) * 3600),
     session_heartbeat_interval: String(Math.round(heartbeat)),
@@ -8345,7 +9091,10 @@ app.post('/api/config/update', async (c) => {
     activity_copy_as_image: body.activity_copy_as_image ? 'true' : 'false',
     notice_defaulter_copy_template: String(body.notice_defaulter_copy_template ?? currentConfig.notice_defaulter_copy_template ?? '').replace(/\r\n/g, '\n'),
     activity_defaulter_copy_template: String(body.activity_defaulter_copy_template ?? currentConfig.activity_defaulter_copy_template ?? '').replace(/\r\n/g, '\n'),
-    cdp_defaulter_copy_template: String(body.cdp_defaulter_copy_template ?? currentConfig.cdp_defaulter_copy_template ?? '').replace(/\r\n/g, '\n'),
+    cdp_defaulter_copy_template: String(body.cdp_daily_attendance_copy_template ?? body.cdp_defaulter_copy_template ?? currentConfig.cdp_daily_attendance_copy_template ?? currentConfig.cdp_defaulter_copy_template ?? '').replace(/\r\n/g, '\n'),
+    cdp_daily_attendance_copy_template: String(body.cdp_daily_attendance_copy_template ?? body.cdp_defaulter_copy_template ?? currentConfig.cdp_daily_attendance_copy_template ?? currentConfig.cdp_defaulter_copy_template ?? '').replace(/\r\n/g, '\n'),
+    cdp_lecture_plan_copy_template: String(body.cdp_lecture_plan_copy_template ?? currentConfig.cdp_lecture_plan_copy_template ?? '').replace(/\r\n/g, '\n'),
+    cdp_mark_entry_copy_template: String(body.cdp_mark_entry_copy_template ?? currentConfig.cdp_mark_entry_copy_template ?? '').replace(/\r\n/g, '\n'),
     backup_storage_mode: String(body.backup_storage_mode || currentConfig.backup_storage_mode || 'local').trim().toLowerCase() === 'gdrive' ? 'gdrive' : 'local',
     enable_counselor_batch_send: body.enable_counselor_batch_send ? 'true' : 'false',
     counselor_batch_send_delay_seconds: String(Math.max(1, Math.min(30, Number(body.counselor_batch_send_delay_seconds || currentConfig.counselor_batch_send_delay_seconds || 4) || 4))),
@@ -8358,10 +9107,8 @@ app.post('/api/config/update', async (c) => {
     google_oauth_client_id: String(body.google_oauth_client_id || currentConfig.google_oauth_client_id || '').trim(),
     google_oauth_client_secret: String(body.google_oauth_client_secret || currentConfig.google_oauth_client_secret || '').trim(),
     google_oauth_allowed_domain: String(body.google_oauth_allowed_domain || '').trim().toLowerCase().replace(/^@/, ''),
-    google_oauth_redirect_base_url: String(body.google_oauth_redirect_base_url || '')
-      .trim()
-      .replace(/\/+$/, '')
-      .replace(/\/auth\/google\/callback$/i, ''),
+    public_app_base_url: publicAppBaseUrl,
+    google_oauth_redirect_base_url: publicAppBaseUrl,
     google_oauth_bulk_password_mode: String(body.google_oauth_bulk_password_mode || currentConfig.google_oauth_bulk_password_mode || 'sheet').trim().toLowerCase() === 'override' ? 'override' : 'sheet',
     google_oauth_bulk_override_password: String(body.google_oauth_bulk_override_password || currentConfig.google_oauth_bulk_override_password || '').trim(),
     google_drive_refresh_token: String(body.google_drive_refresh_token || currentConfig.google_drive_refresh_token || '').trim(),
@@ -8507,13 +9254,47 @@ app.get('/api/panel-status', (c) => {
 app.get('/auth/google/start', (c) => {
   const appConfig = getAppConfig();
   const oauth = getGoogleOauthSettings(appConfig);
+  const forwardedClientOrigin = String(c.req.header('x-forwarded-origin') || '').trim().replace(/\/+$/, '');
+  const hasForwardedClientOrigin = /^https?:\/\//i.test(forwardedClientOrigin);
+  const requestedDesktopOrigin = String(c.req.query('desktop_origin') || '').trim().replace(/\/+$/, '');
+  const requestedDesktopRedirectMode = String(c.req.query('desktop_redirect') || '').trim().toLowerCase();
+  const desktopHandoffOrigin = isSafeDesktopOauthOrigin(requestedDesktopOrigin)
+    ? requestedDesktopOrigin
+    : isSafeDesktopOauthOrigin(forwardedClientOrigin)
+      ? forwardedClientOrigin
+      : '';
+  const configuredRedirectBase = String(appConfig.public_app_base_url || appConfig.google_oauth_redirect_base_url || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/auth\/google\/callback$/i, '');
+  const hasHostedRedirectBase = (() => {
+    if (!/^https?:\/\//i.test(configuredRedirectBase)) return false;
+    try {
+      return !isLoopbackHost(new URL(configuredRedirectBase).host);
+    } catch {
+      return false;
+    }
+  })();
+  const useHostedDesktopRedirect = Boolean(desktopHandoffOrigin && hasHostedRedirectBase && requestedDesktopRedirectMode !== 'local');
+  const redirectUri = useHostedDesktopRedirect
+    ? buildGoogleOauthRedirectUri(appConfig)
+    : hasForwardedClientOrigin
+      ? `${forwardedClientOrigin}/auth/google/callback`
+      : buildGoogleOauthRedirectUri(appConfig);
+  const clientRedirectOrigin = useHostedDesktopRedirect
+    ? configuredRedirectBase
+    : hasForwardedClientOrigin
+      ? forwardedClientOrigin
+      : hasHostedRedirectBase
+        ? configuredRedirectBase
+        : '';
   if (!oauth.enabled) {
-    const target = new URL(buildGoogleOauthClientRedirect());
+    const target = new URL(buildGoogleOauthClientRedirectForOrigin(clientRedirectOrigin));
     target.searchParams.set('error', 'google_disabled');
     return c.redirect(target.toString());
   }
 
-  const state = createGoogleOauthState();
+  const state = createGoogleOauthState({ redirectUri, clientRedirectOrigin, desktopHandoffOrigin });
   setCookie(c, GOOGLE_STATE_COOKIE, state, {
     path: '/',
     httpOnly: true,
@@ -8523,7 +9304,7 @@ app.get('/auth/google/start', (c) => {
 
   const params = new URLSearchParams({
     client_id: oauth.clientId,
-    redirect_uri: buildGoogleOauthRedirectUri(appConfig),
+    redirect_uri: redirectUri,
     response_type: 'code',
     scope: 'openid email profile',
     state,
@@ -8539,7 +9320,31 @@ app.get('/auth/google/start', (c) => {
 app.get('/auth/google/callback', async (c) => {
   const appConfig = getAppConfig();
   const oauth = getGoogleOauthSettings(appConfig);
-  const target = new URL(buildGoogleOauthClientRedirect());
+  const forwardedClientOrigin = String(c.req.header('x-forwarded-origin') || '').trim().replace(/\/+$/, '');
+  const safeForwardedDesktopOrigin = isSafeDesktopOauthOrigin(forwardedClientOrigin) ? forwardedClientOrigin : '';
+  const callbackState = String(c.req.query('state') || '').trim();
+  const expectedState = String(getCookie(c, GOOGLE_STATE_COOKIE) || '').trim();
+  deleteCookie(c, GOOGLE_STATE_COOKIE, { path: '/' });
+  const cookieStateMatches = !!callbackState && !!expectedState && callbackState === expectedState;
+  const storedState = consumeGoogleOauthState(callbackState);
+  const storedStateMatches = !!storedState;
+  const callbackRedirectUri = String(
+    storedState?.redirectUri
+      || (safeForwardedDesktopOrigin ? `${safeForwardedDesktopOrigin}/auth/google/callback` : '')
+      || buildGoogleOauthRedirectUri(appConfig),
+  ).trim()
+    || buildGoogleOauthRedirectUri(appConfig);
+  const desktopHandoffOrigin = storedState?.desktopHandoffOrigin || safeForwardedDesktopOrigin;
+  const fallbackRedirectOrigin = (() => {
+    try {
+      return new URL(callbackRedirectUri).origin;
+    } catch {
+      return '';
+    }
+  })();
+  const target = new URL(buildGoogleOauthClientRedirectForOrigin(
+    storedState?.clientRedirectOrigin || fallbackRedirectOrigin,
+  ));
 
   if (!oauth.enabled) {
     target.searchParams.set('error', 'google_disabled');
@@ -8557,11 +9362,6 @@ app.get('/auth/google/callback', async (c) => {
     return c.redirect(target.toString());
   }
 
-  const state = String(c.req.query('state') || '').trim();
-  const expectedState = String(getCookie(c, GOOGLE_STATE_COOKIE) || '').trim();
-  deleteCookie(c, GOOGLE_STATE_COOKIE, { path: '/' });
-  const cookieStateMatches = !!state && !!expectedState && state === expectedState;
-  const storedStateMatches = consumeGoogleOauthState(state);
   if (!cookieStateMatches && !storedStateMatches) {
     target.searchParams.set('error', 'state_mismatch');
     return c.redirect(target.toString());
@@ -8584,7 +9384,7 @@ app.get('/auth/google/callback', async (c) => {
         code,
         client_id: oauth.clientId,
         client_secret: oauth.clientSecret,
-        redirect_uri: buildGoogleOauthRedirectUri(appConfig),
+        redirect_uri: callbackRedirectUri,
         grant_type: 'authorization_code',
       }),
     });
@@ -8651,6 +9451,7 @@ app.get('/auth/google/callback', async (c) => {
     const result = await beginResolvedLogin(c, userRow as Record<string, unknown>, {
       forceLogoutOthers: false,
       authMethod: 'google',
+      includeSessionId: !!desktopHandoffOrigin,
     });
     if (result.status === 409) {
       createGoogleLoginConflictChallenge(c, String(userRow.email || '').trim().toLowerCase());
@@ -8672,6 +9473,14 @@ app.get('/auth/google/callback', async (c) => {
     clearChallengeCookie(c, PASSWORD_RESET_COOKIE);
     clearChallengeCookie(c, SELF_RESET_OTP_COOKIE);
     clearChallengeCookie(c, GOOGLE_LOGIN_CONFLICT_COOKIE);
+    if (desktopHandoffOrigin) {
+      const sessionId = String((result.payload as Record<string, unknown>).sessionId || '').trim();
+      if (sessionId) {
+        const desktopTarget = new URL('/desktop-oauth/complete', desktopHandoffOrigin);
+        desktopTarget.searchParams.set('ticket', createDesktopOauthTicket(sessionId));
+        return c.redirect(desktopTarget.toString());
+      }
+    }
     target.searchParams.set('success', '1');
     return c.redirect(target.toString());
   } catch {
