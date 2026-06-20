@@ -58,6 +58,7 @@ type ReportsTabProps = {
   uploadingReport: boolean;
   ScopeBreadcrumb: ComponentType<BreadcrumbProps>;
   formatYearLevel: (year: number) => string;
+  formatUploadDateTime: (value: string | null | undefined) => string;
   getDefaultBatchNameForYearLevel: (year: number, config: AppConfig | null) => string;
   readSummaryMetric: (marks: Record<string, string>, keys: string[]) => string;
   onBackFromTestDetail: () => void;
@@ -160,6 +161,7 @@ function ReportTestsTable({
   tests,
   reportsLoading,
   currentUser,
+  formatUploadDateTime,
   onLoadTestDetail,
   onToggleTestBlock,
   onDeleteTest,
@@ -168,6 +170,7 @@ function ReportTestsTable({
   tests: ReportTestRecord[];
   reportsLoading: boolean;
   currentUser: AuthUser;
+  formatUploadDateTime: (value: string | null | undefined) => string;
   onLoadTestDetail: (testId: number) => void;
   onToggleTestBlock: (test: ReportTestRecord) => void;
   onDeleteTest: (test: ReportTestRecord) => void;
@@ -198,7 +201,7 @@ function ReportTestsTable({
                 <td>{test.semester || '-'}</td>
                 <td><span style={{ fontSize: '.85rem' }}>{test.uploaded_by_name || test.uploaded_by || '-'}</span></td>
                 <td><span className="badge badge-info">{test.student_count || 0}</span></td>
-                <td style={{ fontSize: '.82rem' }}>{(test.uploaded_at || '').slice(0, 16)}</td>
+                <td style={{ fontSize: '.82rem' }}>{formatUploadDateTime(test.uploaded_at)}</td>
                 <td>
                   <div className="btn-group">
                     <button
@@ -278,6 +281,7 @@ export default function ReportsTab({
   uploadingReport,
   ScopeBreadcrumb,
   formatYearLevel,
+  formatUploadDateTime,
   getDefaultBatchNameForYearLevel,
   readSummaryMetric,
   onBackFromTestDetail,
@@ -727,6 +731,7 @@ export default function ReportsTab({
           tests={reportTestsBySemester.sem1}
           reportsLoading={reportsLoading}
           currentUser={currentUser}
+          formatUploadDateTime={formatUploadDateTime}
           onLoadTestDetail={onLoadTestDetail}
           onToggleTestBlock={onToggleTestBlock}
           onDeleteTest={onDeleteTest}
@@ -736,6 +741,7 @@ export default function ReportsTab({
           tests={reportTestsBySemester.sem2}
           reportsLoading={reportsLoading}
           currentUser={currentUser}
+          formatUploadDateTime={formatUploadDateTime}
           onLoadTestDetail={onLoadTestDetail}
           onToggleTestBlock={onToggleTestBlock}
           onDeleteTest={onDeleteTest}

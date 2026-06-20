@@ -26,9 +26,9 @@ type MessagesTabProps = {
   SmartDateInput: ComponentType<SmartDateInputProps>;
   onReloadAdminMessages: (filters?: MessageFilters) => void;
   onAdminMessageDayChange: (nextValue: string) => void;
+  onAdminMessageFilterChange: (patch: Partial<MessageFilters>) => void;
   onAdminMessageSearchChange: (nextValue: string) => void;
   onResetAdminMessageFilters: () => void;
-  onPickAdminMessageDay: (day: string) => void;
   onToggleSelectAll: (checked: boolean) => void;
   onToggleSelectMessage: (id: number, checked: boolean) => void;
   onDeleteSelected: () => void;
@@ -45,9 +45,9 @@ export default function MessagesTab({
   SmartDateInput,
   onReloadAdminMessages,
   onAdminMessageDayChange,
+  onAdminMessageFilterChange,
   onAdminMessageSearchChange,
   onResetAdminMessageFilters,
-  onPickAdminMessageDay,
   onToggleSelectAll,
   onToggleSelectMessage,
   onDeleteSelected,
@@ -55,6 +55,40 @@ export default function MessagesTab({
   onLoadMore,
 }: MessagesTabProps) {
   const selectedAdminMessageIdSet = useMemo(() => new Set(selectedAdminMessageIds), [selectedAdminMessageIds]);
+  const availableYears = useMemo(() => {
+    const years = Array.from(new Set((adminMessagesData?.messageDays || [])
+      .map((entry) => String(entry.day || '').slice(0, 4))
+      .filter((year) => /^\d{4}$/.test(year))))
+      .sort((a, b) => Number(b) - Number(a));
+    const currentYear = String(new Date().getFullYear());
+    return years.length ? years : [currentYear];
+  }, [adminMessagesData?.messageDays]);
+  const availableDays = useMemo(() => {
+    const selectedYear = String(adminMessageFilters.year || '').trim();
+    const selectedMonth = String(adminMessageFilters.month || '').padStart(2, '0');
+    const days = Array.from(new Set((adminMessagesData?.messageDays || [])
+      .map((entry) => String(entry.day || ''))
+      .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day))
+      .filter((day) => !selectedYear || day.slice(0, 4) === selectedYear)
+      .filter((day) => !adminMessageFilters.month || day.slice(5, 7) === selectedMonth)
+      .map((day) => String(Number(day.slice(8, 10))))))
+      .sort((a, b) => Number(a) - Number(b));
+    return days.length ? days : Array.from({ length: 31 }, (_, index) => String(index + 1));
+  }, [adminMessageFilters.month, adminMessageFilters.year, adminMessagesData?.messageDays]);
+  const monthOptions = [
+    ['1', 'Jan'],
+    ['2', 'Feb'],
+    ['3', 'Mar'],
+    ['4', 'Apr'],
+    ['5', 'May'],
+    ['6', 'Jun'],
+    ['7', 'Jul'],
+    ['8', 'Aug'],
+    ['9', 'Sep'],
+    ['10', 'Oct'],
+    ['11', 'Nov'],
+    ['12', 'Dec'],
+  ];
 
   return (
     <div className="messages-tab-surface" data-tour-id="messages-workspace">
@@ -91,8 +125,47 @@ export default function MessagesTab({
         <div>
           <div className="form-row">
             <div className="form-group">
-              <label className="form-label">Date</label>
+              <label className="form-label">Exact Date</label>
               <SmartDateInput value={adminMessageFilters.day} onChange={onAdminMessageDayChange} />
+            </div>
+            <div className="form-group" style={{ minWidth: 130 }}>
+              <label className="form-label">Year</label>
+              <select
+                className="form-control"
+                value={adminMessageFilters.year}
+                onChange={(event) => onAdminMessageFilterChange({ day: '', year: event.target.value })}
+              >
+                <option value="">All Years</option>
+                {availableYears.map((year) => (
+                  <option key={year} value={year}>{year}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ minWidth: 140 }}>
+              <label className="form-label">Month</label>
+              <select
+                className="form-control"
+                value={adminMessageFilters.month}
+                onChange={(event) => onAdminMessageFilterChange({ day: '', month: event.target.value })}
+              >
+                <option value="">All Months</option>
+                {monthOptions.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ minWidth: 120 }}>
+              <label className="form-label">Day</label>
+              <select
+                className="form-control"
+                value={adminMessageFilters.day_num}
+                onChange={(event) => onAdminMessageFilterChange({ day: '', day_num: event.target.value })}
+              >
+                <option value="">All Days</option>
+                {availableDays.map((day) => (
+                  <option key={day} value={day}>{day}</option>
+                ))}
+              </select>
             </div>
             <div className="form-group" style={{ minWidth: 240 }}>
               <label className="form-label">Search Counselor</label>

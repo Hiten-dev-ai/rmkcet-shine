@@ -475,7 +475,7 @@ export default function CdpTab({
             className="btn btn-outline btn-sm"
             onClick={() => setMarkEntryScopeDialog('subject')}
           >
-            <i className="fas fa-copy"></i> Defaulters
+            <i className="fas fa-copy"></i> Copy Defaulters
           </button>
         </div>
       </div>
@@ -580,7 +580,7 @@ export default function CdpTab({
             className="btn btn-outline btn-sm"
             onClick={() => void handleCopySubjectLecturePlanDefaulters()}
           >
-            <i className="fas fa-copy"></i> Defaulters
+            <i className="fas fa-copy"></i> Copy Defaulters
           </button>
         </div>
       </div>
@@ -852,7 +852,7 @@ export default function CdpTab({
   if (cdpLoading && !cdpData) {
     return (
       <div className="card">
-        <div className="panel-placeholder">Rebuilding CDP scope...</div>
+        <div className="panel-placeholder">Loading CDP workspace...</div>
       </div>
     );
   }
@@ -970,7 +970,7 @@ export default function CdpTab({
                 key={semester}
                 type="button"
                 className="btn btn-outline selection-action-button"
-                onClick={() => onRebuildScope({
+                onClick={() => onLoadCdpOverview({
                   department: cdpData.selectedDepartment,
                   year: cdpData.selectedYear || 1,
                   semester,
@@ -1163,7 +1163,7 @@ export default function CdpTab({
                       className="btn btn-outline btn-sm"
                       onClick={() => void handleCopySubjectDailyAttendanceDefaulters()}
                     >
-                      <i className="fas fa-copy"></i> Defaulters
+                      <i className="fas fa-copy"></i> Copy Defaulters
                     </button>
                   </div>
                 </div>

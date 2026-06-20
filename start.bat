@@ -300,9 +300,12 @@ echo   Press Ctrl+C in this window to stop the running services.
 echo  ============================================
 echo.
 
-timeout /t 3 /nobreak >nul
-if "%OPEN_BROWSER%"=="1" start "" %CLIENT_URL%
-if "%OPEN_BROWSER%"=="2" start "" %CLIENT_URL%
+if "%OPEN_BROWSER%"=="1" (
+    start "" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\scripts\wait-open-client.ps1" -ClientUrl "%CLIENT_URL%" -TimeoutSeconds 90
+)
+if "%OPEN_BROWSER%"=="2" (
+    start "" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\scripts\wait-open-client.ps1" -ClientUrl "%CLIENT_URL%" -ServerUrl "%SERVER_URL%" -TimeoutSeconds 180
+)
 
 echo  [SUCCESS] %MODE_LABEL% launch initiated in this window.
 call npm.cmd run %NPM_SCRIPT%

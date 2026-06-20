@@ -204,14 +204,8 @@ body.light-theme .logout-btn:hover {
 }
 
 .notification-toast-stack {
-  position: fixed;
-  z-index: 2600;
-  top: 86px;
-  right: 24px;
-  width: min(390px, calc(100vw - 32px));
   display: grid;
   gap: 10px;
-  pointer-events: none;
 }
 
 .notification-toast-card {
@@ -1482,12 +1476,15 @@ body.light-theme .selection-shell {
    FLASH MESSAGES
    ============================================================ */
 .flash-container { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+.app-toast-stack,
 .flash-toast-container {
   position: fixed;
   top: 86px;
   right: 24px;
   z-index: 3000;
-  width: min(380px, calc(100vw - 28px));
+  width: min(390px, calc(100vw - 28px));
+  display: grid;
+  gap: 10px;
   pointer-events: none;
 }
 .flash {
@@ -1524,6 +1521,7 @@ body.light-theme .selection-shell {
 @keyframes slideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 900px) {
+  .app-toast-stack,
   .flash-toast-container {
     top: 72px;
     right: 12px;

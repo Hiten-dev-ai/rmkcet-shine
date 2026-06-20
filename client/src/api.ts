@@ -1020,9 +1020,10 @@ export async function deleteAdminMessages(ids: number[]) {
   return parseJson<{ success: boolean; deleted: number }>(response);
 }
 
-export async function getMonitoringOverview(options?: { historyLimit?: number }) {
+export async function getMonitoringOverview(options?: { historyLimit?: number; date?: string }) {
   const params = new URLSearchParams();
   if (options?.historyLimit) params.set('historyLimit', String(options.historyLimit));
+  if (options?.date) params.set('date', options.date);
   const query = params.toString();
   const response = await fetch(`/api/monitoring/overview${query ? `?${query}` : ''}`, {
     credentials: 'include',
@@ -1066,11 +1067,15 @@ export async function cleanupSessions() {
   return parseJson<{ success: true }>(response);
 }
 
-export async function sendSessionHeartbeat() {
+export async function sendSessionHeartbeat(options?: { userActive?: boolean }) {
   const response = await fetch('/api/session/heartbeat', {
     method: 'POST',
     credentials: 'include',
-    headers: { Accept: 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({ userActive: Boolean(options?.userActive) }),
   });
   return parseJson<{ success: true; now: string }>(response);
 }

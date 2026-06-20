@@ -789,6 +789,7 @@ export interface SessionMonitoringRecord {
   user_agent: string;
   login_time: string;
   last_activity: string;
+  last_user_activity?: string;
   is_active: number;
   forced_logout: number;
   logout_reason: string;
@@ -825,6 +826,9 @@ export interface SessionStatisticsRecord {
 }
 
 export interface MonitoringOverviewPayload {
+  filters?: {
+    date: string;
+  };
   sessions: SessionMonitoringRecord[];
   stats: SessionStatisticsRecord;
   history: SessionHistoryRecord[];

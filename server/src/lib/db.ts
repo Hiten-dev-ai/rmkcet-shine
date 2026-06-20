@@ -34,6 +34,7 @@ function configureDatabaseConnection(database: Database.Database) {
   database.pragma('journal_mode = WAL');
   ensureBaseSchema(database);
   ensureColumn(database, 'active_sessions', 'auth_method', "TEXT NOT NULL DEFAULT 'password'");
+  ensureColumn(database, 'active_sessions', 'last_user_activity', 'TIMESTAMP');
   ensureColumn(database, 'users', 'locked_until', 'TEXT');
   ensureColumn(database, 'users', 'login_email', 'TEXT');
   ensureColumn(database, 'users', 'designation', "TEXT NOT NULL DEFAULT ''");
@@ -45,6 +46,10 @@ function configureDatabaseConnection(database: Database.Database) {
       UPDATE users
       SET login_email = LOWER(TRIM(email))
       WHERE COALESCE(TRIM(login_email), '') = '';
+
+      UPDATE active_sessions
+      SET last_user_activity = COALESCE(last_user_activity, last_activity, login_time, CURRENT_TIMESTAMP)
+      WHERE last_user_activity IS NULL OR TRIM(COALESCE(last_user_activity, '')) = '';
     `);
   } catch {
     // Older or empty databases may not have the users table during bootstrap.
@@ -266,6 +271,7 @@ function ensureBaseSchema(database: Database.Database) {
       user_email TEXT NOT NULL,
       login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_user_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       ip_address TEXT,
       user_agent TEXT,
       browser_info TEXT,
@@ -1216,18 +1222,27 @@ export function forceLogoutUser(email: string, reason = 'admin_action') {
   db.prepare('UPDATE users SET session_id = NULL WHERE email = ?').run(normalizedEmail);
 }
 
-export function getActiveSessions() {
+export function getActiveSessions(options?: { date?: string | null }) {
+  const date = String(options?.date || '').trim();
+  const where = ['s.is_active = 1'];
+  const params: unknown[] = [];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    where.push('DATE(s.login_time) = ?');
+    params.push(date);
+  }
   return rows<SqlRow>(
     `
       SELECT s.*, u.name, u.role, u.department
       FROM active_sessions s
       LEFT JOIN users u ON s.user_email = u.email
-      WHERE s.is_active = 1
-      ORDER BY s.last_activity DESC
+      WHERE ${where.join(' AND ')}
+      ORDER BY COALESCE(s.last_user_activity, s.last_activity) DESC
     `,
+    params,
   ).map((item) => {
     const lastActivity = String(item.last_activity || '');
-    const date = parseSqlDate(lastActivity);
+    const lastUserActivity = String(item.last_user_activity || item.last_activity || '');
+    const date = parseSqlDate(lastUserActivity);
     const diff = date ? Math.floor((Date.now() - date.getTime()) / 1000) : NaN;
     let status: SessionMonitoringRecord['status'] = 'Unknown';
     if (Number.isFinite(diff)) {
@@ -1247,10 +1262,11 @@ export function getActiveSessions() {
       user_agent: String(item.user_agent || ''),
       login_time: String(item.login_time || ''),
       last_activity: lastActivity,
+      last_user_activity: lastUserActivity,
       is_active: Number(item.is_active || 0),
       forced_logout: Number(item.forced_logout || 0),
       logout_reason: String(item.logout_reason || ''),
-      time_ago: formatTimeAgo(lastActivity),
+      time_ago: formatTimeAgo(lastUserActivity),
       status,
     } satisfies SessionMonitoringRecord;
   });
@@ -1468,24 +1484,29 @@ export function getOauthAttemptStatistics() {
   };
 }
 
-export function getSessionHistory(limit = 100, userEmail?: string | null) {
-  const query = userEmail
-    ? `
-        SELECT s.*, u.name, u.role, u.department
-        FROM active_sessions s
-        LEFT JOIN users u ON s.user_email = u.email
-        WHERE s.user_email = ?
-        ORDER BY s.login_time DESC
-        LIMIT ?
-      `
-    : `
-        SELECT s.*, u.name, u.role, u.department
-        FROM active_sessions s
-        LEFT JOIN users u ON s.user_email = u.email
-        ORDER BY s.login_time DESC
-        LIMIT ?
-      `;
-  const params = userEmail ? [String(userEmail || '').trim().toLowerCase(), limit] : [limit];
+export function getSessionHistory(limit = 100, userEmail?: string | null, options?: { date?: string | null }) {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  const safeUserEmail = String(userEmail || '').trim().toLowerCase();
+  const safeDate = String(options?.date || '').trim();
+  if (safeUserEmail) {
+    where.push('s.user_email = ?');
+    params.push(safeUserEmail);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) {
+    where.push('DATE(s.login_time) = ?');
+    params.push(safeDate);
+  }
+  params.push(limit);
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const query = `
+    SELECT s.*, u.name, u.role, u.department
+    FROM active_sessions s
+    LEFT JOIN users u ON s.user_email = u.email
+    ${whereSql}
+    ORDER BY s.login_time DESC
+    LIMIT ?
+  `;
   const sessionRows = rows<SqlRow>(query, params).map((item) => {
     const loginDate = parseSqlDate(String(item.login_time || ''));
     const lastDate = parseSqlDate(String(item.last_activity || item.login_time || ''));
@@ -1512,23 +1533,24 @@ export function getSessionHistory(limit = 100, userEmail?: string | null) {
     } satisfies SessionHistoryRecord;
   });
 
-  const oauthAttemptQuery = userEmail
-    ? `
-        SELECT *
-        FROM oauth_login_attempts
-        WHERE LOWER(COALESCE(email, '')) = ?
-          AND LOWER(COALESCE(failure_code, '')) IN ('user_not_linked', 'password_unauthorized')
-        ORDER BY attempt_time DESC
-        LIMIT ?
-      `
-    : `
-        SELECT *
-        FROM oauth_login_attempts
-        WHERE LOWER(COALESCE(failure_code, '')) IN ('user_not_linked', 'password_unauthorized')
-        ORDER BY attempt_time DESC
-        LIMIT ?
-      `;
-  const oauthAttemptParams = userEmail ? [String(userEmail || '').trim().toLowerCase(), limit] : [limit];
+  const oauthWhere = ["LOWER(COALESCE(failure_code, '')) IN ('user_not_linked', 'password_unauthorized')"];
+  const oauthAttemptParams: unknown[] = [];
+  if (safeUserEmail) {
+    oauthWhere.push("LOWER(COALESCE(email, '')) = ?");
+    oauthAttemptParams.push(safeUserEmail);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) {
+    oauthWhere.push('DATE(attempt_time) = ?');
+    oauthAttemptParams.push(safeDate);
+  }
+  oauthAttemptParams.push(limit);
+  const oauthAttemptQuery = `
+    SELECT *
+    FROM oauth_login_attempts
+    WHERE ${oauthWhere.join(' AND ')}
+    ORDER BY attempt_time DESC
+    LIMIT ?
+  `;
   const oauthAttemptRows = rows<SqlRow>(oauthAttemptQuery, oauthAttemptParams).map((item) => ({
     session_id: `oauth-attempt:${String(item.attempt_id || item.id || '')}`,
     user_email: String(item.email || ''),
@@ -1604,9 +1626,9 @@ export function registerSession(userEmail: string, ipAddress: string, userAgent:
 
   db.prepare(`
     INSERT INTO active_sessions (
-      session_id, user_email, login_time, last_activity, ip_address, user_agent, browser_info, tab_id, is_active, forced_logout, auth_method
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
-  `).run(sessionId, userEmail, now, now, ipAddress, userAgent, userAgent.slice(0, 100), randomUUID(), authMethod);
+      session_id, user_email, login_time, last_activity, last_user_activity, ip_address, user_agent, browser_info, tab_id, is_active, forced_logout, auth_method
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
+  `).run(sessionId, userEmail, now, now, now, ipAddress, userAgent, userAgent.slice(0, 100), randomUUID(), authMethod);
 
   db.prepare('UPDATE users SET last_login = ?, last_activity = ?, session_id = ? WHERE email = ?').run(now, now, sessionId, userEmail);
   return sessionId;
@@ -1653,6 +1675,18 @@ export function validateSession(sessionId: string) {
   db.prepare('UPDATE active_sessions SET last_activity = ? WHERE session_id = ?').run(now, sessionId);
   db.prepare('UPDATE users SET last_activity = ? WHERE email = ?').run(now, String(session.user_email || ''));
   return toAuthUser(session);
+}
+
+export function updateSessionHeartbeat(sessionId: string, options?: { userActive?: boolean }) {
+  const safeSessionId = String(sessionId || '').trim();
+  if (!safeSessionId) return false;
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  if (options?.userActive) {
+    db.prepare('UPDATE active_sessions SET last_activity = ?, last_user_activity = ? WHERE session_id = ? AND is_active = 1').run(now, now, safeSessionId);
+  } else {
+    db.prepare('UPDATE active_sessions SET last_activity = ? WHERE session_id = ? AND is_active = 1').run(now, safeSessionId);
+  }
+  return true;
 }
 
 export function getDashboardMetrics(user: AuthUser | null) {
@@ -2606,6 +2640,7 @@ export interface SessionMonitoringRecord {
   user_agent: string;
   login_time: string;
   last_activity: string;
+  last_user_activity: string;
   is_active: number;
   forced_logout: number;
   logout_reason: string;
@@ -5106,6 +5141,10 @@ function normalizeNotificationKey(value: unknown) {
   return String(value || '').trim();
 }
 
+function escapeSqlLikePattern(value: string) {
+  return String(value || '').replace(/[\\%_]/g, (item) => `\\${item}`);
+}
+
 function normalizeUserPreferenceTheme(value: unknown) {
   const theme = String(value || '').trim().toLowerCase();
   return theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : '';
@@ -5186,9 +5225,10 @@ export function updateUserPreferences(
 export function getNotificationStatesForUser(userEmail: string) {
   const safeEmail = normalizeNotificationUserEmail(userEmail);
   if (!safeEmail) return { readKeys: [] as string[], deletedKeys: [] as string[] };
+  const legacyRoleEmailPattern = `${escapeSqlLikePattern(safeEmail)}::\\_\\_shine\\_role\\_\\_:%`;
   const stateRows = rows<{ notification_key: string; status: string }>(
-    'SELECT notification_key, status FROM notification_states WHERE user_email = ?',
-    [safeEmail],
+    "SELECT notification_key, status FROM notification_states WHERE user_email = ? OR user_email LIKE ? ESCAPE '\\'",
+    [safeEmail, legacyRoleEmailPattern],
   );
   const readKeys: string[] = [];
   const deletedKeys: string[] = [];

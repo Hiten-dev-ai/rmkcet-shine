@@ -11,13 +11,13 @@ type MonitoringTabProps = {
   monitoringSearch: string;
   monitoringStatusFilter: string;
   monitoringAuthFilter: string;
-  monitoringSortBy: string;
+  monitoringDateFilter: string;
   filteredMonitoringSessions: SessionMonitoringRecord[];
   filteredMonitoringHistory: SessionHistoryRecord[];
   onMonitoringSearchChange: (value: string) => void;
   onMonitoringStatusFilterChange: (value: string) => void;
   onMonitoringAuthFilterChange: (value: string) => void;
-  onMonitoringSortChange: (value: string) => void;
+  onMonitoringDateFilterChange: (value: string) => void;
   onMonitoringReset: () => void;
   onMonitoringRefresh: () => void;
   onLogoutAllUsers: () => void;
@@ -32,13 +32,13 @@ export default function MonitoringTab({
   monitoringSearch,
   monitoringStatusFilter,
   monitoringAuthFilter,
-  monitoringSortBy,
+  monitoringDateFilter,
   filteredMonitoringSessions,
   filteredMonitoringHistory,
   onMonitoringSearchChange,
   onMonitoringStatusFilterChange,
   onMonitoringAuthFilterChange,
-  onMonitoringSortChange,
+  onMonitoringDateFilterChange,
   onMonitoringReset,
   onMonitoringRefresh,
   onLogoutAllUsers,
@@ -55,8 +55,8 @@ export default function MonitoringTab({
     filteredMonitoringHistory.length,
     filteredMonitoringSessions.length,
     monitoringAuthFilter,
+    monitoringDateFilter,
     monitoringSearch,
-    monitoringSortBy,
     monitoringStatusFilter,
   ]);
 
@@ -134,13 +134,13 @@ export default function MonitoringTab({
             </select>
           </div>
           <div className="form-group" style={{ minWidth: 180 }}>
-            <label className="form-label">Date Sort</label>
-            <select className="form-control" value={monitoringSortBy} onChange={(event) => onMonitoringSortChange(event.target.value)}>
-              <option value="last_activity_desc">Last Activity: Newest</option>
-              <option value="last_activity_asc">Last Activity: Oldest</option>
-              <option value="login_desc">Login Time: Newest</option>
-              <option value="login_asc">Login Time: Oldest</option>
-            </select>
+            <label className="form-label">Session Date</label>
+            <input
+              className="form-control"
+              type="date"
+              value={monitoringDateFilter}
+              onChange={(event) => onMonitoringDateFilterChange(event.target.value)}
+            />
           </div>
           <div className="form-group" style={{ minWidth: 120, alignSelf: 'end' }}>
             <button type="button" className="btn btn-outline btn-sm" onClick={onMonitoringReset}>
@@ -189,7 +189,7 @@ export default function MonitoringTab({
                   <td>{session.department || 'N/A'}</td>
                   <td><span className={`badge ${session.status === 'Active' ? 'badge-success' : session.status === 'Idle' ? 'badge-warning' : 'badge-muted'}`}>{session.status}</span></td>
                   <td style={{ fontSize: '.82rem' }}>
-                    <div>{formatUtcSqlDateTime(session.last_activity)}</div>
+                    <div>{formatUtcSqlDateTime(session.last_user_activity || session.last_activity)}</div>
                     <div className="inline-muted">{session.time_ago || '--'}</div>
                   </td>
                   <td>

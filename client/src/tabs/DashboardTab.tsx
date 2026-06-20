@@ -233,35 +233,31 @@ export default function DashboardTab({
             </table>
           </div>
         </div>
-      </div>
 
-      <div className="card">
-        <div className="card-title"><i className="fas fa-trophy"></i> Top Counselors (Completion)</div>
-        <div className="table-wrapper">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Department</th>
-                <th>Students</th>
-                <th>Reached</th>
-                <th>Completion</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(dashboardData?.leaderboard || []).length ? dashboardData!.leaderboard.map((row) => (
-                <tr key={row.email}>
-                  <td><strong>{row.name}</strong><br /><span className="inline-muted">{row.email}</span></td>
-                  <td>{row.department}</td>
-                  <td>{row.student_count}</td>
-                  <td>{row.unique_students_messaged}</td>
-                  <td><span className="badge badge-success">{row.completion_pct}%</span></td>
+        <div className="card dashboard-status-card">
+          <div className="card-title"><i className="fas fa-trophy"></i> Top Faculty</div>
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Department</th>
+                  <th>Completion</th>
                 </tr>
-              )) : (
-                <tr><td colSpan={5} className="text-center text-muted" style={{ padding: 20 }}>No counselor activity yet.</td></tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(dashboardData?.leaderboard || []).length ? dashboardData!.leaderboard.map((row) => (
+                  <tr key={row.email}>
+                    <td><strong>{row.name}</strong><br /><span className="inline-muted">{row.email}</span></td>
+                    <td>{row.department}</td>
+                    <td><span className="badge badge-success">{row.completion_pct}%</span></td>
+                  </tr>
+                )) : (
+                  <tr><td colSpan={3} className="text-center text-muted" style={{ padding: 20 }}>No faculty activity yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>

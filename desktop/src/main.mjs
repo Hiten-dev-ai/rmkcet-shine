@@ -3072,15 +3072,6 @@ async function navigateWorkspaceBrowserSession(url) {
               const nextUrl = ${JSON.stringify(targetUrl)};
               if (!nextUrl) return 'empty';
               if (window.location.href === nextUrl) return 'same';
-              const storageKey = 'shine_whatsapp_web_handoff_started';
-              const hasStarted = sessionStorage.getItem(storageKey) === '1';
-              const currentUrl = String(window.location.href || '');
-              if (!hasStarted && !/\\/send\\//i.test(currentUrl)) {
-                sessionStorage.setItem(storageKey, '1');
-                window.location.assign(nextUrl);
-                return 'assigned';
-              }
-              sessionStorage.setItem(storageKey, '1');
               const existing = document.querySelector('a[data-shine-whatsapp-handoff="true"]');
               if (existing) existing.remove();
               const anchor = document.createElement('a');
@@ -3106,7 +3097,7 @@ async function navigateWorkspaceBrowserSession(url) {
           if (payload?.id === 1) {
             const value = payload?.result?.result?.value;
             cleanup();
-            resolvePromise(value === 'clicked' || value === 'same' || value === 'assigned');
+            resolvePromise(value === 'clicked' || value === 'same');
           }
         } catch {
           // Ignore parse noise from other events.

@@ -294,6 +294,7 @@ const ADMIN_TAB_LABELS: Record<string, string> = {
 
 const DEFAULT_ADMIN_MESSAGES_LIMIT = 300;
 const SCOPE_CACHE_TTL_MS = 30 * 1000;
+const CDP_CACHE_TTL_MS = 10 * 60 * 1000;
 const ADMIN_MESSAGES_LIMIT_STEP = 300;
 const MONITORING_CACHE_TTL_MS = 10 * 1000;
 const MONITORING_HISTORY_LIMIT = 75;
@@ -729,18 +730,32 @@ function getRoleBadgeClass(role: Role) {
   return 'badge-role-counselor';
 }
 
+function getNotificationIdentity(user: AuthUser | null) {
+  return String(user?.login_email || user?.email || 'guest').trim().toLowerCase();
+}
+
 function getNotificationStorageKey(user: AuthUser | null) {
-  return `shine_notification_seen:${user?.email || 'guest'}`;
+  return `shine_notification_seen:${getNotificationIdentity(user)}`;
 }
 
 function getDeletedNotificationStorageKey(user: AuthUser | null) {
-  return `shine_notification_deleted:${user?.email || 'guest'}`;
+  return `shine_notification_deleted:${getNotificationIdentity(user)}`;
+}
+
+function getLegacyNotificationStorageKey(user: AuthUser | null) {
+  return `shine_notification_seen:${String(user?.email || 'guest').trim().toLowerCase()}`;
+}
+
+function getLegacyDeletedNotificationStorageKey(user: AuthUser | null) {
+  return `shine_notification_deleted:${String(user?.email || 'guest').trim().toLowerCase()}`;
 }
 
 function readSeenNotificationKeys(user: AuthUser | null) {
   if (typeof window === 'undefined') return new Set<string>();
   try {
-    return new Set(JSON.parse(window.localStorage.getItem(getNotificationStorageKey(user)) || '[]') as string[]);
+    const currentKeys = JSON.parse(window.localStorage.getItem(getNotificationStorageKey(user)) || '[]') as string[];
+    const legacyKeys = JSON.parse(window.localStorage.getItem(getLegacyNotificationStorageKey(user)) || '[]') as string[];
+    return new Set([...currentKeys, ...legacyKeys]);
   } catch {
     return new Set<string>();
   }
@@ -755,7 +770,9 @@ function writeSeenNotificationKeys(user: AuthUser | null, keys: Iterable<string>
 function readDeletedNotificationKeys(user: AuthUser | null) {
   if (typeof window === 'undefined') return new Set<string>();
   try {
-    return new Set(JSON.parse(window.localStorage.getItem(getDeletedNotificationStorageKey(user)) || '[]') as string[]);
+    const currentKeys = JSON.parse(window.localStorage.getItem(getDeletedNotificationStorageKey(user)) || '[]') as string[];
+    const legacyKeys = JSON.parse(window.localStorage.getItem(getLegacyDeletedNotificationStorageKey(user)) || '[]') as string[];
+    return new Set([...currentKeys, ...legacyKeys]);
   } catch {
     return new Set<string>();
   }
@@ -813,6 +830,19 @@ function notificationTimestamp(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function getNotificationDisplayKey(key: string) {
+  const value = String(key || '').trim();
+  const linkedTest = value.match(/^linked-counselor:test-assigned:[^:]+:(.+)$/);
+  if (linkedTest) return `work:test-assigned:${linkedTest[1]}`;
+  const counselorTest = value.match(/^counselor:test-assigned:(.+)$/);
+  if (counselorTest) return `work:test-assigned:${counselorTest[1]}`;
+  const linkedNotice = value.match(/^linked-counselor:notice-assigned:[^:]+:(.+)$/);
+  if (linkedNotice) return `work:notice-assigned:${linkedNotice[1]}`;
+  const counselorNotice = value.match(/^counselor:notice-assigned:(.+)$/);
+  if (counselorNotice) return `work:notice-assigned:${counselorNotice[1]}`;
+  return value;
+}
+
 function buildAppNotifications(
   user: AuthUser | null,
   pendingNotices: NoticeRecord[],
@@ -832,7 +862,7 @@ function buildAppNotifications(
   const pendingThresholdMs = Math.max(1, Number(options.pendingThresholdDays || 2) || 2) * 24 * 60 * 60 * 1000;
   if (options.updateInfo?.available && options.updateInfo.version) {
     notifications.push({
-      key: `update:${options.updateInfo.version}`,
+      key: `global:update:${options.updateInfo.version}`,
       severity: 'critical',
       title: 'Update released',
       body: `Shine ${options.updateInfo.version} is available.`,
@@ -847,7 +877,7 @@ function buildAppNotifications(
       if (pendingCount <= 0) continue;
       const isOldPending = pendingCount > 0 && uploadedAt && nowMs - (Date.parse(uploadedAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
       notifications.push({
-        key: `test-assigned:${test.test_id || test.id}`,
+        key: `counselor:test-assigned:${test.test_id || test.id}`,
         severity: 'info',
         title: 'Test assigned',
         body: `${test.test_name} ${formatSemesterBadge(test.semester)} is available for ${test.department} ${formatYearLevel(test.year_level || 1)}.`,
@@ -856,7 +886,7 @@ function buildAppNotifications(
       });
       if (isOldPending) {
         notifications.push({
-          key: `test-pending-old:${test.test_id || test.id}`,
+          key: `counselor:test-pending-old:${test.test_id || test.id}`,
           severity: 'critical',
           title: 'Pending reminder',
           body: `${test.test_name} has ${pendingCount} pending student${pendingCount === 1 ? '' : 's'} for more than ${Math.max(1, Number(options.pendingThresholdDays || 2) || 2)} days.`,
@@ -870,7 +900,7 @@ function buildAppNotifications(
       const createdAt = String(notice.created_at || '');
       const isOldPending = createdAt && nowMs - (Date.parse(createdAt.replace(' ', 'T')) || nowMs) >= pendingThresholdMs;
       notifications.push({
-        key: `notice-assigned:${notice.id}`,
+        key: `counselor:notice-assigned:${notice.id}`,
         severity: 'critical',
         title: 'Notice assigned',
         body: noticeTitle,
@@ -879,7 +909,7 @@ function buildAppNotifications(
       });
       if (isOldPending) {
         notifications.push({
-          key: `notice-pending-old:${notice.id}`,
+          key: `counselor:notice-pending-old:${notice.id}`,
           severity: 'critical',
           title: 'Pending reminder',
           body: `${noticeTitle} has been pending for more than ${Math.max(1, Number(options.pendingThresholdDays || 2) || 2)} days.`,
@@ -929,7 +959,7 @@ function buildAppNotifications(
         : pendingRows.filter((row) => user.scopes.some((scope) => scope.department === row.department && Number(scope.year_level) === Number(row.year_level)));
       if (scopeRows.length) {
         notifications.push({
-          key: `digest:${new Date().toISOString().slice(0, 10)}:${options.desktopSettings.higherOfficialDigestScope}:${scopeRows.length}`,
+          key: `${user.role}:digest:${new Date().toISOString().slice(0, 10)}:${options.desktopSettings.higherOfficialDigestScope}:${scopeRows.length}`,
           severity: 'critical',
           title: 'Pending counselor digest',
           body: `${scopeRows.length} counselor${scopeRows.length === 1 ? '' : 's'} have pending work in ${options.desktopSettings.higherOfficialDigestScope === 'all' ? 'all scopes' : 'your allocated scope'}.`,
@@ -964,16 +994,7 @@ function SmartDateInput({
   placeholder?: string;
   id?: string;
 }) {
-  const [dateMode, setDateMode] = useState(Boolean(value));
   const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (value) {
-      setDateMode(true);
-      return;
-    }
-    setDateMode(false);
-  }, [value]);
 
   return (
     <div className="smart-date-input-shell">
@@ -981,35 +1002,28 @@ function SmartDateInput({
         id={id}
         ref={inputRef}
         className="form-control smart-date-input"
-        type={dateMode ? 'date' : 'text'}
+        type="date"
         value={value}
-        placeholder={dateMode ? undefined : placeholder}
-        onFocus={() => setDateMode(true)}
-        onBlur={() => {
-          if (!value) setDateMode(false);
-        }}
+        placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
       />
-      {!dateMode ? (
-        <button
-          type="button"
-          className="smart-date-input-trigger"
-          aria-label="Open date picker"
-          onClick={() => {
-            setDateMode(true);
-            window.requestAnimationFrame(() => {
-              const element = inputRef.current;
-              if (!element) return;
-              element.focus();
-              if ('showPicker' in element && typeof element.showPicker === 'function') {
-                element.showPicker();
-              }
-            });
-          }}
-        >
-          <i className="fas fa-calendar-alt"></i>
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className="smart-date-input-trigger"
+        aria-label="Open date picker"
+        onClick={() => {
+          window.requestAnimationFrame(() => {
+            const element = inputRef.current;
+            if (!element) return;
+            element.focus();
+            if ('showPicker' in element && typeof element.showPicker === 'function') {
+              element.showPicker();
+            }
+          });
+        }}
+      >
+        <i className="fas fa-calendar-alt"></i>
+      </button>
     </div>
   );
 }
@@ -2147,6 +2161,7 @@ export default function App() {
   const databaseOverviewCacheRef = useRef(new Map<string, { timestamp: number; payload: DatabaseOverviewPayload }>());
   const activityScopePrefetchRef = useRef(new Set<string>());
   const activityScopeSeededRef = useRef(new Set<string>());
+  const cdpBackgroundRefreshKeysRef = useRef(new Set<string>());
   const tabWarmupKeyRef = useRef('');
   const [cdpLoading, setCdpLoading] = useState(false);
   const [cdpData, setCdpData] = useState<CdpOverviewPayload | null>(null);
@@ -2282,6 +2297,7 @@ export default function App() {
   const [monitoringStatusFilter, setMonitoringStatusFilter] = useState('all');
   const [monitoringAuthFilter, setMonitoringAuthFilter] = useState('all');
   const [monitoringSortBy, setMonitoringSortBy] = useState('last_activity_desc');
+  const [monitoringDateFilter, setMonitoringDateFilter] = useState('');
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseData, setDatabaseData] = useState<DatabaseOverviewPayload | null>(null);
   const [databaseBatchName, setDatabaseBatchName] = useState('');
@@ -2335,6 +2351,8 @@ export default function App() {
   const [appWindowFocused, setAppWindowFocused] = useState(() => (
     typeof document !== 'undefined' ? document.hasFocus() : true
   ));
+  const lastUserActivityAtRef = useRef(Date.now());
+  const lastHeartbeatUserActivityAtRef = useRef(0);
   const counselorBatchTimerRef = useRef<number | null>(null);
   const counselorBatchQueueRef = useRef<CounselorSendReportRow[]>([]);
   const counselorBatchIndexRef = useRef(0);
@@ -2526,10 +2544,6 @@ export default function App() {
       const entry = { timestamp: now, payload: payload.prefetched.cdp };
       cdpOverviewCacheRef.current.set(key, entry);
       seeds.push({ bucket: 'cdp', key, entry });
-      if (key !== buildCdpOverviewCacheKey()) {
-        cdpOverviewCacheRef.current.set(buildCdpOverviewCacheKey(), entry);
-        seeds.push({ bucket: 'cdp', key: buildCdpOverviewCacheKey(), entry });
-      }
     }
 
     seedPersistentCacheEntries(namespace, 'dashboard', seeds.filter((item) => item.bucket === 'dashboard').map((item) => ({ key: item.key, entry: item.entry })));
@@ -2926,9 +2940,44 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrap?.user) return;
+    const markUserActivity = () => {
+      lastUserActivityAtRef.current = Date.now();
+    };
+    const passiveOptions: AddEventListenerOptions = { passive: true, capture: true };
+    const activeOptions: AddEventListenerOptions = { capture: true };
+    markUserActivity();
+    window.addEventListener('pointerdown', markUserActivity, passiveOptions);
+    window.addEventListener('keydown', markUserActivity, activeOptions);
+    window.addEventListener('wheel', markUserActivity, passiveOptions);
+    window.addEventListener('touchstart', markUserActivity, passiveOptions);
+    window.addEventListener('scroll', markUserActivity, passiveOptions);
+    window.addEventListener('focus', markUserActivity, activeOptions);
+    document.addEventListener('visibilitychange', markUserActivity, activeOptions);
+    return () => {
+      window.removeEventListener('pointerdown', markUserActivity, passiveOptions);
+      window.removeEventListener('keydown', markUserActivity, activeOptions);
+      window.removeEventListener('wheel', markUserActivity, passiveOptions);
+      window.removeEventListener('touchstart', markUserActivity, passiveOptions);
+      window.removeEventListener('scroll', markUserActivity, passiveOptions);
+      window.removeEventListener('focus', markUserActivity, activeOptions);
+      document.removeEventListener('visibilitychange', markUserActivity, activeOptions);
+    };
+  }, [bootstrap?.user?.email]);
+
+  useEffect(() => {
+    if (!bootstrap?.user) return;
     const heartbeatSeconds = Math.max(10, Number(bootstrap.appConfig.session_heartbeat_interval || 30) || 30);
     const timer = window.setInterval(() => {
-      void sendSessionHeartbeat().catch(() => undefined);
+      const userActivityAt = lastUserActivityAtRef.current;
+      const userActive = userActivityAt > lastHeartbeatUserActivityAtRef.current;
+      if (userActive) {
+        lastHeartbeatUserActivityAtRef.current = userActivityAt;
+      }
+      void sendSessionHeartbeat({ userActive }).catch(() => {
+        if (userActive) {
+          lastHeartbeatUserActivityAtRef.current = 0;
+        }
+      });
     }, heartbeatSeconds * 1000);
     return () => window.clearInterval(timer);
   }, [bootstrap?.user?.email, bootstrap?.appConfig.session_heartbeat_interval]);
@@ -3021,6 +3070,7 @@ export default function App() {
       month: '',
       day_num: '',
     });
+    setAdminMessageSearch('');
     setSelectedAdminMessageIds([]);
   }, [bootstrap?.user?.email]);
 
@@ -3133,16 +3183,6 @@ export default function App() {
         );
       }
 
-      const cdpCacheKey = buildCdpOverviewCacheKey();
-      const cachedCdp = readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cdpCacheKey);
-      if (['admin', 'principal', 'hod'].includes(viewer.role) && (!cachedCdp || Date.now() - cachedCdp.timestamp >= SCOPE_CACHE_TTL_MS)) {
-        warmers.push(
-          () => getCdpOverview().then((payload) => {
-            writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cdpCacheKey, payload);
-          }),
-        );
-      }
-
       const usersCacheKey = buildUsersOverviewCacheKey();
       const cachedUsers = readOverviewCacheEntry(usersOverviewCacheRef, 'users', usersCacheKey);
       if (['admin', 'principal', 'deo'].includes(viewer.role) && (!cachedUsers || Date.now() - cachedUsers.timestamp >= SCOPE_CACHE_TTL_MS)) {
@@ -3184,7 +3224,7 @@ export default function App() {
     if (activeTab !== 'monitoring') return;
     if (bootstrap.user.role !== 'admin') return;
     void loadMonitoringOverview({ preferCache: true });
-  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab]);
+  }, [bootstrap?.user?.email, bootstrap?.user?.role, activeTab, monitoringDateFilter]);
 
   useEffect(() => {
     if (!bootstrap?.user) return;
@@ -3745,10 +3785,12 @@ export default function App() {
     });
     const getTime = (value: string | null | undefined) => Date.parse(String(value || '').replace(' ', 'T')) || 0;
     filtered.sort((a, b) => {
-      if (monitoringSortBy === 'last_activity_asc') return getTime(a.last_activity) - getTime(b.last_activity);
+      const aUserActivity = a.last_user_activity || a.last_activity;
+      const bUserActivity = b.last_user_activity || b.last_activity;
+      if (monitoringSortBy === 'last_activity_asc') return getTime(aUserActivity) - getTime(bUserActivity);
       if (monitoringSortBy === 'login_asc') return getTime(a.login_time) - getTime(b.login_time);
       if (monitoringSortBy === 'login_desc') return getTime(b.login_time) - getTime(a.login_time);
-      return getTime(b.last_activity) - getTime(a.last_activity);
+      return getTime(bUserActivity) - getTime(aUserActivity);
     });
     return filtered;
   }, [deferredMonitoringSearch, monitoringAuthFilter, monitoringData?.sessions, monitoringSortBy, monitoringStatusFilter]);
@@ -3820,9 +3862,11 @@ export default function App() {
 
   const currentUser = bootstrap?.user || null;
   const queryClient = useQueryClient();
+  const notificationIdentity = getNotificationIdentity(currentUser);
   const lowPriorityPollingPaused = documentHidden || desktopWhatsappWorkspaceStarted || desktopWhatsappWorkspaceBusy;
+  const desktopNotificationPollingPaused = desktopWhatsappWorkspaceStarted || desktopWhatsappWorkspaceBusy;
   const notificationStateQuery = useQuery({
-    queryKey: queryKeys.notifications(currentUser?.email || ''),
+    queryKey: queryKeys.notifications(notificationIdentity),
     queryFn: () => measureAsync('client-api', 'notifications.state', getNotificationState),
     enabled: Boolean(currentUser) && !lowPriorityPollingPaused,
     refetchInterval: currentUser && !lowPriorityPollingPaused ? 30_000 : false,
@@ -3831,7 +3875,7 @@ export default function App() {
   });
   const deletedNotificationKeys = useMemo(
     () => new Set([...readDeletedNotificationKeys(currentUser), ...serverNotificationState.deletedKeys]),
-    [currentUser?.email, notificationDeletedVersion, serverNotificationState.deletedKeys],
+    [notificationIdentity, notificationDeletedVersion, serverNotificationState.deletedKeys],
   );
   const appNotifications = useMemo(
     () => [
@@ -3861,7 +3905,7 @@ export default function App() {
   );
   const seenNotificationKeys = useMemo(
     () => new Set([...readSeenNotificationKeys(currentUser), ...serverNotificationState.readKeys, ...serverNotificationState.deletedKeys]),
-    [currentUser?.email, notificationSeenVersion, serverNotificationState.deletedKeys, serverNotificationState.readKeys],
+    [notificationIdentity, notificationSeenVersion, serverNotificationState.deletedKeys, serverNotificationState.readKeys],
   );
   const unreadNotifications = useMemo(
     () => appNotifications.filter((item) => !seenNotificationKeys.has(item.key)),
@@ -3993,7 +4037,7 @@ export default function App() {
     } else if (notificationStateQuery.isError) {
       setServerNotificationState({ readKeys: [], deletedKeys: [] });
     }
-  }, [currentUser?.email, notificationStateQuery.data, notificationStateQuery.isError]);
+  }, [notificationIdentity, notificationStateQuery.data, notificationStateQuery.isError]);
 
   const markNotificationsRead = (keys: string[]) => {
     const uniqueKeys = normalizeNotificationKeys(keys);
@@ -4003,12 +4047,12 @@ export default function App() {
     writeSeenNotificationKeys(currentUser, seen);
     setServerNotificationState((prev) => mergeNotificationState(prev, { readKeys: uniqueKeys }));
     setNotificationSeenVersion((prev) => prev + 1);
-    queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), (prev: { readKeys?: string[]; deletedKeys?: string[] } | undefined) => (
+    queryClient.setQueryData(queryKeys.notifications(notificationIdentity), (prev: { readKeys?: string[]; deletedKeys?: string[] } | undefined) => (
       mergeNotificationState(prev || { readKeys: [], deletedKeys: [] }, { readKeys: uniqueKeys })
     ));
     void markNotificationKeysRead(uniqueKeys)
       .then((state) => {
-        queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), state);
+        queryClient.setQueryData(queryKeys.notifications(notificationIdentity), state);
         setServerNotificationState((prev) => mergeNotificationState(prev, state));
       })
       .catch(() => undefined);
@@ -4023,12 +4067,12 @@ export default function App() {
     writeDeletedNotificationKeys(currentUser, deleted);
     setServerNotificationState((prev) => mergeNotificationState(prev, { readKeys: uniqueKeys, deletedKeys: uniqueKeys }));
     setNotificationDeletedVersion((prev) => prev + 1);
-    queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), (prev: { readKeys?: string[]; deletedKeys?: string[] } | undefined) => (
+    queryClient.setQueryData(queryKeys.notifications(notificationIdentity), (prev: { readKeys?: string[]; deletedKeys?: string[] } | undefined) => (
       mergeNotificationState(prev || { readKeys: [], deletedKeys: [] }, { readKeys: uniqueKeys, deletedKeys: uniqueKeys })
     ));
     void deleteNotificationKeys(uniqueKeys)
       .then((state) => {
-        queryClient.setQueryData(queryKeys.notifications(currentUser?.email || ''), state);
+        queryClient.setQueryData(queryKeys.notifications(notificationIdentity), state);
         setServerNotificationState((prev) => mergeNotificationState(prev, state));
       })
       .catch(() => undefined);
@@ -4084,7 +4128,7 @@ export default function App() {
 
   const buildTestNotification = (kind: TestNotificationKind, sequence: number, createdAt: string): AppNotificationItem => {
     const dayCount = Math.max(1, Number(bootstrap?.appConfig?.notification_pending_threshold_days || 2) || 2);
-    const baseKey = `test-notification:${kind}:${currentUser?.email || 'guest'}:${Date.now()}:${sequence}`;
+    const baseKey = `test-notification:${kind}:${notificationIdentity || 'guest'}:${Date.now()}:${sequence}`;
     if (kind === 'update') {
       return {
         key: baseKey,
@@ -4256,7 +4300,7 @@ export default function App() {
 
   useEffect(() => {
     if (runtimeConfig.isDesktop || !currentUser || notificationCenterOpen) return;
-    const storageKey = `shine_web_toast_seen:${currentUser.email || currentUser.name || 'user'}`;
+    const storageKey = `shine_web_toast_seen:${notificationIdentity || currentUser.name || 'user'}`;
     let notifiedKeys = new Set<string>();
     try {
       notifiedKeys = new Set(JSON.parse(window.localStorage.getItem(storageKey) || '[]') as string[]);
@@ -4264,21 +4308,21 @@ export default function App() {
       notifiedKeys = new Set<string>();
     }
     const newItems = unreadNotifications
-      .filter((item) => !notifiedKeys.has(item.key))
+      .filter((item) => !notifiedKeys.has(getNotificationDisplayKey(item.key)))
       .slice(0, 4);
     if (!newItems.length) return;
     showForegroundNotificationToast(newItems, { markRead: true });
-    for (const item of newItems) notifiedKeys.add(item.key);
+    for (const item of newItems) notifiedKeys.add(getNotificationDisplayKey(item.key));
     try {
       window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-300)));
     } catch {
       // Toast dedupe is best-effort.
     }
-  }, [currentUser?.email, currentUser?.name, notificationCenterOpen, unreadNotificationKeySignature]);
+  }, [notificationIdentity, currentUser?.name, notificationCenterOpen, unreadNotificationKeySignature]);
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
-    const storageKey = `shine_desktop_toast_seen:${currentUser.email || currentUser.name || 'user'}`;
+    const storageKey = `shine_desktop_toast_seen:${notificationIdentity || currentUser.name || 'user'}`;
     let notifiedKeys = new Set<string>();
     try {
       notifiedKeys = new Set(JSON.parse(window.localStorage.getItem(storageKey) || '[]') as string[]);
@@ -4286,29 +4330,28 @@ export default function App() {
       notifiedKeys = new Set<string>();
     }
     const newItems = unreadNotifications
-      .filter((item) => !notifiedKeys.has(item.key))
+      .filter((item) => !notifiedKeys.has(getNotificationDisplayKey(item.key)))
       .slice(0, 50);
     if (!newItems.length) return;
 
     if (!documentHidden && appWindowFocused) {
       showForegroundNotificationToast(newItems.slice(0, 4));
       const keys = newItems.map((item) => item.key);
-      for (const key of keys) notifiedKeys.add(key);
+      for (const key of keys) notifiedKeys.add(getNotificationDisplayKey(key));
       try {
         window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-300)));
       } catch {
         // Toast dedupe is best-effort.
       }
-      markNotificationsRead(keys);
       return;
     }
 
     let cancelled = false;
     const showUnreadToasts = async () => {
-      const attemptedKeys: string[] = [];
+      const attemptedDisplayKeys: string[] = [];
       for (const item of newItems) {
         if (cancelled) return;
-        attemptedKeys.push(item.key);
+        attemptedDisplayKeys.push(getNotificationDisplayKey(item.key));
         const payload = { title: item.title, body: item.body };
         const shown = await showDesktopNotification(payload);
         if (!shown && !cancelled) {
@@ -4318,13 +4361,12 @@ export default function App() {
         }
       }
       if (cancelled) return;
-      for (const key of attemptedKeys) notifiedKeys.add(key);
+      for (const key of attemptedDisplayKeys) notifiedKeys.add(key);
       try {
         window.localStorage.setItem(storageKey, JSON.stringify(Array.from(notifiedKeys).slice(-300)));
       } catch {
         // Toast dedupe is best-effort.
       }
-      markNotificationsRead(attemptedKeys);
     };
 
     void showUnreadToasts();
@@ -4333,7 +4375,7 @@ export default function App() {
     };
   }, [
     appWindowFocused,
-    currentUser?.email,
+    notificationIdentity,
     currentUser?.name,
     desktopAppSettings?.desktopNotificationsEnabled,
     documentHidden,
@@ -4342,14 +4384,19 @@ export default function App() {
 
   useEffect(() => {
     if (!runtimeConfig.isDesktop || !currentUser || !desktopAppSettings?.desktopNotificationsEnabled) return;
-    if (lowPriorityPollingPaused) return;
-    const refreshDesktopNotifications = async () => {
-      const now = Date.now();
-      const heavyRefreshSeconds = Math.max(
-        300,
+    if (desktopNotificationPollingPaused) return;
+    let cancelled = false;
+    const pollSeconds = Math.max(
+      10,
+      Math.min(
+        3600,
         Number(bootstrap?.appConfig?.desktop_notification_poll_seconds || bootstrap?.appConfig?.desktop_notification_poll_minutes || 30) || 30,
-      );
-      if (now - desktopNotificationBootstrapRefreshRef.current < heavyRefreshSeconds * 1000) return;
+      ),
+    );
+    const refreshDesktopNotifications = async () => {
+      if (cancelled) return;
+      const now = Date.now();
+      if (now - desktopNotificationBootstrapRefreshRef.current < pollSeconds * 1000) return;
       desktopNotificationBootstrapRefreshRef.current = now;
       try {
         await refreshBootstrap();
@@ -4358,12 +4405,19 @@ export default function App() {
       }
     };
     void refreshDesktopNotifications();
+    const timer = window.setInterval(() => {
+      void refreshDesktopNotifications();
+    }, pollSeconds * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [
     bootstrap?.appConfig?.desktop_notification_poll_minutes,
     bootstrap?.appConfig?.desktop_notification_poll_seconds,
     currentUser?.email,
     desktopAppSettings?.desktopNotificationsEnabled,
-    lowPriorityPollingPaused,
+    desktopNotificationPollingPaused,
   ]);
 
   useEffect(() => {
@@ -4627,6 +4681,8 @@ export default function App() {
     setLoginOtpState(null);
     if (forceDefaultTab || targetTab) {
       const nextTab = targetTab || payload.defaultTab || getDefaultTab(payload.user);
+      setNotificationCenterOpen(false);
+      setCreditsPageOpen(false);
       setActiveTab(nextTab);
       setMobileSidebarOpen(false);
       return nextTab;
@@ -4740,6 +4796,7 @@ export default function App() {
     setRoleSwitchLoading(true);
     setRoleSwitchError('');
     try {
+      closeUtilityPages();
       await switchSessionRole(roleSwitchSelectedAccountEmail);
       setRoleSwitchModalOpen(false);
       setRoleSwitchSelectedAccountEmail('');
@@ -5117,6 +5174,8 @@ export default function App() {
     } catch {
       // Ignore localStorage cleanup failures.
     }
+    setFlash(null);
+    setForegroundNotificationToasts([]);
     await logout();
     setLoginOtpState(null);
     await refreshBootstrap();
@@ -5614,7 +5673,8 @@ export default function App() {
     const cached = options?.preferCache === false ? null : readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey);
     if (cached) {
       setCdpData(cached.payload);
-      if (Date.now() - cached.timestamp < SCOPE_CACHE_TTL_MS) return;
+      refreshCdpScopeInBackground(cached.payload);
+      if (Date.now() - cached.timestamp < CDP_CACHE_TTL_MS) return;
     }
     setCdpLoading(!cached);
     try {
@@ -5622,6 +5682,7 @@ export default function App() {
       if (cdpRequestSeqRef.current !== requestSeq) return;
       writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', cacheKey, payload);
       setCdpData(payload);
+      refreshCdpScopeInBackground(payload);
     } catch (error) {
       setCdpData(null);
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load CDP overview.' });
@@ -5630,6 +5691,54 @@ export default function App() {
         setCdpLoading(false);
       }
     }
+  }
+
+  function getCompleteCdpScopeFilters(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    subject_id?: number | null;
+  } | CdpOverviewPayload | null) {
+    if (!filters) return null;
+    const department = 'selectedDepartment' in filters ? filters.selectedDepartment : filters.department;
+    const year = 'selectedYear' in filters ? filters.selectedYear : filters.year;
+    const semester = 'selectedSemester' in filters ? filters.selectedSemester : filters.semester;
+    const subject_id = 'selectedSubjectId' in filters ? filters.selectedSubjectId : filters.subject_id;
+    const normalized = {
+      department: String(department || '').trim(),
+      year: Number(year || 0) || 0,
+      semester: String(semester || '').trim(),
+      subject_id: Number(subject_id || 0) || null,
+    };
+    return normalized.department && normalized.year && normalized.semester ? normalized : null;
+  }
+
+  function refreshCdpScopeInBackground(filters?: {
+    department?: string;
+    year?: number | null;
+    semester?: string;
+    subject_id?: number | null;
+  } | CdpOverviewPayload | null) {
+    const scope = getCompleteCdpScopeFilters(filters);
+    if (!scope) return;
+    const cacheKey = buildCdpOverviewCacheKey(scope);
+    if (cdpBackgroundRefreshKeysRef.current.has(cacheKey)) return;
+    cdpBackgroundRefreshKeysRef.current.add(cacheKey);
+    void rebuildCdpScope({ ...scope, force: true })
+      .then((payload) => {
+        const freshScope = getCompleteCdpScopeFilters(payload);
+        const freshKey = buildCdpOverviewCacheKey(freshScope || scope);
+        writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', freshKey, payload);
+        setCdpData((current) => {
+          const currentScope = getCompleteCdpScopeFilters(current);
+          const currentKey = buildCdpOverviewCacheKey(currentScope || undefined);
+          return currentKey === freshKey ? payload : current;
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        cdpBackgroundRefreshKeysRef.current.delete(cacheKey);
+      });
   }
 
   function buildCdpNavigationKey(filters?: {
@@ -5652,12 +5761,13 @@ export default function App() {
     try {
       const cached = readOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', navigationKey);
       let payload = cached?.payload || null;
-      if (!payload || Date.now() - cached!.timestamp >= SCOPE_CACHE_TTL_MS) {
+      if (!payload || Date.now() - cached!.timestamp >= CDP_CACHE_TTL_MS) {
         payload = await getCdpOverview(filters);
         writeOverviewCacheEntry(cdpOverviewCacheRef, 'cdp', navigationKey, payload);
       }
       cdpDirectNavigationRef.current = true;
       setCdpData(payload);
+      refreshCdpScopeInBackground(payload);
       setCdpLoading(false);
       startTransition(() => setActiveTab('cdp'));
       setMobileSidebarOpen(false);
@@ -5676,7 +5786,6 @@ export default function App() {
     force?: boolean;
   }) {
     setCdpLoading(true);
-    setCdpData(null);
     try {
       const payload = await rebuildCdpScope(filters);
       invalidateOverviewCaches(['cdp']);
@@ -5835,7 +5944,7 @@ export default function App() {
       setFlash({ type: 'success', message: 'Subject deleted successfully.' });
       await loadSubjects(subject.department, subject.year_level, subject.semester);
       if (cdpData?.selectedDepartment === subject.department && cdpData?.selectedYear === subject.year_level && cdpData?.selectedSemester === subject.semester) {
-        await rebuildCdpScopeOverview({ department: subject.department, year: subject.year_level, semester: subject.semester });
+        await loadCdpOverview({ department: subject.department, year: subject.year_level, semester: subject.semester }, { preferCache: false });
       }
     } catch (error) {
       setFlash({ type: 'error', message: error instanceof Error ? error.message : 'Failed to delete subject.' });
@@ -6017,7 +6126,8 @@ export default function App() {
   async function loadMonitoringOverview(options?: { preferCache?: boolean }) {
     const requestSeq = monitoringRequestSeqRef.current + 1;
     monitoringRequestSeqRef.current = requestSeq;
-    const cacheKey = 'monitoring-overview';
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(monitoringDateFilter) ? monitoringDateFilter : '';
+    const cacheKey = `monitoring-overview:${date || 'all'}`;
     const cached = options?.preferCache === false ? null : monitoringOverviewCacheRef.current.get(cacheKey);
     if (cached) {
       setMonitoringData(cached.payload);
@@ -6025,7 +6135,7 @@ export default function App() {
     }
     setMonitoringLoading(!cached);
     try {
-      const payload = await getMonitoringOverview({ historyLimit: MONITORING_HISTORY_LIMIT });
+      const payload = await getMonitoringOverview({ historyLimit: MONITORING_HISTORY_LIMIT, date });
       if (monitoringRequestSeqRef.current !== requestSeq) return;
       monitoringOverviewCacheRef.current.set(cacheKey, { timestamp: Date.now(), payload });
       setMonitoringData(payload);
@@ -9197,17 +9307,15 @@ export default function App() {
           </div>
         </header>
 
-        {flash ? (
-          <div className="flash-toast-container" role="status" aria-live="polite">
-            <div className={`flash flash-toast flash-${flash.type}`}>
-              <i className={`fas ${flash.type === 'success' ? 'fa-check-circle' : flash.type === 'warning' ? 'fa-exclamation-triangle' : flash.type === 'error' ? 'fa-times-circle' : 'fa-info-circle'}`}></i>
-              <span>{flash.message}</span>
-              <button className="flash-close" onClick={() => setFlash(null)}><i className="fas fa-times"></i></button>
-            </div>
-          </div>
-        ) : null}
-        {foregroundNotificationToasts.length ? (
-          <div className="notification-toast-stack" role="status" aria-live="polite">
+        {flash || foregroundNotificationToasts.length ? (
+          <div className="app-toast-stack" role="status" aria-live="polite">
+            {flash ? (
+              <div className={`flash flash-toast flash-${flash.type}`}>
+                <i className={`fas ${flash.type === 'success' ? 'fa-check-circle' : flash.type === 'warning' ? 'fa-exclamation-triangle' : flash.type === 'error' ? 'fa-times-circle' : 'fa-info-circle'}`}></i>
+                <span>{flash.message}</span>
+                <button className="flash-close" type="button" onClick={() => setFlash(null)}><i className="fas fa-times"></i></button>
+              </div>
+            ) : null}
             {foregroundNotificationToasts.map((item) => (
               <article key={item.key} className={`notification-toast-card notification-${item.severity}`}>
                 <span className="notification-toast-dot" aria-hidden="true"></span>
@@ -11154,6 +11262,11 @@ export default function App() {
                   month: '',
                   day_num: '',
                 }))}
+                onAdminMessageFilterChange={(patch) => setAdminMessageFilters((prev) => ({
+                  ...prev,
+                  ...patch,
+                  day: patch.day ?? prev.day,
+                }))}
                 onAdminMessageSearchChange={(nextValue) => {
                   startTransition(() => {
                     setAdminMessageSearch(nextValue);
@@ -11164,11 +11277,6 @@ export default function App() {
                   const next = { day: '', q: '', year: '', month: '', day_num: '' };
                   setAdminMessageFilters(next);
                   setAdminMessageSearch('');
-                  void reloadAdminMessages(next);
-                }}
-                onPickAdminMessageDay={(day) => {
-                  const next = { ...adminMessageFilters, day };
-                  setAdminMessageFilters(next);
                   void reloadAdminMessages(next);
                 }}
                 onToggleSelectAll={(checked) => setSelectedAdminMessageIds(
@@ -11930,18 +12038,19 @@ export default function App() {
                 monitoringSearch={monitoringSearch}
                 monitoringStatusFilter={monitoringStatusFilter}
                 monitoringAuthFilter={monitoringAuthFilter}
-                monitoringSortBy={monitoringSortBy}
+                monitoringDateFilter={monitoringDateFilter}
                 filteredMonitoringSessions={filteredMonitoringSessions}
                 filteredMonitoringHistory={filteredMonitoringHistory}
                 onMonitoringSearchChange={(value) => startTransition(() => setMonitoringSearch(value))}
                 onMonitoringStatusFilterChange={setMonitoringStatusFilter}
                 onMonitoringAuthFilterChange={setMonitoringAuthFilter}
-                onMonitoringSortChange={setMonitoringSortBy}
+                onMonitoringDateFilterChange={setMonitoringDateFilter}
                 onMonitoringReset={() => {
                   setMonitoringSearch('');
                   setMonitoringStatusFilter('all');
                   setMonitoringAuthFilter('all');
                   setMonitoringSortBy('last_activity_desc');
+                  setMonitoringDateFilter('');
                 }}
                 onMonitoringRefresh={() => void loadMonitoringOverview({ preferCache: false })}
                 onLogoutAllUsers={() => void handleLogoutAllUsers()}
@@ -12678,6 +12787,7 @@ export default function App() {
                 uploadingReport={uploadingReport}
                 ScopeBreadcrumb={ScopeBreadcrumb}
                 formatYearLevel={formatYearLevel}
+                formatUploadDateTime={formatUtcSqlDateTime}
                 getDefaultBatchNameForYearLevel={getDefaultBatchNameForYearLevel}
                 readSummaryMetric={readSummaryMetric}
                 onBackFromTestDetail={() => setTestDetail(null)}

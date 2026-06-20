@@ -138,6 +138,7 @@ import {
   unlockCounselorsForDepartment,
   updateNotificationStatesForUser,
   updateUserPreferences,
+  updateSessionHeartbeat,
   updateAppConfig,
   updateAppConfigBulk,
   updateTestBlockStatus,
@@ -1685,6 +1686,7 @@ type PreservedSessionRow = {
   user_email: string;
   login_time: string;
   last_activity: string;
+  last_user_activity?: string | null;
   ip_address: string;
   user_agent: string;
   browser_info: string;
@@ -1743,7 +1745,7 @@ function enforceDefaultAdminDisablePolicy() {
 function capturePrivilegedSessions() {
   return db.prepare(
     `
-      SELECT s.session_id, s.user_email, s.login_time, s.last_activity, s.ip_address, s.user_agent,
+      SELECT s.session_id, s.user_email, s.login_time, s.last_activity, s.last_user_activity, s.ip_address, s.user_agent,
              s.browser_info, s.tab_id, s.is_active, s.forced_logout, s.logout_reason
       FROM active_sessions s
       INNER JOIN users u ON u.email = s.user_email
@@ -1757,8 +1759,8 @@ function restorePrivilegedSessions(rows: PreservedSessionRow[]) {
   if (!rows.length) return;
   const insertSession = db.prepare(`
     INSERT OR REPLACE INTO active_sessions (
-      session_id, user_email, login_time, last_activity, ip_address, user_agent, browser_info, tab_id, is_active, forced_logout, logout_reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      session_id, user_email, login_time, last_activity, last_user_activity, ip_address, user_agent, browser_info, tab_id, is_active, forced_logout, logout_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const updateUserSession = db.prepare(`
     UPDATE users
@@ -1780,6 +1782,7 @@ function restorePrivilegedSessions(rows: PreservedSessionRow[]) {
         item.user_email,
         item.login_time,
         item.last_activity,
+        item.last_user_activity || item.last_activity,
         item.ip_address || '',
         item.user_agent || '',
         item.browser_info || '',
@@ -2640,14 +2643,6 @@ function doClassSectionsMatchDepartment(classSections: string[], department: str
 function parseTimestampMs(value: unknown) {
   const timestamp = Date.parse(String(value || ''));
   return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function isSameLocalDate(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear()
-    && left.getMonth() === right.getMonth()
-    && left.getDate() === right.getDate()
-  );
 }
 
 function resolveCdpLecturePlanClassLabelForSubject(
@@ -4076,9 +4071,6 @@ function isCdpSnapshotFresh(
   if (!parsedAtMs || !snapshotUpdatedAtMs) return false;
   const subjectUpdatedAtMs = parseTimestampMs(subject.updated_at || subject.created_at);
   if (subjectUpdatedAtMs && snapshotUpdatedAtMs < subjectUpdatedAtMs) return false;
-  const now = new Date();
-  const parsedDate = new Date(parsedAtMs);
-  if (!isSameLocalDate(parsedDate, now)) return false;
   return true;
 }
 
@@ -8522,11 +8514,14 @@ app.get('/api/monitoring/overview', (c) => {
   if (!isSystemAdmin(authUser.role)) return c.json({ error: 'Forbidden' }, 403);
   const rawHistoryLimit = Number(c.req.query('historyLimit') || 75);
   const historyLimit = Number.isFinite(rawHistoryLimit) ? Math.min(150, Math.max(25, Math.round(rawHistoryLimit))) : 75;
+  const date = String(c.req.query('date') || '').trim();
+  const sessionDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : '';
   const expiredSessions = expireStaleActiveSessions();
   return c.json({
-    sessions: getActiveSessions(),
+    filters: { date: sessionDate },
+    sessions: getActiveSessions({ date: sessionDate }),
     stats: getSessionStatistics(),
-    history: getSessionHistory(historyLimit),
+    history: getSessionHistory(historyLimit, null, { date: sessionDate }),
     sessionLog: {
       ok: true,
       message: expiredSessions
@@ -8566,9 +8561,16 @@ app.post('/api/monitoring/cleanup', (c) => {
   return c.json({ success: true });
 });
 
-app.post('/api/session/heartbeat', (c) => {
+app.post('/api/session/heartbeat', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
+  const body = (await c.req.json<{ userActive?: boolean; user_active?: boolean }>().catch(() => ({}))) as {
+    userActive?: boolean;
+    user_active?: boolean;
+  };
+  updateSessionHeartbeat(getCookie(c, SESSION_COOKIE) || '', {
+    userActive: Boolean(body.userActive || body.user_active),
+  });
   return c.json({ success: true, now: new Date().toISOString() });
 });
 
@@ -8991,23 +8993,25 @@ app.post('/api/config/import', async (c) => {
 app.get('/api/notifications/state', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
-  return c.json({ success: true, ...getNotificationStatesForUser(authUser.email) });
+  return c.json({ success: true, ...getNotificationStatesForUser(authUser.login_email || authUser.email) });
 });
 
 app.post('/api/notifications/read', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
   const body = (await c.req.json<{ keys?: unknown[] }>().catch(() => ({}))) as { keys?: unknown[] };
-  updateNotificationStatesForUser(authUser.email, Array.isArray(body.keys) ? body.keys : [], 'read');
-  return c.json({ success: true, ...getNotificationStatesForUser(authUser.email) });
+  const notificationEmail = authUser.login_email || authUser.email;
+  updateNotificationStatesForUser(notificationEmail, Array.isArray(body.keys) ? body.keys : [], 'read');
+  return c.json({ success: true, ...getNotificationStatesForUser(notificationEmail) });
 });
 
 app.post('/api/notifications/delete', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser) return c.json({ error: 'Unauthorized' }, 401);
   const body = (await c.req.json<{ keys?: unknown[] }>().catch(() => ({}))) as { keys?: unknown[] };
-  updateNotificationStatesForUser(authUser.email, Array.isArray(body.keys) ? body.keys : [], 'deleted');
-  return c.json({ success: true, ...getNotificationStatesForUser(authUser.email) });
+  const notificationEmail = authUser.login_email || authUser.email;
+  updateNotificationStatesForUser(notificationEmail, Array.isArray(body.keys) ? body.keys : [], 'deleted');
+  return c.json({ success: true, ...getNotificationStatesForUser(notificationEmail) });
 });
 
 app.get('/api/user/preferences', async (c) => {
